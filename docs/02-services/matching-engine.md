@@ -14,34 +14,36 @@ updated: 2026-07-17
 
 ## Состояние
 
-- `book: OrderBook` — стакан.
-- `seq: u64` — монотонный счётчик приоритета по времени (номер прихода заявки).
-- `next_trade_id: u64` — монотонный счётчик id сделок.
+- `instruments: InstrumentRegistry` — реестр инструментов ([[instrument-registry]]).
+- `books: HashMap<InstrumentId, OrderBook>` — по одной книге на инструмент (ADR-005).
+- `seq: u64` — глобальный монотонный счётчик приоритета по времени (номер прихода заявки).
+- `next_trade_id: u64` — глобальный монотонный счётчик id сделок.
 
-Оба счётчика — из состояния движка, а не из часов → replay детерминирован ([[ADR-003-event-sourcing-and-determinism]]).
+Счётчики — из состояния движка, а не из часов → replay детерминирован ([[ADR-003-event-sourcing-and-determinism]]).
 
 ## Публичный API
 
 - `MatchingEngine::new()`
-- `apply(Command) -> Vec<Event>` ⭐ — применить команду.
-- `book() -> &OrderBook` — только чтение (снапшоты/тесты/будущие проекции).
+- `register_instrument(Instrument)` — зарегистрировать инструмент и создать его пустую книгу (до торгов).
+- `apply(Command) -> Vec<Event>` ⭐ — применить команду (маршрутизируется по `instrument`).
+- `book(InstrumentId) -> Option<&OrderBook>` — только чтение (снапшоты/тесты/будущие проекции).
 
 ## Команды
 
-Модуль `core/src/command.rs`:
-- `Command::PlaceOrder { id, side, order_type, qty, tif }`
-- `Command::CancelOrder { id }`
+Модуль `core/src/command.rs` (каждая команда несёт `instrument`):
+- `Command::PlaceOrder { instrument, id, side, order_type, qty, tif }`
+- `Command::CancelOrder { instrument, id }`
 
 ## События
 
-Модуль `core/src/event.rs` (это будущий журнал-истина):
-- `OrderAccepted { id }`
-- `Trade { id, price, qty, taker, maker, taker_side }` — цена = цена maker'а
-- `OrderResting { id, price, qty }`
-- `OrderFilled { id }`
-- `OrderCanceledRemainder { id, qty }` — IOC/рыночная без ликвидности
-- `OrderCanceled { id }`
-- `OrderRejected { id, reason }` — `reason ∈ { NonPositiveQty, UnknownOrder }`
+Модуль `core/src/event.rs` (будущий журнал-истина; каждое событие несёт `instrument`):
+- `OrderAccepted { instrument, id }`
+- `Trade { instrument, id, price, qty, taker, maker, taker_side }` — цена = цена maker'а
+- `OrderResting { instrument, id, price, qty }`
+- `OrderFilled { instrument, id }`
+- `OrderCanceledRemainder { instrument, id, qty }` — IOC/рыночная без ликвидности
+- `OrderCanceled { instrument, id }`
+- `OrderRejected { instrument, id, reason }` — причины валидации см. [[instrument-registry]]
 
 ## Дисциплина событий при размещении заявки
 
@@ -64,13 +66,15 @@ updated: 2026-07-17
 
 ## Тесты
 
-`core/tests/matching.rs` — 15 тестов: постановка, полное/частичное исполнение, приоритет
-цена→время, лимит без скрещивания, рыночные, IOC, отмена, валидация, детерминизм.
+`core/tests/matching.rs` — 22 теста: постановка, полное/частичное исполнение, приоритет
+цена→время, лимит без скрещивания, рыночные, IOC, отмена, валидация (инструмент/tick/lot/min),
+мульти-инструментная изоляция, детерминизм и **фаззинг инвариантов** (5000 операций, фикс. сид).
 
 Запуск: `bash scripts/test.sh` (через Docker, [[ADR-004-docker-rust-toolchain]]).
+Линт: `cargo clippy ... -- -D warnings` (чисто).
 
 ## Ограничения / TODO (Фаза 2+)
 
 - Нет проверки баланса/холдов — появится с [[services-index|Ledger]].
-- Нет реестра инструментов (tick/lot/decimals), одна абстрактная книга.
 - Типы заявок: пока Limit/Market + GTC/IOC. Дальше: FOK, post-only, stop и т.д. — [[backlog]].
+- Нет снапшота стакана (глубина/уровни) для market data.

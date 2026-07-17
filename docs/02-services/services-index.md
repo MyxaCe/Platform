@@ -12,6 +12,7 @@ updated: 2026-07-17
 |---|---|---|---|
 | Matching Engine | [[matching-engine]] | ✅ active | 1 |
 | Order Book | [[order-book]] | ✅ active | 1 |
+| Instrument Registry | [[instrument-registry]] | ✅ active | 1 |
 | Domain Types (money/order) | [[domain-types]] | ✅ active | 1 |
 | Ledger / Accounts | _(появится)_ | ⏳ не начат | 2 |
 | Auth / Users | _(появится)_ | ⏳ не начат | 2 |
@@ -25,12 +26,13 @@ core/
 ├── src/
 │   ├── lib.rs              — фасад крейта (re-export публичного API)
 │   ├── domain/
-│   │   ├── money.rs        — Price, Qty, notional        → [[domain-types]]
-│   │   └── order.rs        — Side, OrderId, OrderType, TimeInForce
+│   │   ├── money.rs        — Price, Qty, notional            → [[domain-types]]
+│   │   ├── order.rs        — Side, OrderId, OrderType, TimeInForce
+│   │   └── instrument.rs   — Instrument, InstrumentRegistry  → [[instrument-registry]]
 │   ├── command.rs          — Command (вход ядра)
 │   ├── event.rs            — Event, TradeId, RejectReason (выход ядра)
-│   ├── book.rs             — OrderBook, RestingOrder, Fill → [[order-book]]
-│   └── engine.rs           — MatchingEngine.apply()        → [[matching-engine]]
+│   ├── book.rs             — OrderBook, RestingOrder, Fill   → [[order-book]]
+│   └── engine.rs           — MatchingEngine.apply()          → [[matching-engine]]
 └── tests/
-    └── matching.rs         — 15 интеграционных тестов
+    └── matching.rs         — 22 интеграционных теста (+ фаззинг инвариантов)
 ```

@@ -37,6 +37,7 @@ updated: 2026-07-17
 
 - Использует [[domain-types]] (`Price`, `Qty`, `Side`, `OrderId`).
 - Вызывается из [[matching-engine]] (движок превращает `Fill` в события `Trade`).
+- Одна книга = один инструмент; движок хранит `HashMap<InstrumentId, OrderBook>` ([[instrument-registry]], ADR-005).
 
 ## Инварианты
 

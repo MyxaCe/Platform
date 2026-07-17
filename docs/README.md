@@ -26,6 +26,7 @@ updated: 2026-07-17
   - [[ADR-002-money-representation]] — представление денег · `accepted`
   - [[ADR-003-event-sourcing-and-determinism]] — событийность и детерминизм · `accepted`
   - [[ADR-004-docker-rust-toolchain]] — тулчейн Rust через Docker · `accepted`
+  - [[ADR-005-instrument-model]] — модель инструмента и мульти-инструментный матчинг · `accepted`
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc
@@ -38,9 +39,9 @@ updated: 2026-07-17
 
 | | |
 |---|---|
-| Фаза | **1 — ядро** (matching engine + order book) ✅ базовый срез готов, 15 тестов зелёные |
+| Фаза | **1 — ядро** ✅ matching engine + order book + инструменты; 22 теста + clippy зелёные |
 | Стек | Rust (crate `core/`), тулчейн через Docker |
-| Следующий шаг | расширить ядро (снапшот стакана, больше типов заявок) → Фаза 2 (Ledger + Auth) |
+| Следующий шаг | снапшот стакана / больше типов заявок → Фаза 2 (Ledger + Auth) |
 | Дата | 2026-07-17 |
 
 ## 🗺️ Дорожная карта (фазы)
