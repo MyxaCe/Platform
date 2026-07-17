@@ -68,7 +68,7 @@ const OVERLAYS = {
   sma: (cs) => [{ color: '#4fc3f7', values: sma(cs.map((c) => c.close), 20) }],
   ema: (cs) => [{ color: '#ba68c8', values: ema(cs.map((c) => c.close), 20) }],
   wma: (cs) => [{ color: '#ffb74d', values: wma(cs.map((c) => c.close), 20) }],
-  supertrend, psar, ichimoku, alligator, boll: bollinger, keltner, donchian, vwap,
+  supertrend: superTrend, psar, ichimoku, alligator, boll: bollinger, keltner, donchian, vwap,
 };
 const OSC = {
   rsi: (cs) => [{ color: '#f0b90b', values: rsi(cs.map((c) => c.close), 14) }],
