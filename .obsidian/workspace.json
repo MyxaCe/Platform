@@ -20,8 +20,19 @@
               "icon": "lucide-file",
               "title": "matching-engine"
             }
+          },
+          {
+            "id": "6241147a75a872e0",
+            "type": "leaf",
+            "state": {
+              "type": "graph",
+              "state": {},
+              "icon": "lucide-git-fork",
+              "title": "Граф"
+            }
           }
-        ]
+        ],
+        "currentTab": 1
       }
     ],
     "direction": "vertical"
@@ -94,7 +105,6 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "docs/02-services/matching-engine.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +114,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Обратные ссылки для matching-engine"
+              "title": "Обратные ссылки"
             }
           },
           {
@@ -113,12 +123,11 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "docs/02-services/matching-engine.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Исходящие ссылки из matching-engine"
+              "title": "Исходящие ссылки"
             }
           },
           {
@@ -156,13 +165,12 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "docs/02-services/matching-engine.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Структура matching-engine"
+              "title": "Структура"
             }
           }
         ]
@@ -183,6 +191,13 @@
       "bases:Создать новую базу": false
     }
   },
-  "active": "8f247fc1ed5b6037",
-  "lastOpenFiles": []
+  "active": "6241147a75a872e0",
+  "lastOpenFiles": [
+    "web/public/app.js.tmp.38752.99d2a3d6a507",
+    "web/public/style.css.tmp.38752.2865cb88f8eb",
+    "docs/04-bugs/bug-log.md",
+    "web/public/style.css.tmp.38752.2d73b91805ef",
+    "web/public/index.html.tmp.38752.946aadf9b94f",
+    "docs/02-services/matching-engine.md"
+  ]
 }

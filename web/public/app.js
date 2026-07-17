@@ -16,6 +16,38 @@ const qscale = (id) => 10 ** qdec(id);
 const fmtP = (id, raw) => (raw / pscale(id)).toLocaleString('en-US', { minimumFractionDigits: pdec(id), maximumFractionDigits: pdec(id) });
 const fmtQ = (id, raw) => (raw / qscale(id)).toFixed(qdec(id));
 const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+let showSLTP = true;
+const favs = new Set(JSON.parse(localStorage.getItem('favs') || '[]'));
+const TFN = { 60: '1m', 300: '5m', 900: '15m', 1800: '30m', 3600: '1h', 14400: '4h', 86400: '1d', 604800: '1w' };
+
+// ---- Иконки (встроенные SVG, currentColor) --------------------------------
+const ICONS = {
+  candles: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M5 2v3M5 11v3M11 3v3M11 10v3"/><rect x="3.3" y="5" width="3.4" height="6" fill="currentColor" stroke="none"/><rect x="9.3" y="6" width="3.4" height="4" fill="currentColor" stroke="none"/></svg>',
+  hollow: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M5 2v3M5 11v3M11 3v3M11 10v3"/><rect x="3.3" y="5" width="3.4" height="6"/><rect x="9.3" y="6" width="3.4" height="4"/></svg>',
+  bars: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M5 2v12M2.5 5H5M5 9h2.5M11 3v10M8.5 6H11M11 10h2.5"/></svg>',
+  line: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="2 12 6 7 9 10 14 3"/></svg>',
+  area: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 12 6 7 9 10 14 3V14H2Z" fill="currentColor" fill-opacity=".3" stroke="none"/><polyline points="2 12 6 7 9 10 14 3" stroke-width="1.5"/></svg>',
+  indicators: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 10c2-4 4-4 6 0s4 4 6-1"/><path d="M2 6c2-3 4 3 6-1s4-2 6 1" opacity=".5"/></svg>',
+  wallet: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2" y="4" width="11.5" height="8.5" rx="1.6"/><path d="M9.6 7.6H13v2.4H9.6a1.2 1.2 0 0 1 0-2.4Z" fill="currentColor" stroke="none"/></svg>',
+  star: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 2l1.8 3.9 4.2.4-3.2 2.9.9 4.1L8 11.3 4.3 13.2l.9-4.1L2 6.3l4.2-.4z" stroke-linejoin="round"/></svg>',
+  caret: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6l4 4 4-4"/></svg>',
+};
+function renderIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { const n = el.dataset.icon; if (ICONS[n]) el.innerHTML = ICONS[n]; }); }
+
+// ---- Легенда (инфо-окно на графике) ---------------------------------------
+function fmtDT(t) { return new Date(t * 1000).toLocaleString('ru-RU', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+function updateLegend(id, t, c) {
+  const rf = (x) => x.toLocaleString('en-US', { minimumFractionDigits: pdec(id), maximumFractionDigits: pdec(id) });
+  document.getElementById('lgSym').textContent = META[id]?.symbol || '';
+  document.getElementById('lgTf').textContent = TFN[tf] || '';
+  document.getElementById('lgTime').textContent = fmtDT(t);
+  document.getElementById('lgOhlc').innerHTML = `O <b>${rf(c.open)}</b>  H <b>${rf(c.high)}</b>  L <b>${rf(c.low)}</b>  C <b class="${c.close >= c.open ? 'up' : 'down'}">${rf(c.close)}</b>`;
+}
+function refreshLegend() { if (selected == null) return; let c; if (formingRaw) { const s = pscale(selected); c = { time: formingRaw.time, open: formingRaw.open / s, high: formingRaw.high / s, low: formingRaw.low / s, close: formingRaw.close / s }; } else if (rawCandles.length) c = rawCandles[rawCandles.length - 1]; if (c) updateLegend(selected, c.time, c); }
+
+// ---- Избранное ------------------------------------------------------------
+function toggleFav(id) { if (favs.has(id)) favs.delete(id); else favs.add(id); localStorage.setItem('favs', JSON.stringify([...favs])); const el = rowEls[id]; if (el) el.querySelector('.star')?.classList.toggle('on', favs.has(id)); reorderRows(); }
+function reorderRows() { const cont = document.getElementById('instruments'); Object.keys(rowEls).map(Number).sort((a, b) => (favs.has(b) - favs.has(a)) || a - b).forEach((id) => cont.appendChild(rowEls[id])); }
 
 // ============================ Индикаторы (математика) ======================
 const HL2 = (c) => (c.high + c.low) / 2;
@@ -143,6 +175,7 @@ function applyIndicators() {
 function redrawPriceLines() {
   if (!mainSeries) return;
   priceLines.forEach((l) => mainSeries.removePriceLine(l)); priceLines = [];
+  if (!showSLTP) return;
   const s = pscale(selected);
   for (const d of currentDeals) {
     priceLines.push(mainSeries.createPriceLine({ price: d.entry / s, color: '#8899aa', lineStyle: 2, lineWidth: 1, title: `${d.side === 'buy' ? 'L' : 'S'}` }));
@@ -152,7 +185,7 @@ function redrawPriceLines() {
 }
 
 new ResizeObserver(() => chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight })).observe(chartEl);
-chart.subscribeCrosshairMove((p) => { const d = p.seriesData?.get(mainSeries); const id = selected; if (!d || id == null) return; const g = (x) => (x != null ? fmtP(id, x * pscale(id)) : '—'); document.getElementById('ohlc').innerHTML = d.close != null ? `O <b>${g(d.open)}</b> H <b>${g(d.high)}</b> L <b>${g(d.low)}</b> C <b>${g(d.close)}</b>` : `<b>${g(d.value)}</b>`; });
+chart.subscribeCrosshairMove((p) => { const id = selected; if (id == null) return; const d = p.seriesData?.get(mainSeries); if (p.time && d) { const c = d.close != null ? d : { open: d.value, high: d.value, low: d.value, close: d.value }; updateLegend(id, p.time, c); } else refreshLegend(); });
 
 async function loadCandles(id, timeframe) {
   const r = await fetch(`/candles/${id}?tf=${timeframe}&limit=300`);
@@ -164,8 +197,9 @@ async function loadCandles(id, timeframe) {
   volume.setData(rawCandles.map((c) => ({ time: c.time, value: c.volume, color: volColor(c) })));
   applyIndicators(); redrawPriceLines(); computeSignals();
   if (rawCandles.length) { const last = raw[raw.length - 1]; lastBarTime = last.time; formingRaw = { ...last }; const n = rawCandles.length; chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 }); } else { lastBarTime = 0; formingRaw = null; }
+  refreshLegend();
 }
-function drawForming() { if (!formingRaw || !mainSeries || chartType === 'heikin') return; const s = pscale(selected); mainSeries.update(isLineType() ? { time: formingRaw.time, value: formingRaw.close / s } : { time: formingRaw.time, open: formingRaw.open / s, high: formingRaw.high / s, low: formingRaw.low / s, close: formingRaw.close / s }); }
+function drawForming() { if (!formingRaw || !mainSeries || chartType === 'heikin') return; const s = pscale(selected); mainSeries.update(isLineType() ? { time: formingRaw.time, value: formingRaw.close / s } : { time: formingRaw.time, open: formingRaw.open / s, high: formingRaw.high / s, low: formingRaw.low / s, close: formingRaw.close / s }); refreshLegend(); }
 function onLiveTrade(id, price, qty) { if (id !== selected) return; const now = Math.floor(Date.now() / 1000); const b = now - (now % tf); if (!formingRaw || b > formingRaw.time) formingRaw = { time: b, open: price, high: price, low: price, close: price, volume: qty }; else { formingRaw.high = Math.max(formingRaw.high, price); formingRaw.low = Math.min(formingRaw.low, price); formingRaw.close = price; } if (formingRaw.time >= lastBarTime) { lastBarTime = formingRaw.time; drawForming(); } }
 async function syncLast() { const id = selected; if (id == null) return; const r = await fetch(`/candles/${id}?tf=${tf}&limit=2`); const raw = await r.json().catch(() => []); if (!raw.length) return; const last = raw[raw.length - 1]; if (last.time >= lastBarTime) { lastBarTime = last.time; formingRaw = { ...last }; drawForming(); } }
 
@@ -174,13 +208,20 @@ async function refreshInstruments() {
   const r = await fetch('/instruments'); const list = await r.json().catch(() => []);
   const cont = document.getElementById('instruments');
   for (const it of list) {
-    META[it.id] = it; let el = rowEls[it.id];
-    if (!el) { el = document.createElement('div'); el.className = 'irow'; el.addEventListener('click', () => selectInstrument(it.id)); cont.appendChild(el); rowEls[it.id] = el; if (selected === null) selectInstrument(it.id); }
+    META[it.id] = it; let el = rowEls[it.id]; const isNew = !el;
+    if (isNew) { el = document.createElement('div'); el.className = 'irow'; el.dataset.id = it.id; cont.appendChild(el); rowEls[it.id] = el; }
     const up = it.change >= 0; const [b, q] = it.symbol.split('-');
-    el.innerHTML = `<div class="sym">${b}<small>/${q || 'USDT'}</small></div><div class="chg ta-r ${up ? 'up' : 'down'}">${up ? '+' : ''}${it.change.toFixed(2)}%</div><div class="sell ta-r">${it.bid != null ? fmtP(it.id, it.bid) : '—'}</div><div class="buy ta-r">${it.ask != null ? fmtP(it.id, it.ask) : '—'}</div><div class="ta-r muted">${it.bid != null && it.ask != null ? it.ask - it.bid : '—'}</div>`;
+    el.innerHTML = `<span class="star ${favs.has(it.id) ? 'on' : ''}" data-icon="star"></span>` +
+      `<div class="sym">${b}<small>/${q || 'USDT'}</small></div>` +
+      `<div class="chg ta-r ${up ? 'up' : 'down'}">${up ? '+' : ''}${it.change.toFixed(2)}%</div>` +
+      `<div class="sell ta-r">${it.bid != null ? fmtP(it.id, it.bid) : '—'}</div>` +
+      `<div class="buy ta-r">${it.ask != null ? fmtP(it.id, it.ask) : '—'}</div>` +
+      `<div class="ta-r muted">${it.bid != null && it.ask != null ? it.ask - it.bid : '—'}</div>` +
+      `<div class="high">${it.high != null ? fmtP(it.id, it.high) : '—'}</div>`;
     el.classList.toggle('active', it.id === selected);
+    if (isNew && selected === null) selectInstrument(it.id);
   }
-  updateDealPanel();
+  renderIcons(cont); reorderRows(); updateDealPanel();
 }
 function refPrice(it) { if (!it || it.bid == null || it.ask == null) return it?.last; if (priceType === 'ask') return it.ask; if (priceType === 'bid') return it.bid; return Math.round((it.bid + it.ask) / 2); }
 function updateDealPanel() {
@@ -205,15 +246,16 @@ function toggleDD(id) { const m = document.getElementById(id); const wasHidden =
 document.addEventListener('click', (e) => { if (!e.target.closest('.tb-dd')) closeDD(); });
 
 document.getElementById('ctBtn').addEventListener('click', () => toggleDD('ctMenu'));
-document.getElementById('ctMenu').addEventListener('click', (e) => { const it = e.target.closest('[data-ct]'); if (!it) return; chartType = it.dataset.ct; document.querySelectorAll('#ctMenu .dd-item').forEach((x) => x.classList.toggle('active', x === it)); document.getElementById('ctBtn').firstChild.textContent = it.textContent + ' '; closeDD(); makeMainSeries(); mainSeries.setData(mainData()); applyIndicators(); redrawPriceLines(); });
+document.getElementById('ctMenu').addEventListener('click', (e) => { const it = e.target.closest('[data-ct]'); if (!it) return; chartType = it.dataset.ct; document.querySelectorAll('#ctMenu .dd-item').forEach((x) => x.classList.toggle('active', x === it)); const icName = it.querySelector('[data-icon]')?.dataset.icon || 'candles'; const btnIc = document.querySelector('#ctBtn .ic'); if (btnIc) { btnIc.dataset.icon = icName; btnIc.innerHTML = ICONS[icName]; } document.getElementById('ctLabel').textContent = it.textContent.trim(); closeDD(); makeMainSeries(); mainSeries.setData(mainData()); applyIndicators(); redrawPriceLines(); });
 
 document.getElementById('indBtn').addEventListener('click', () => toggleDD('indMenu'));
 document.querySelectorAll('#indMenu input[data-ov]').forEach((c) => c.addEventListener('change', (e) => { overlays[e.target.dataset.ov] = e.target.checked ? 1 : 0; applyIndicators(); }));
 document.getElementById('oscSel').addEventListener('change', (e) => { oscillator = e.target.value; applyIndicators(); });
 
 document.getElementById('ptBtn').addEventListener('click', () => toggleDD('ptMenu'));
-document.getElementById('ptMenu').addEventListener('click', (e) => { const it = e.target.closest('[data-pt]'); if (!it) return; priceType = it.dataset.pt; document.querySelectorAll('#ptMenu .dd-item').forEach((x) => x.classList.toggle('active', x === it)); document.getElementById('ptBtn').firstChild.textContent = it.textContent + ' '; closeDD(); updateDealPanel(); });
+document.getElementById('ptMenu').addEventListener('click', (e) => { const it = e.target.closest('[data-pt]'); if (!it) return; priceType = it.dataset.pt; document.querySelectorAll('#ptMenu .dd-item').forEach((x) => x.classList.toggle('active', x === it)); document.getElementById('ptLabel').textContent = it.textContent.trim().toUpperCase(); closeDD(); updateDealPanel(); });
 
+document.getElementById('sltpBtn').addEventListener('click', () => { showSLTP = !showSLTP; document.getElementById('sltpBtn').classList.toggle('on', showSLTP); redrawPriceLines(); });
 document.getElementById('pipsBtn').addEventListener('click', () => { showPips = !showPips; document.getElementById('pipsBtn').classList.toggle('on', showPips); updateDealPanel(); pollDeals(); });
 
 // ============================ Лента + WS ===================================
@@ -262,8 +304,10 @@ function computeSignals() { const cont = document.getElementById('signals'); con
 function switchBottom(w) { ['trades', 'deals', 'pending', 'closed', 'signals'].forEach((n) => { document.getElementById(`tab-${n}`).classList.toggle('active', n === w); document.getElementById(`pane-${n}`).classList.toggle('hidden', n !== w); }); }
 document.querySelectorAll('.bottom__tabs span').forEach((t) => t.addEventListener('click', () => switchBottom(t.dataset.pane)));
 document.getElementById('search').addEventListener('input', (e) => { const q = e.target.value.toLowerCase(); Object.entries(rowEls).forEach(([id, el]) => { el.style.display = (META[id]?.symbol || '').toLowerCase().includes(q) ? '' : 'none'; }); });
+document.getElementById('instruments').addEventListener('click', (e) => { const row = e.target.closest('.irow'); if (!row) return; const id = +row.dataset.id; if (e.target.closest('.star')) { toggleFav(id); return; } selectInstrument(id); });
 
 // ============================ Старт ========================================
+renderIcons();
 refreshInstruments();
 setInterval(refreshInstruments, 1000);
 setInterval(syncLast, 2000);

@@ -51,7 +51,13 @@ docker compose up --build   # gateway (внутренний) + web (nginx)
   - *Осциллятор (один, подвал):* RSI, Stochastic, CCI, Momentum, Williams %R, ROC, ADX/+DI/−DI, MACD,
     ATR, StdDev, OBV, A/D, CMF, MFI, Force Index, Awesome, Accelerator, Gator.
 - **SIGNALS** — наши простые сигналы (RSI, MA-крест), **не Autochartist** (проприетарный, недоступен) — в отладке.
-- UI-полировка: кастомные скроллбары, кнопки-выпадашки вместо `select`, PIPS-кнопка.
+- UI-полировка: кастомные скроллбары, кнопки-выпадашки вместо `select`.
+- **Иконки** — встроенный набор SVG (`ICONS` в app.js, без внешнего CDN): тип графика (иконка меняется
+  под выбор: Candles/Hollow/Bars/Line/Area), Indicators (двойная кривая), PIPS (кошелёк), звёздочки-избранное.
+- **Тулбар:** тип графика (иконка+название), Indicators (иконка), price type (текст MID/ASK/BID),
+  **SL/TP** (текст-тумблер: показать/скрыть линии, акцент когда вкл), **PIPS** (кошелёк-тумблер).
+- **Инфо-окно на графике** (legend): символ, ТФ, дата/время, O/H/L/C (обновляется по курсору и вживую).
+- **Список монет:** звёздочка-**избранное** (в localStorage, избранные наверх) + колонки CHANGE/SELL/BUY/SPREAD/**HIGH**.
 
 ## Ограничения / TODO
 

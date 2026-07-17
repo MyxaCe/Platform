@@ -30,8 +30,8 @@
       <div class="watch__search"><input id="search" placeholder="Search…" /></div>
       <div class="watch__title">⭐ POPULAR</div>
       <div class="watch__head">
-        <span>INSTR.</span><span class="ta-r">CHANGE</span><span class="ta-r">SELL</span>
-        <span class="ta-r">BUY</span><span class="ta-r">SPREAD</span>
+        <span></span><span>INSTR.</span><span class="ta-r">CHANGE</span><span class="ta-r">SELL</span>
+        <span class="ta-r">BUY</span><span class="ta-r">SPREAD</span><span class="ta-r">HIGH</span>
       </div>
       <div id="instruments" class="watch__rows"></div>
     </aside>
@@ -46,18 +46,18 @@
         </div>
         <span class="tb-sep"></span>
         <div class="tb-dd">
-          <button id="ctBtn" class="tbbtn">Candles <span class="caret">▾</span></button>
+          <button id="ctBtn" class="tbbtn"><span class="ic" data-icon="candles"></span><span id="ctLabel">Candles</span><span class="caret" data-icon="caret"></span></button>
           <div id="ctMenu" class="dd hidden">
-            <div class="dd-item active" data-ct="candles">Candles</div>
-            <div class="dd-item" data-ct="hollow">Hollow Candles</div>
-            <div class="dd-item" data-ct="bars">Bars</div>
-            <div class="dd-item" data-ct="line">Line</div>
-            <div class="dd-item" data-ct="area">Area</div>
-            <div class="dd-item" data-ct="heikin">Heikin Ashi</div>
+            <div class="dd-item active" data-ct="candles"><span class="ic" data-icon="candles"></span> Candles</div>
+            <div class="dd-item" data-ct="hollow"><span class="ic" data-icon="hollow"></span> Hollow Candles</div>
+            <div class="dd-item" data-ct="bars"><span class="ic" data-icon="bars"></span> Bars</div>
+            <div class="dd-item" data-ct="line"><span class="ic" data-icon="line"></span> Line</div>
+            <div class="dd-item" data-ct="area"><span class="ic" data-icon="area"></span> Area</div>
+            <div class="dd-item" data-ct="heikin"><span class="ic" data-icon="candles"></span> Heikin Ashi</div>
           </div>
         </div>
         <div class="tb-dd">
-          <button id="indBtn" class="tbbtn">Indicators <span class="caret">▾</span></button>
+          <button id="indBtn" class="tbbtn iconbtn" title="Indicators"><span class="ic" data-icon="indicators"></span></button>
           <div id="indMenu" class="dd dd--wide hidden">
             <div class="dd-cat">Тренд</div>
             <label><input type="checkbox" data-ov="sma"> Moving Average (SMA 20)</label>
@@ -100,18 +100,23 @@
           </div>
         </div>
         <div class="tb-dd">
-          <button id="ptBtn" class="tbbtn">Mid <span class="caret">▾</span></button>
+          <button id="ptBtn" class="tbbtn tbtext"><span id="ptLabel">MID</span><span class="caret" data-icon="caret"></span></button>
           <div id="ptMenu" class="dd hidden">
             <div class="dd-item active" data-pt="mid">Mid</div>
             <div class="dd-item" data-pt="ask">Ask</div>
             <div class="dd-item" data-pt="bid">Bid</div>
           </div>
         </div>
-        <button id="pipsBtn" class="tbbtn">PIPS</button>
+        <button id="sltpBtn" class="tbbtn tbtext on" title="Показать линии SL/TP">SL/TP</button>
+        <button id="pipsBtn" class="tbbtn iconbtn" title="Display PIPS"><span class="ic" data-icon="wallet"></span></button>
       </div>
 
       <div class="chartwrap">
-        <div id="ohlc" class="ohlc"></div>
+        <div id="legend" class="legend">
+          <div class="legend__top"><span id="lgSym">—</span><span id="lgTf" class="muted"></span></div>
+          <div id="lgTime" class="legend__time muted">—</div>
+          <div id="lgOhlc" class="legend__ohlc">—</div>
+        </div>
         <div id="watermark" class="watermark">—</div>
         <div id="chart" class="chart"></div>
       </div>
