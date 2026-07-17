@@ -1,6 +1,6 @@
 //! Заявка (order) и её атрибуты.
 
-use crate::domain::money::Price;
+use crate::money::Price;
 
 /// Сторона заявки.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

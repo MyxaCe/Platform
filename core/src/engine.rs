@@ -14,10 +14,10 @@ use std::collections::HashMap;
 
 use crate::book::{DepthSnapshot, OrderBook, RestingOrder};
 use crate::command::Command;
-use crate::domain::instrument::{Instrument, InstrumentId, InstrumentRegistry};
-use crate::domain::money::{Price, Qty};
-use crate::domain::order::{OrderId, OrderType, Side, TimeInForce};
 use crate::event::{Event, RejectReason, TradeId};
+use domain::instrument::{Instrument, InstrumentId, InstrumentRegistry};
+use domain::money::{Price, Qty};
+use domain::order::{OrderId, OrderType, Side, TimeInForce};
 
 #[derive(Debug, Default)]
 pub struct MatchingEngine {

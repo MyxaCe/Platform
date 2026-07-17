@@ -34,15 +34,23 @@ updated: 2026-07-17
 | **History / Storage** | сделки, свечи, ордера в БД | 3 |
 | **Event Log** (Kafka/NATS) | упорядоченный журнал-истина | 3 |
 
-## Фаза 1 — что строим сейчас
+## Структура крейтов (Rust workspace, ADR-007)
 
-**Modular monolith** на TypeScript. Чистое доменное ядро без I/O:
+```
+domain  — общий словарь (Price, Qty, Amount, Side, Order*, Instrument*, UserId)
+  ├── core   (exchange_core) — matching: order book + engine (Command → Event)
+  └── ledger                 — счета/балансы: available/held, двойная запись
+core и ledger не зависят друг от друга; связывать будет оркестратор (Фаза 2b).
+```
 
-- `domain/` — типы (Order, Price, Qty, Side, …), Order Book, Matching Engine, события.
-- `app/` — оркестрация: приём команд, применение к ядру, публикация событий.
-- `adapters/` — границы (позже: WS/HTTP/БД). В Фазе 1 — минимум для наблюдения работы ядра.
+## Сделано (Фаза 1 + ядро Фазы 2)
 
-Принципы, на которых стоит ядро: [[ADR-002-money-representation]], [[ADR-003-event-sourcing-and-determinism]].
+- **core**: детерминированный matching engine, order book (price-time priority), реестр
+  инструментов с валидацией, снапшот стакана. Вход `MatchingEngine::apply(Command) -> Vec<Event>`.
+- **ledger**: `Ledger` с `reserve/release/settle_fill`, инвариант сходимости по активу.
+
+Принципы, на которых стоит ядро: [[ADR-002-money-representation]],
+[[ADR-003-event-sourcing-and-determinism]], [[ADR-006-ledger-double-entry]].
 
 ## Потоки данных Фазы 1
 

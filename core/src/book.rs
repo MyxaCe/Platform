@@ -12,8 +12,8 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use crate::domain::money::{Price, Qty};
-use crate::domain::order::{OrderId, Side};
+use domain::money::{Price, Qty};
+use domain::order::{OrderId, Side};
 
 /// Заявка, стоящая в стакане (maker).
 #[derive(Debug, Clone, PartialEq, Eq)]

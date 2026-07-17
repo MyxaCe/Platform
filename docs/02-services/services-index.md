@@ -8,33 +8,36 @@ updated: 2026-07-17
 Каждый модуль/сервис получает здесь строку и собственный doc по скелету из
 [[how-to-use-these-docs]]. Это точка входа для поиска неисправного модуля.
 
-| Модуль | Doc | Статус | Фаза |
+| Модуль (крейт) | Doc | Статус | Фаза |
 |---|---|---|---|
-| Matching Engine | [[matching-engine]] | ✅ active | 1 |
-| Order Book | [[order-book]] | ✅ active | 1 |
-| Instrument Registry | [[instrument-registry]] | ✅ active | 1 |
-| Domain Types (money/order) | [[domain-types]] | ✅ active | 1 |
-| Ledger / Accounts | _(появится)_ | ⏳ не начат | 2 |
+| Domain Types (`domain`) | [[domain-types]] | ✅ active | 1 |
+| Matching Engine (`core`) | [[matching-engine]] | ✅ active | 1 |
+| Order Book (`core`) | [[order-book]] | ✅ active | 1 |
+| Instrument Registry (`domain`) | [[instrument-registry]] | ✅ active | 1 |
+| Ledger (`ledger`) | [[ledger]] | ✅ active (ядро) | 2 |
+| Оркестратор res/settle | _(появится)_ | ⏳ Фаза 2b | 2 |
 | Auth / Users | _(появится)_ | ⏳ не начат | 2 |
 | Order Gateway (API) | _(появится)_ | ⏳ не начат | 2 |
 
-## Карта кода (Фаза 1)
+## Карта кода (workspace)
 
 ```
-core/
-├── Cargo.toml
+domain/src/                 — общий словарь (крейт domain, ADR-007)
+├── money.rs                — Price, Qty, Amount, notional      → [[domain-types]]
+├── order.rs                — Side, OrderId, OrderType, TimeInForce
+├── instrument.rs           — Instrument, InstrumentRegistry    → [[instrument-registry]]
+└── account.rs              — UserId
+
+core/                       — matching-ядро (крейт exchange_core)
 ├── src/
-│   ├── lib.rs              — фасад крейта (re-export публичного API)
-│   ├── domain/
-│   │   ├── money.rs        — Price, Qty, notional            → [[domain-types]]
-│   │   ├── order.rs        — Side, OrderId, OrderType, TimeInForce
-│   │   └── instrument.rs   — Instrument, InstrumentRegistry  → [[instrument-registry]]
 │   ├── command.rs          — Command (вход ядра)
 │   ├── event.rs            — Event, TradeId, RejectReason (выход ядра)
-│   ├── book.rs             — OrderBook, Fill, DepthSnapshot   → [[order-book]]
+│   ├── book.rs             — OrderBook, Fill, DepthSnapshot    → [[order-book]]
 │   └── engine.rs           — MatchingEngine.apply()/snapshot() → [[matching-engine]]
-├── tests/
-│   └── matching.rs         — 27 интеграционных тестов (+ фаззинг инвариантов)
-└── examples/
-    └── demo.rs             — печатает стакан «лестницей» (bash scripts/demo.sh)
+├── tests/matching.rs       — 27 тестов (+ фаззинг инвариантов)
+└── examples/demo.rs        — печатает стакан «лестницей» (bash scripts/demo.sh)
+
+ledger/                     — счета/балансы (крейт ledger)     → [[ledger]]
+├── src/lib.rs              — Ledger, Balance, LedgerError, settle_fill
+└── tests/ledger.rs         — 11 тестов (сходимость, price improvement)
 ```

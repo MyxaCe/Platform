@@ -1,0 +1,12 @@
+[package]
+name = "ledger"
+version = "0.1.0"
+edition = "2021"
+description = "Счета и балансы биржи: available/held, двойная запись (ADR-006)"
+
+[lib]
+name = "ledger"
+path = "src/lib.rs"
+
+[dependencies]
+domain = { path = "../domain" }

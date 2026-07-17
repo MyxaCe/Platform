@@ -2,11 +2,11 @@
 name = "exchange-core"
 version = "0.1.0"
 edition = "2021"
-description = "Детерминированное ядро биржи: order book + matching engine (Фаза 1)"
+description = "Детерминированное matching-ядро биржи: order book + matching engine"
 
 [lib]
 name = "exchange_core"
 path = "src/lib.rs"
 
-# Фаза 1: без внешних зависимостей (см. ADR-004). Только std.
 [dependencies]
+domain = { path = "../domain" }

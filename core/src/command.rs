@@ -4,9 +4,9 @@
 //! при необходимости — время) уже проставлено вызывающей стороной до попадания в ядро.
 //! Каждая команда адресована конкретному инструменту (ADR-005).
 
-use crate::domain::instrument::InstrumentId;
-use crate::domain::money::Qty;
-use crate::domain::order::{OrderId, OrderType, Side, TimeInForce};
+use domain::instrument::InstrumentId;
+use domain::money::Qty;
+use domain::order::{OrderId, OrderType, Side, TimeInForce};
 
 /// Команда к matching engine.
 #[derive(Debug, Clone, PartialEq, Eq)]

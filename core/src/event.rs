@@ -4,9 +4,9 @@
 //! (балансы, стакан, свечи, история) выводятся из потока событий. Журнал глобальный и
 //! чересполосный, поэтому **каждое событие самодостаточно** и несёт свой `instrument` (ADR-005).
 
-use crate::domain::instrument::InstrumentId;
-use crate::domain::money::{Price, Qty};
-use crate::domain::order::{OrderId, Side};
+use domain::instrument::InstrumentId;
+use domain::money::{Price, Qty};
+use domain::order::{OrderId, Side};
 
 /// Id сделки. Монотонный счётчик из состояния движка — детерминирован (не из времени).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

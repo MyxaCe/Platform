@@ -16,6 +16,8 @@ updated: 2026-07-17
 ## Идеи
 
 - [x] ~~**Снапшот стакана** — глубина/агрегированные уровни для market data и визуализации~~ ✅ сделано ([[order-book]])
+- [ ] **Оркестратор Ledger↔Matching (Фаза 2b)** — резерв под заявку до матчинга, `settle_fill`/`release` по событиям `Trade`/`OrderCanceled`. P0. [[ledger]] [[matching-engine]]
+- [ ] **Резерв под рыночную заявку** — цена заранее неизвестна; резерв по бюджету/худшей цене. P1. [[ledger]]
 - [ ] **Реестр активов** — заменить опаковый `AssetId` на полноценный (символ, точность). P1. [[instrument-registry]]
 - [ ] **Больше типов заявок** — FOK, post-only, stop/stop-limit. P2. [[matching-engine]]
 - [ ] **Статусы инструмента** — trading/halt/auction; лимиты цены-объёма. P2. [[instrument-registry]]

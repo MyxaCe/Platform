@@ -27,6 +27,8 @@ updated: 2026-07-17
   - [[ADR-003-event-sourcing-and-determinism]] — событийность и детерминизм · `accepted`
   - [[ADR-004-docker-rust-toolchain]] — тулчейн Rust через Docker · `accepted`
   - [[ADR-005-instrument-model]] — модель инструмента и мульти-инструментный матчинг · `accepted`
+  - [[ADR-006-ledger-double-entry]] — Ledger: счета, балансы, двойная запись · `accepted`
+  - [[ADR-007-workspace-crate-structure]] — структура крейтов: общий `domain` · `accepted`
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc
@@ -39,14 +41,14 @@ updated: 2026-07-17
 
 | | |
 |---|---|
-| Фаза | **1 — ядро** ✅ matching engine + order book + инструменты + снапшот; 27 тестов + clippy зелёные |
-| Стек | Rust (crate `core/`), тулчейн через Docker |
-| Следующий шаг | Фаза 2 — Ledger (балансы/холды) + Auth + Order Gateway |
+| Фаза | **2 — деньги** 🔵 Ledger (балансы/холды/двойная запись) ✅ ядро; 38 тестов + clippy зелёные |
+| Стек | Rust workspace: `domain` + `core` (matching) + `ledger`; тулчейн через Docker |
+| Следующий шаг | Фаза 2b — оркестратор: резерв до матчинга → расчёт по событиям; затем Auth + Gateway |
 | Дата | 2026-07-17 |
 
 ## 🗺️ Дорожная карта (фазы)
 
-1. **Фаза 1** — Matching Engine + Order Book (бумажная торговля, без денег)
-2. **Фаза 2** — Ledger (балансы, холды, двойная запись) + Auth
+1. **Фаза 1** ✅ — Matching Engine + Order Book + инструменты + снапшот
+2. **Фаза 2** 🔵 — Ledger (балансы/холды/двойная запись) ✅ ядро → оркестрация (2b) + Auth
 3. **Фаза 3** — Журнал событий (Kafka/NATS) + распил на сервисы
 4. **Фаза 4** — Реальное custody (безопасность + юр. проработка)

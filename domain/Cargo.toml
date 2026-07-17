@@ -1,0 +1,12 @@
+[package]
+name = "domain"
+version = "0.1.0"
+edition = "2021"
+description = "Общий доменный словарь биржи: деньги, заявки, инструменты, счета"
+
+[lib]
+name = "domain"
+path = "src/lib.rs"
+
+# Только типы, без внешних зависимостей.
+[dependencies]

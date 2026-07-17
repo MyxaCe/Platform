@@ -45,9 +45,46 @@ impl std::ops::Add for Qty {
     }
 }
 
-/// Нотионал сделки (цена × объём) в `i128` — чтобы исключить переполнение `i64`.
-/// Понадобится в Фазе 2 (ledger); сейчас — часть доменного словаря.
+/// Денежная сумма для балансов Ledger'а — целочисленный newtype поверх `i128`
+/// (шире `i64`, т.к. нотионал = цена × объём может быть большим). См. ADR-006.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Amount(pub i128);
+
+impl Amount {
+    pub const ZERO: Amount = Amount(0);
+
+    #[inline]
+    pub fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+    #[inline]
+    pub fn is_positive(self) -> bool {
+        self.0 > 0
+    }
+    #[inline]
+    pub fn is_negative(self) -> bool {
+        self.0 < 0
+    }
+}
+
+impl std::ops::Add for Amount {
+    type Output = Amount;
+    #[inline]
+    fn add(self, rhs: Amount) -> Amount {
+        Amount(self.0 + rhs.0)
+    }
+}
+
+impl std::ops::Sub for Amount {
+    type Output = Amount;
+    #[inline]
+    fn sub(self, rhs: Amount) -> Amount {
+        Amount(self.0 - rhs.0)
+    }
+}
+
+/// Нотионал сделки (цена × объём) как [`Amount`] — считается в `i128` без переполнения.
 #[inline]
-pub fn notional(price: Price, qty: Qty) -> i128 {
-    price.0 as i128 * qty.0 as i128
+pub fn notional(price: Price, qty: Qty) -> Amount {
+    Amount(price.0 as i128 * qty.0 as i128)
 }
