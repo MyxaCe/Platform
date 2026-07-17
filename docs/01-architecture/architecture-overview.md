@@ -39,18 +39,21 @@ updated: 2026-07-17
 ```
 domain  — общий словарь (Price, Qty, Amount, Side, Order*, Instrument*, UserId)
   ├── core   (exchange_core) — matching: order book + engine (Command → Event)
-  └── ledger                 — счета/балансы: available/held, двойная запись
-core и ledger не зависят друг от друга; связывать будет оркестратор (Фаза 2b).
+  ├── ledger                 — счета/балансы: available/held, двойная запись
+  └── orchestrator           — путь ордера: резерв → матчинг → расчёт (зависит от core + ledger)
+core и ledger независимы; связывает их orchestrator (ADR-008).
 ```
 
-## Сделано (Фаза 1 + ядро Фазы 2)
+## Сделано (Фаза 1 + Фаза 2)
 
 - **core**: детерминированный matching engine, order book (price-time priority), реестр
   инструментов с валидацией, снапшот стакана. Вход `MatchingEngine::apply(Command) -> Vec<Event>`.
 - **ledger**: `Ledger` с `reserve/release/settle_fill`, инвариант сходимости по активу.
+- **orchestrator**: полный путь заявки с движением денег — `place_limit`/`cancel`
+  (резерв до матчинга, расчёт по событиям, возврат резерва при отмене/отказе).
 
-Принципы, на которых стоит ядро: [[ADR-002-money-representation]],
-[[ADR-003-event-sourcing-and-determinism]], [[ADR-006-ledger-double-entry]].
+Принципы: [[ADR-002-money-representation]], [[ADR-003-event-sourcing-and-determinism]],
+[[ADR-006-ledger-double-entry]], [[ADR-008-orchestrator]].
 
 ## Потоки данных Фазы 1
 

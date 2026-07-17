@@ -14,8 +14,8 @@ updated: 2026-07-17
 | Matching Engine (`core`) | [[matching-engine]] | ✅ active | 1 |
 | Order Book (`core`) | [[order-book]] | ✅ active | 1 |
 | Instrument Registry (`domain`) | [[instrument-registry]] | ✅ active | 1 |
-| Ledger (`ledger`) | [[ledger]] | ✅ active (ядро) | 2 |
-| Оркестратор res/settle | _(появится)_ | ⏳ Фаза 2b | 2 |
+| Ledger (`ledger`) | [[ledger]] | ✅ active | 2 |
+| Orchestrator (`orchestrator`) | [[orchestrator]] | ✅ active | 2b |
 | Auth / Users | _(появится)_ | ⏳ не начат | 2 |
 | Order Gateway (API) | _(появится)_ | ⏳ не начат | 2 |
 
@@ -40,4 +40,10 @@ core/                       — matching-ядро (крейт exchange_core)
 ledger/                     — счета/балансы (крейт ledger)     → [[ledger]]
 ├── src/lib.rs              — Ledger, Balance, LedgerError, settle_fill
 └── tests/ledger.rs         — 11 тестов (сходимость, price improvement)
+
+orchestrator/               — путь ордера (крейт orchestrator) → [[orchestrator]]
+├── src/lib.rs              — Orchestrator: place_limit/cancel (резерв→матчинг→расчёт)
+└── tests/order_path.rs     — 10 тестов (движение денег, сходимость)
 ```
+
+Итого тестов: **48** (core 27 + ledger 11 + orchestrator 10). Запуск: `bash scripts/test.sh`.

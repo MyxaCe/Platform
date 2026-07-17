@@ -47,6 +47,11 @@ impl MatchingEngine {
         self.books.get(&instrument)
     }
 
+    /// Только для чтения: параметры зарегистрированного инструмента (нужны оркестратору для резерва).
+    pub fn instrument(&self, instrument: InstrumentId) -> Option<&Instrument> {
+        self.instruments.get(instrument)
+    }
+
     /// Снапшот глубины стакана инструмента (до `depth` уровней с каждой стороны).
     /// `None`, если инструмент не зарегистрирован.
     pub fn snapshot(&self, instrument: InstrumentId, depth: usize) -> Option<DepthSnapshot> {

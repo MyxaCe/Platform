@@ -19,3 +19,12 @@ version = "0.1.0"
 dependencies = [
  "domain",
 ]
+
+[[package]]
+name = "orchestrator"
+version = "0.1.0"
+dependencies = [
+ "domain",
+ "exchange-core",
+ "ledger",
+]
