@@ -1,0 +1,10 @@
+# Нормализация переводов строк. Репозиторий хранит LF.
+* text=auto eol=lf
+
+# Скрипты исполняются в Linux-контейнерах — строго LF (иначе ломается shebang).
+*.sh text eol=lf
+
+# Rust/конфиги — LF.
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf

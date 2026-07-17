@@ -1,0 +1,5 @@
+# Cargo workspace — корень проекта.
+# Ядро биржи живёт в crate `core/`. Новые сервисы добавляются как члены workspace.
+[workspace]
+resolver = "2"
+members = ["core"]

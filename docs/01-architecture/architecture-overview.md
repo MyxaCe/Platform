@@ -1,0 +1,56 @@
+---
+tags: [architecture]
+status: draft
+updated: 2026-07-17
+---
+
+# Обзор архитектуры
+
+> [!note] Черновик
+> Наполняется по мере реализации фаз. Сейчас зафиксирована целевая картина и Фаза 1.
+
+## Целевая картина (полная биржа)
+
+```
+                 ┌──────────────────────────────────────────────┐
+  Клиент ──► API / Order Gateway ──(команда: PlaceOrder)──►      │
+                                                       ЖУРНАЛ    │  событий
+  ◄── WS Fanout ◄── Market Data ◄──(событие: Trade/BookΔ)──      │  (истина)
+                    Ledger        ◄──(событие: Fill)─────────    │
+                    History       ◄──(событие: Trade)────────    │
+                 └──────────────────────────────────────────────┘
+```
+
+Сервисы (по [[development-principles]] — режем по реальным швам, не заранее):
+
+| Сервис | Ответственность | Фаза |
+|---|---|---|
+| **Matching Engine** | стакан в памяти, матчинг, генерация сделок | 1 |
+| **Order Book** (внутри ядра) | структура книги заявок, приоритет цена/время | 1 |
+| **Ledger / Accounts** | балансы, холды, двойная запись | 2 |
+| **Auth / Users** | аккаунты, сессии, ключи | 2 |
+| **API / Order Gateway** | приём/валидация ордеров, risk-check | 2 |
+| **Market Data Distribution** | раздача стакана/сделок/тиков по WS | 2–3 |
+| **History / Storage** | сделки, свечи, ордера в БД | 3 |
+| **Event Log** (Kafka/NATS) | упорядоченный журнал-истина | 3 |
+
+## Фаза 1 — что строим сейчас
+
+**Modular monolith** на TypeScript. Чистое доменное ядро без I/O:
+
+- `domain/` — типы (Order, Price, Qty, Side, …), Order Book, Matching Engine, события.
+- `app/` — оркестрация: приём команд, применение к ядру, публикация событий.
+- `adapters/` — границы (позже: WS/HTTP/БД). В Фазе 1 — минимум для наблюдения работы ядра.
+
+Принципы, на которых стоит ядро: [[ADR-002-money-representation]], [[ADR-003-event-sourcing-and-determinism]].
+
+## Потоки данных Фазы 1
+
+```
+PlaceOrder(command) ─► MatchingEngine.apply(state, cmd)
+                          │
+                          ├─► events: OrderAccepted, Trade[], OrderResting/Filled/Canceled
+                          └─► new state (order book)
+```
+
+Детали реализации модулей появятся в [[services-index]] по мере написания кода.
