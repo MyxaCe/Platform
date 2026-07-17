@@ -1,11 +1,15 @@
 'use strict';
 
 // ---- Состояние ------------------------------------------------------------
-let META = {};            // id -> {symbol, price_decimals, qty_decimals, ...}
-let selected = null;      // текущий инструмент id
-let tf = 3600;            // текущий таймфрейм (сек)
-let orderMode = 'market'; // 'market' | 'limit'
-const rowEls = {};        // id -> DOM строка списка
+let META = {};            // id -> метаданные инструмента
+let selected = null;      // текущий инструмент
+let tf = 3600;            // таймфрейм (сек)
+let orderMode = 'market';
+const rowEls = {};
+
+// Состояние графика
+let lastBarTime = 0;      // время последней свечи на графике
+let formingRaw = null;    // текущая формирующаяся свеча в RAW-ценах {time,open,high,low,close}
 
 const token = () => document.getElementById('userSel').value;
 const pdec = (id) => (META[id]?.price_decimals ?? 2);
@@ -21,7 +25,7 @@ const chart = LightweightCharts.createChart(chartEl, {
   layout: { background: { color: '#0b0e14' }, textColor: '#6b7688' },
   grid: { vertLines: { color: 'rgba(31,39,53,.4)' }, horzLines: { color: 'rgba(31,39,53,.4)' } },
   rightPriceScale: { borderColor: '#1f2735' },
-  timeScale: { borderColor: '#1f2735', timeVisible: true, secondsVisible: tf < 60 },
+  timeScale: { borderColor: '#1f2735', timeVisible: true, secondsVisible: false },
   crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
 });
 const candles = chart.addCandlestickSeries({
@@ -32,38 +36,71 @@ const volume = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, price
 volume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 new ResizeObserver(() => chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight })).observe(chartEl);
 
-let lastBar = null;
 chart.subscribeCrosshairMove((p) => {
-  const d = p.seriesData?.get(candles);
-  const id = selected;
-  if (d) document.getElementById('ohlc').innerHTML =
-    `O <b>${fmtP(id, d.open * pscale(id))}</b> H <b>${fmtP(id, d.high * pscale(id))}</b> L <b>${fmtP(id, d.low * pscale(id))}</b> C <b>${fmtP(id, d.close * pscale(id))}</b>`;
+  const d = p.seriesData?.get(candles); const id = selected; if (!d || id == null) return;
+  const s = pscale(id);
+  document.getElementById('ohlc').innerHTML =
+    `O <b>${fmtP(id, d.open * s)}</b> H <b>${fmtP(id, d.high * s)}</b> L <b>${fmtP(id, d.low * s)}</b> C <b>${fmtP(id, d.close * s)}</b>`;
 });
 
-async function loadCandles(id, timeframe) {
-  const r = await fetch(`/candles/${id}?tf=${timeframe}&limit=300`);
-  const raw = await r.json();
+const volColor = (c) => (c.close >= c.open ? 'rgba(38,166,154,.4)' : 'rgba(239,83,80,.4)');
+
+/// Обновить последнюю свечу графика по RAW-свече (не трогает зум/вид).
+function drawCandle(id, c) {
   const s = pscale(id), v = qscale(id);
-  candles.setData(raw.map((c) => ({ time: c.time, open: c.open / s, high: c.high / s, low: c.low / s, close: c.close / s })));
-  volume.setData(raw.map((c) => ({ time: c.time, value: c.volume / v, color: c.close >= c.open ? 'rgba(38,166,154,.4)' : 'rgba(239,83,80,.4)' })));
-  lastBar = raw.length ? { ...raw[raw.length - 1] } : null;
-  chart.timeScale().fitContent();
+  candles.update({ time: c.time, open: c.open / s, high: c.high / s, low: c.low / s, close: c.close / s });
+  volume.update({ time: c.time, value: c.volume / v, color: volColor(c) });
 }
 
-function onLiveTrade(id, rawPrice, rawQty) {
-  if (id !== selected || !lastBar) return;
-  const s = pscale(id);
+/// Полная загрузка свечей — ТОЛЬКО при смене инструмента/таймфрейма. Здесь можно менять вид.
+async function loadCandles(id, timeframe) {
+  const r = await fetch(`/candles/${id}?tf=${timeframe}&limit=300`);
+  const raw = await r.json().catch(() => []);
+  const s = pscale(id), v = qscale(id);
+  candles.applyOptions({ priceFormat: { type: 'price', precision: pdec(id), minMove: 1 / s } });
+  candles.setData(raw.map((c) => ({ time: c.time, open: c.open / s, high: c.high / s, low: c.low / s, close: c.close / s })));
+  volume.setData(raw.map((c) => ({ time: c.time, value: c.volume / v, color: volColor(c) })));
+  if (raw.length) {
+    const last = raw[raw.length - 1];
+    lastBarTime = last.time;
+    formingRaw = { ...last };
+    const n = raw.length;
+    chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 }); // последние ~90 баров
+  } else {
+    lastBarTime = 0; formingRaw = null;
+  }
+}
+
+/// Живое обновление формирующейся свечи из WS-сделки (без setData/зума).
+function onLiveTrade(id, price, qty) {
+  if (id !== selected) return;
   const now = Math.floor(Date.now() / 1000);
   const b = now - (now % tf);
-  if (b > lastBar.time) lastBar = { time: b, open: rawPrice, high: rawPrice, low: rawPrice, close: rawPrice, volume: rawQty };
-  else { lastBar.high = Math.max(lastBar.high, rawPrice); lastBar.low = Math.min(lastBar.low, rawPrice); lastBar.close = rawPrice; }
-  candles.update({ time: lastBar.time, open: lastBar.open / s, high: lastBar.high / s, low: lastBar.low / s, close: lastBar.close / s });
+  if (!formingRaw || b > formingRaw.time) {
+    formingRaw = { time: b, open: price, high: price, low: price, close: price, volume: qty };
+  } else {
+    formingRaw.high = Math.max(formingRaw.high, price);
+    formingRaw.low = Math.min(formingRaw.low, price);
+    formingRaw.close = price;
+    formingRaw.volume += qty;
+  }
+  if (formingRaw.time >= lastBarTime) { lastBarTime = formingRaw.time; drawCandle(id, formingRaw); }
+}
+
+/// Периодическая сверка последней свечи с сервером (авторитетно), без сброса зума.
+async function syncLast() {
+  const id = selected; if (id == null) return;
+  const r = await fetch(`/candles/${id}?tf=${tf}&limit=2`);
+  const raw = await r.json().catch(() => []);
+  if (!raw.length) return;
+  const last = raw[raw.length - 1];
+  if (last.time >= lastBarTime) { lastBarTime = last.time; formingRaw = { ...last }; drawCandle(id, last); }
 }
 
 // ---- Список инструментов --------------------------------------------------
 async function refreshInstruments() {
   const r = await fetch('/instruments');
-  const list = await r.json();
+  const list = await r.json().catch(() => []);
   const cont = document.getElementById('instruments');
   for (const it of list) {
     META[it.id] = it;
@@ -77,8 +114,9 @@ async function refreshInstruments() {
       if (selected === null) selectInstrument(it.id);
     }
     const up = it.change >= 0;
+    const [b, q] = it.symbol.split('-');
     el.innerHTML =
-      `<div class="sym">${it.symbol.split('-')[0]}<small>/${it.symbol.split('-')[1] || 'USDT'}</small></div>` +
+      `<div class="sym">${b}<small>/${q || 'USDT'}</small></div>` +
       `<div class="chg ta-r ${up ? 'up' : 'down'}">${up ? '+' : ''}${it.change.toFixed(2)}%</div>` +
       `<div class="sell ta-r">${it.bid != null ? fmtP(it.id, it.bid) : '—'}</div>` +
       `<div class="buy ta-r">${it.ask != null ? fmtP(it.id, it.ask) : '—'}</div>` +
@@ -91,8 +129,7 @@ async function refreshInstruments() {
 
 // ---- Панель сделки --------------------------------------------------------
 function updateDealPanel() {
-  const it = META[selected];
-  if (!it) return;
+  const it = META[selected]; if (!it) return;
   document.getElementById('dealSym').textContent = it.symbol;
   document.getElementById('dealSub').textContent = `база ${it.base} / котир. ${it.quote}`;
   const chg = document.getElementById('dealChange');
@@ -111,9 +148,9 @@ async function updateMetrics() {
     const it = META[selected]; if (!it) return;
     const r = await fetch(`/balance/${it.quote}`, { headers: { Authorization: `Bearer ${token()}` } });
     if (!r.ok) return;
-    const b = await r.json();
-    const s = pscale(it.id); // котируемый актив в тех же decimals (упрощённо)
-    const av = b.available / s, eq = (b.available + b.held) / s;
+    const bal = await r.json();
+    const s = pscale(it.id);
+    const av = bal.available / s, eq = (bal.available + bal.held) / s;
     const f = (n) => '$' + n.toLocaleString('en-US', { maximumFractionDigits: 2 });
     document.getElementById('mBalance').textContent = f(av);
     document.getElementById('mEquity').textContent = f(eq);
@@ -135,7 +172,6 @@ document.getElementById('tfs').addEventListener('click', (e) => {
   const btn = e.target.closest('button'); if (!btn) return;
   tf = +btn.dataset.tf;
   document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn));
-  chart.applyOptions({ timeScale: { secondsVisible: tf < 60 } });
   if (selected != null) loadCandles(selected, tf);
 });
 
@@ -179,8 +215,7 @@ document.getElementById('lotMinus').addEventListener('click', () => stepLot(-1))
 document.getElementById('lotPlus').addEventListener('click', () => stepLot(1));
 function stepLot(d) {
   const i = document.getElementById('lot');
-  const v = Math.max(0.001, (parseFloat(i.value) || 0) + d * 0.01);
-  i.value = v.toFixed(3);
+  i.value = Math.max(0.001, (parseFloat(i.value) || 0) + d * 0.01).toFixed(3);
 }
 
 async function submit(side) {
@@ -217,6 +252,6 @@ document.getElementById('search').addEventListener('input', (e) => {
 
 // ---- Старт ----------------------------------------------------------------
 refreshInstruments();
-setInterval(refreshInstruments, 1000);
-setInterval(() => { if (selected != null) loadCandles(selected, tf); }, 4000);
+setInterval(refreshInstruments, 1000); // список слева + метрики
+setInterval(syncLast, 2000);           // сверка последней свечи (без сброса зума)
 connectWS();

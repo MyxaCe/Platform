@@ -526,9 +526,13 @@ pub async fn seed_market(st: &AppState) {
     spawn_simulator(st.clone(), cfgs, maker, taker);
 }
 
-/// Синтетическая история свечей (случайное блуждание вокруг base). Демо-данные.
+/// Синтетическая история свечей: блуждание с возвратом к среднему в границах ±20% от base.
+/// Держится рядом с base (реалистичный масштаб) и заканчивается около base — чтобы стыковаться
+/// с live-симулятором без разрыва. Демо-данные.
 fn gen_history(base: i64, tf: u32, count: usize, now: i64, rng: &mut Xorshift) -> Vec<Candle> {
-    let step = (base / 300).max(1);
+    let step = (base / 400).max(1);
+    let lo = (base - base / 5).max(1);
+    let hi = base + base / 5;
     let start = CandleStore::bucket(now, tf) - (count as i64 - 1) * tf as i64;
     let mut price = base;
     let mut out = Vec::with_capacity(count);
@@ -536,14 +540,15 @@ fn gen_history(base: i64, tf: u32, count: usize, now: i64, rng: &mut Xorshift) -
         let time = start + i as i64 * tf as i64;
         let open = price;
         let (mut high, mut low, mut close) = (open, open, open);
-        for _ in 0..5 {
+        for _ in 0..6 {
             let d = (rng.next() % (2 * step as u64 + 1)) as i64 - step;
-            close = (close + d).max(1);
+            // случайный шаг + возврат к base (mean reversion) + жёсткие границы
+            close = (close + d + (base - close) / 40).clamp(lo, hi);
             high = high.max(close);
             low = low.min(close);
         }
         price = close;
-        out.push(Candle { time, open, high, low, close, volume: (rng.next() % 1000) as i64 });
+        out.push(Candle { time, open, high, low, close, volume: 100 + (rng.next() % 900) as i64 });
     }
     out
 }
@@ -559,6 +564,15 @@ fn spawn_simulator(st: AppState, cfgs: Vec<SimCfg>, maker: UserId, taker: UserId
     tokio::spawn(async move {
         let mut rng = Xorshift::new(0x1234_ABCD ^ now_secs() as u64);
         let mut sims: Vec<Sim> = cfgs.into_iter().map(|c| Sim { mid: c.base_price, cfg: c, ask_id: None, bid_id: None }).collect();
+        // Стартуем с последней исторической цены — чтобы live был непрерывен с бэкфиллом.
+        {
+            let cs = st.candles.lock().await;
+            for s in sims.iter_mut() {
+                if let Some(p) = cs.last_price(s.cfg.id, 60) {
+                    s.mid = p;
+                }
+            }
+        }
         let mut ticker = tokio::time::interval(Duration::from_millis(700));
         loop {
             ticker.tick().await;
