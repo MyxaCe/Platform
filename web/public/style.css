@@ -49,10 +49,19 @@ button { font-family: inherit; }
 
 /* Центр */
 .center { display: flex; flex-direction: column; min-width: 0; }
-.toolbar { display: flex; align-items: center; height: 40px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
-.tfs button { background: transparent; border: none; color: var(--muted); padding: 6px 10px; cursor: pointer; border-radius: 4px; font-weight: 600; }
+.toolbar { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--panel); overflow: visible; }
+.tfs button { background: transparent; border: none; color: var(--muted); padding: 6px 8px; cursor: pointer; border-radius: 4px; font-weight: 600; }
 .tfs button:hover { color: var(--text); }
 .tfs button.active { background: var(--panel3); color: var(--accent); }
+.tb-sep { width: 1px; height: 20px; background: var(--border); }
+.tbsel, .tbbtn { background: var(--panel2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 5px 8px; font-size: 12px; cursor: pointer; }
+.tbchk { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.tb-ind { position: relative; }
+.indmenu { position: absolute; top: 32px; left: 0; z-index: 20; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 7px; min-width: 190px; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+.indmenu label { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+.indmenu hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; width: 100%; }
+.indmenu .oscrow { flex-direction: column; align-items: flex-start; gap: 4px; }
+.indmenu select { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 4px; width: 100%; }
 .chartwrap { flex: 1; position: relative; min-height: 0; }
 .chart { position: absolute; inset: 0; }
 .ohlc { position: absolute; top: 8px; left: 12px; z-index: 3; font-variant-numeric: tabular-nums; color: var(--muted); pointer-events: none; }
@@ -65,17 +74,23 @@ button { font-family: inherit; }
 .bottom__tabs { padding: 0 12px; height: 32px; display: flex; align-items: center; gap: 18px; border-bottom: 1px solid var(--border); }
 .bottom__tabs span { color: var(--muted); font-weight: 700; font-size: 11px; letter-spacing: .5px; padding: 8px 0; cursor: pointer; border-bottom: 2px solid transparent; }
 .bottom__tabs span.active { color: var(--accent); border-bottom-color: var(--accent); }
-#paneTrades, #paneDeals { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.rows { overflow-y: auto; flex: 1; }
+.signals-note { padding: 6px 12px; font-size: 10px; border-top: 1px solid var(--border); }
 
 .deals__head, .deal-row { display: grid; grid-template-columns: 1fr .8fr 1fr 1fr 1fr 1fr .8fr; padding: 5px 12px; align-items: center; }
 .deals__head { color: var(--muted); font-size: 10px; }
-.deals { overflow-y: auto; flex: 1; }
 .deal-row { font-variant-numeric: tabular-nums; border-bottom: 1px solid rgba(31,39,53,.5); }
 .deal-row .sd.buy { color: var(--up); } .deal-row .sd.sell { color: var(--down); }
 .deal-row .pnl.pos { color: var(--up); } .deal-row .pnl.neg { color: var(--down); }
+.deal-row .dir.buy { color: var(--up); } .deal-row .dir.sell { color: var(--down); }
 .deal-row .closebtn { justify-self: end; background: var(--panel3); border: 1px solid var(--border); color: var(--text);
   border-radius: 4px; padding: 3px 8px; cursor: pointer; font-size: 11px; }
-.deal-row span:nth-child(3), .deal-row span:nth-child(4), .deal-row span:nth-child(5), .deal-row span:nth-child(6) { text-align: right; }
+.deal-row span:nth-child(n+3) { text-align: right; }
+.deal-row span:nth-child(2) { text-align: left; }
+
+.sltp { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.sltp input { width: 100%; background: var(--panel2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 8px; text-align: center; font-variant-numeric: tabular-nums; }
 .trades__head { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; padding: 5px 12px; color: var(--muted); font-size: 10px; }
 .tape { overflow-y: auto; flex: 1; }
 .tape .t { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; padding: 2px 12px; font-variant-numeric: tabular-nums; }

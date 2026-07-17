@@ -65,5 +65,5 @@ web/                        — терминальный UI (nginx + JS)     →
 └── Dockerfile              — вендор lightweight-charts → nginx
 ```
 
-Итого тестов: **75** (core 27 + ledger 11 + orchestrator 17 + gateway 7 + marketdata 5 + broker 8).
+Итого тестов: **76** (core 27 + ledger 11 + orchestrator 17 + gateway 7 + marketdata 5 + broker 9).
 Запуск тестов: `bash scripts/test.sh`. Запуск сервиса: `docker compose up --build` → http://localhost:8888.

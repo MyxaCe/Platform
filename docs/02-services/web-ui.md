@@ -41,8 +41,12 @@ docker compose up --build   # gateway (внутренний) + web (nginx)
 
 ## Ограничения / TODO
 
-- Данные **реальные с Binance** (ADR-013); **сделки бумажные** — BUY/SELL открывают позицию в
-  [[broker|бумажном брокере]] (ADR-014), вкладка OPEN DEALS с live P&L и закрытием, метрики из `/account`.
-- Плечо/ликвидация/стоп-тейк, комиссии — [[backlog]].
+- Данные **реальные с Binance** (ADR-013); **сделки бумажные** ([[broker]], ADR-014).
+- **Терминальные фичи:** таймфреймы 1M…1W; типы графика (Candles/Hollow/Bars/Line/Area);
+  индикаторы (оверлеи SMA/EMA/Bollinger + осциллятор RSI/ATR/ADX/MACD, считаются на клиенте);
+  price type (Mid/Ask/Bid); PIPS-режим; SL/TP-линии на графике; лимитные ордера (LIMIT ORDER →
+  `/pending`); вкладки OPEN DEALS / LIMIT ORDERS / CLOSED DEALS / SIGNALS.
+- **SIGNALS** — наши простые сигналы (RSI, MA-крест), **не Autochartist** (проприетарный, недоступен).
+- Плечо/ликвидация, комиссии — [[backlog]].
 - Только крипто; форекс/сырьё/акции/индексы — платный провайдер, [[backlog]].
 - Токены Alice/Bob в UI (demo) — до настоящего auth. [[backlog]]

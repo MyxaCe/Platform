@@ -108,7 +108,10 @@ pub fn router(state: AppState) -> Router {
         .route("/book/:instrument", get(get_book))
         .route("/balance/:asset", get(get_balance))
         .route("/deals", post(open_deal).get(list_deals))
+        .route("/deals/closed", get(list_closed))
         .route("/deals/:id/close", post(close_deal))
+        .route("/pending", post(place_pending).get(list_pending))
+        .route("/pending/:id", delete(cancel_pending))
         .route("/account", get(account))
         .route("/stream", get(ws_stream))
         .with_state(state)
@@ -198,6 +201,8 @@ struct DealReq {
     instrument: u32,
     side: String,
     qty: i64,
+    sl: Option<i64>,
+    tp: Option<i64>,
 }
 #[derive(Serialize)]
 struct DealDto {
@@ -208,6 +213,42 @@ struct DealDto {
     qty: i64,
     entry: i64,
     mark: i64,
+    pnl: i128,
+    sl: Option<i64>,
+    tp: Option<i64>,
+    price_decimals: u8,
+    qty_decimals: u8,
+}
+#[derive(Deserialize)]
+struct PendingReq {
+    instrument: u32,
+    side: String,
+    qty: i64,
+    price: i64,
+    sl: Option<i64>,
+    tp: Option<i64>,
+}
+#[derive(Serialize)]
+struct PendingDto {
+    id: u64,
+    instrument: u32,
+    symbol: String,
+    side: String,
+    qty: i64,
+    price: i64,
+    sl: Option<i64>,
+    tp: Option<i64>,
+    price_decimals: u8,
+    qty_decimals: u8,
+}
+#[derive(Serialize)]
+struct ClosedDto {
+    instrument: u32,
+    symbol: String,
+    side: String,
+    qty: i64,
+    entry: i64,
+    exit: i64,
     pnl: i128,
     price_decimals: u8,
     qty_decimals: u8,
@@ -461,13 +502,83 @@ async fn open_deal(State(st): State<AppState>, headers: HeaderMap, Json(req): Js
     };
     let id = {
         let mut b = st.broker.lock().await;
-        b.open(user, req.instrument, side, req.qty, entry, fi.price_decimals, fi.qty_decimals)
+        b.open(user, req.instrument, side, req.qty, entry, fi.price_decimals, fi.qty_decimals, req.sl, req.tp)
             .map_err(|_| err(StatusCode::PAYMENT_REQUIRED, "insufficient_margin"))?
     };
     Ok(Json(DealDto {
         id, instrument: req.instrument, symbol: fi.symbol, side: req.side, qty: req.qty, entry, mark, pnl: 0,
-        price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals,
+        sl: req.sl, tp: req.tp, price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals,
     }))
+}
+
+/// Разместить лимитный (отложенный) ордер.
+async fn place_pending(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<PendingReq>) -> Result<Json<PendingDto>, ApiErr> {
+    let user = authed(&st, &headers).await?;
+    let side = match req.side.as_str() {
+        "buy" => PosSide::Long,
+        "sell" => PosSide::Short,
+        _ => return Err(err(StatusCode::BAD_REQUEST, "side must be buy|sell")),
+    };
+    if req.qty <= 0 || req.price <= 0 {
+        return Err(err(StatusCode::BAD_REQUEST, "qty and price must be > 0"));
+    }
+    let fi = feed_by_id(&st, req.instrument).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
+    let id = st.broker.lock().await.place_pending(user, req.instrument, side, req.qty, req.price, fi.price_decimals, fi.qty_decimals, req.sl, req.tp);
+    Ok(Json(PendingDto {
+        id, instrument: req.instrument, symbol: fi.symbol, side: req.side, qty: req.qty, price: req.price,
+        sl: req.sl, tp: req.tp, price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals,
+    }))
+}
+
+async fn list_pending(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<PendingDto>>, ApiErr> {
+    let user = authed(&st, &headers).await?;
+    let b = st.broker.lock().await;
+    let out = b
+        .pendings(user)
+        .into_iter()
+        .map(|p| PendingDto {
+            id: p.id, instrument: p.instrument, symbol: feed_by_id(&st, p.instrument).map(|f| f.symbol).unwrap_or_default(),
+            side: if matches!(p.side, PosSide::Long) { "buy" } else { "sell" }.to_string(),
+            qty: p.qty, price: p.price, sl: p.sl, tp: p.tp, price_decimals: p.pd, qty_decimals: p.qd,
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+async fn cancel_pending(State(st): State<AppState>, headers: HeaderMap, Path(id): Path<u64>) -> Result<StatusCode, ApiErr> {
+    let user = authed(&st, &headers).await?;
+    st.broker.lock().await.cancel_pending(user, id).map_err(|_| err(StatusCode::NOT_FOUND, "unknown pending"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_closed(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<ClosedDto>>, ApiErr> {
+    let user = authed(&st, &headers).await?;
+    let b = st.broker.lock().await;
+    let out = b
+        .closed_deals(user)
+        .into_iter()
+        .rev()
+        .map(|d| ClosedDto {
+            instrument: d.instrument, symbol: feed_by_id(&st, d.instrument).map(|f| f.symbol).unwrap_or_default(),
+            side: if matches!(d.side, PosSide::Long) { "buy" } else { "sell" }.to_string(),
+            qty: d.qty, entry: d.entry, exit: d.exit, pnl: d.pnl, price_decimals: d.pd, qty_decimals: d.qd,
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+/// Фоновый монитор: триггеры лимитных ордеров и SL/TP по текущим ценам.
+pub fn spawn_monitor(st: AppState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+        loop {
+            tick.tick().await;
+            let m = marks(&st).await;
+            if !m.is_empty() {
+                st.broker.lock().await.check(&m);
+            }
+        }
+    });
 }
 
 /// Список открытых позиций с live P&L.
@@ -485,7 +596,7 @@ async fn list_deals(State(st): State<AppState>, headers: HeaderMap) -> Result<Js
                 id: p.id, instrument: p.instrument, symbol,
                 side: if matches!(p.side, PosSide::Long) { "buy" } else { "sell" }.to_string(),
                 qty: p.qty, entry: p.entry, mark, pnl: p.unrealized(mark),
-                price_decimals: p.pd, qty_decimals: p.qd,
+                sl: p.sl, tp: p.tp, price_decimals: p.pd, qty_decimals: p.qd,
             }
         })
         .collect();

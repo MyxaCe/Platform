@@ -8,7 +8,6 @@
   <script src="/vendor/lightweight-charts.js"></script>
 </head>
 <body>
-  <!-- Верхняя панель -->
   <header class="top">
     <div class="logo"><span class="logo__mark">E</span> Exchange<span class="muted">Pro · Binance LIVE</span></div>
     <div class="metrics">
@@ -27,7 +26,6 @@
   </header>
 
   <main class="grid">
-    <!-- Список инструментов -->
     <aside class="watch">
       <div class="watch__search"><input id="search" placeholder="Search…" /></div>
       <div class="watch__title">⭐ POPULAR</div>
@@ -38,38 +36,82 @@
       <div id="instruments" class="watch__rows"></div>
     </aside>
 
-    <!-- График -->
     <section class="center">
       <div class="toolbar">
         <div id="tfs" class="tfs">
           <button data-tf="60">1M</button><button data-tf="300">5M</button>
           <button data-tf="900">15M</button><button data-tf="1800">30M</button>
           <button data-tf="3600" class="active">1H</button><button data-tf="14400">4H</button>
-          <button data-tf="86400">1D</button>
+          <button data-tf="86400">1D</button><button data-tf="604800">1W</button>
         </div>
+        <span class="tb-sep"></span>
+        <select id="chartType" class="tbsel" title="Тип графика">
+          <option value="candles">Candles</option>
+          <option value="hollow">Hollow</option>
+          <option value="bars">Bars</option>
+          <option value="line">Line</option>
+          <option value="area">Area</option>
+        </select>
+        <div class="tb-ind">
+          <button id="indBtn" class="tbbtn">Indicators ▾</button>
+          <div id="indMenu" class="indmenu hidden">
+            <label><input type="checkbox" data-ov="sma"> SMA (20)</label>
+            <label><input type="checkbox" data-ov="ema"> EMA (20)</label>
+            <label><input type="checkbox" data-ov="boll"> Bollinger (20, 2)</label>
+            <hr>
+            <label class="oscrow">Oscillator
+              <select id="oscSel">
+                <option value="">None</option><option value="rsi">RSI (14)</option>
+                <option value="atr">ATR (14)</option><option value="adx">ADX (14)</option>
+                <option value="macd">MACD</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <select id="priceType" class="tbsel" title="Price type">
+          <option value="mid">Mid</option><option value="ask">Ask</option><option value="bid">Bid</option>
+        </select>
+        <label class="tbchk"><input type="checkbox" id="pipsChk"> PIPS</label>
       </div>
+
       <div class="chartwrap">
         <div id="ohlc" class="ohlc"></div>
         <div id="watermark" class="watermark">—</div>
         <div id="chart" class="chart"></div>
       </div>
+
       <div class="bottom">
         <div class="bottom__tabs">
-          <span id="tabTrades" class="active">MARKET TRADES</span>
-          <span id="tabDeals">OPEN DEALS</span>
+          <span id="tab-trades" class="active" data-pane="trades">MARKET TRADES</span>
+          <span id="tab-deals" data-pane="deals">OPEN DEALS</span>
+          <span id="tab-pending" data-pane="pending">LIMIT ORDERS</span>
+          <span id="tab-closed" data-pane="closed">CLOSED DEALS</span>
+          <span id="tab-signals" data-pane="signals">SIGNALS</span>
         </div>
-        <div id="paneTrades">
+        <div id="pane-trades" class="pane">
           <div class="trades__head"><span>INSTR.</span><span class="ta-r">ЦЕНА</span><span class="ta-r">КОЛ-ВО</span><span class="ta-r">ВРЕМЯ</span></div>
           <div id="tape" class="tape"></div>
         </div>
-        <div id="paneDeals" class="hidden">
+        <div id="pane-deals" class="pane hidden">
           <div class="deals__head"><span>INSTR.</span><span>СТОРОНА</span><span class="ta-r">ОБЪЁМ</span><span class="ta-r">ВХОД</span><span class="ta-r">ЦЕНА</span><span class="ta-r">P&amp;L</span><span></span></div>
-          <div id="deals" class="deals"></div>
+          <div id="deals" class="rows"></div>
+        </div>
+        <div id="pane-pending" class="pane hidden">
+          <div class="deals__head"><span>INSTR.</span><span>СТОРОНА</span><span class="ta-r">ОБЪЁМ</span><span class="ta-r">ЦЕНА</span><span class="ta-r">SL</span><span class="ta-r">TP</span><span></span></div>
+          <div id="pending" class="rows"></div>
+        </div>
+        <div id="pane-closed" class="pane hidden">
+          <div class="deals__head"><span>INSTR.</span><span>СТОРОНА</span><span class="ta-r">ОБЪЁМ</span><span class="ta-r">ВХОД</span><span class="ta-r">ВЫХОД</span><span class="ta-r">P&amp;L</span><span></span></div>
+          <div id="closed" class="rows"></div>
+        </div>
+        <div id="pane-signals" class="pane hidden">
+          <div class="deals__head"><span>INSTR.</span><span>СИГНАЛ</span><span>TF</span><span class="ta-r">НАПРАВЛЕНИЕ</span></div>
+          <div id="signals" class="rows"></div>
+          <div class="signals-note muted">Наши простые сигналы по индикаторам (RSI, MA-кросс). Не Autochartist.</div>
         </div>
       </div>
     </section>
 
-    <!-- Панель сделки -->
     <aside class="deal">
       <div class="deal__tabs">
         <button id="tabDeal" class="active">OPEN DEAL</button>
@@ -79,7 +121,6 @@
         <div><div id="dealSym" class="deal__symname">—</div><div id="dealSub" class="muted small">—</div></div>
         <div id="dealChange" class="deal__change">0.00%</div>
       </div>
-
       <div class="deal__body">
         <label class="lbl">LOT</label>
         <div class="lotrow">
@@ -88,9 +129,14 @@
           <button id="lotPlus" class="btn lotbtn">+</button>
         </div>
         <div id="priceRow" class="pricerow hidden">
-          <label class="lbl">PRICE</label>
+          <label class="lbl">PRICE (лимит)</label>
           <input id="price" type="number" step="0.01" />
         </div>
+        <div class="sltp">
+          <div><label class="lbl">STOP LOSS</label><input id="sl" type="number" step="0.01" placeholder="—" /></div>
+          <div><label class="lbl">TAKE PROFIT</label><input id="tp" type="number" step="0.01" placeholder="—" /></div>
+        </div>
+        <div id="pipsInfo" class="muted small hidden"></div>
         <button id="btnBuy" class="orderbtn buy">BUY <span id="askPx">—</span></button>
         <button id="btnSell" class="orderbtn sell">SELL <span id="bidPx">—</span></button>
         <div id="dealMsg" class="dealmsg"></div>

@@ -23,10 +23,15 @@ updated: 2026-07-17
 ## Публичный API
 
 - `Broker::new(start_balance, leverage)`
-- `open(user, instrument, side, qty, entry, pd, qd) -> Result<pos_id, BrokerError>`
-- `close(user, id, mark) -> Result<Cents>` (реализованный P&L)
-- Чтение: `balance/used_margin/free_margin/positions/open_pnl/equity`
-- `enum BrokerError { InsufficientMargin, UnknownPosition }`
+- `open(user, instrument, side, qty, entry, pd, qd, sl, tp) -> Result<pos_id>` — позиция с опц. SL/TP
+- `close(user, id, mark) -> Result<Cents>` (реализованный P&L, пишет в историю)
+- `place_pending(...) -> id` / `cancel_pending(user, id)` — лимитные (отложенные) ордера
+- `check(marks)` — триггеры лимитных ордеров и SL/TP по текущим ценам (вызывает фоновый монитор gateway)
+- Чтение: `balance/used_margin/free_margin/positions/pendings/closed_deals/open_pnl/equity`
+- `enum BrokerError { InsufficientMargin, UnknownPosition, UnknownPending }`
+
+Лимитный buy срабатывает при `mark ≤ price`, sell — при `mark ≥ price`. SL/TP закрывают позицию при
+достижении уровня. Закрытые сделки пишутся в историю (`ClosedDeal`).
 
 ## Связи
 

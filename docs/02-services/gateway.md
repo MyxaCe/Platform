@@ -36,10 +36,16 @@ docker compose down              # остановить
 | DELETE | `/orders/{id}?instrument=N` | Bearer | отменить |
 | GET | `/book/{instrument}?depth=N` | — | снапшот стакана `{bids, asks}` |
 | GET | `/balance/{asset}` | Bearer | баланс `{available, held}` |
-| POST | `/deals` | Bearer | открыть сделку `{instrument, side, qty}` → позиция ([[broker]]) |
+| POST | `/deals` | Bearer | открыть сделку `{instrument, side, qty, sl?, tp?}` → позиция ([[broker]]) |
 | GET | `/deals` | Bearer | открытые позиции с live P&L |
 | POST | `/deals/{id}/close` | Bearer | закрыть позицию → realized P&L |
+| GET | `/deals/closed` | Bearer | история закрытых сделок |
+| POST | `/pending` | Bearer | лимитный ордер `{instrument, side, qty, price, sl?, tp?}` |
+| GET | `/pending` | Bearer | отложенные ордера |
+| DELETE | `/pending/{id}` | Bearer | отменить лимитный ордер |
 | GET | `/account` | Bearer | `{balance, equity, used_margin, free_margin, open_pnl}` (центы) |
+
+Фоновый монитор (`spawn_monitor`) каждые 500мс триггерит лимитные ордера и SL/TP по ценам фида.
 | WS | `/stream` | — | живая лента событий (JSON) |
 
 > ⚠️ При добавлении нового REST-пути **обязательно** добавить его в регекс-прокси `web/nginx.conf`

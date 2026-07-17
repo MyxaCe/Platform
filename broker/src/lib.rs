@@ -1,7 +1,8 @@
 //! # broker
 //!
-//! Бумажный брокер (ADR-014): счета с виртуальным балансом, позиции Long/Short, маржа и P&L на
-//! реальных ценах. Деньги — в **центах** (`i128`). Реальных денег нет.
+//! Бумажный брокер (ADR-014): счета с виртуальным балансом, позиции Long/Short с SL/TP, отложенные
+//! (лимитные) ордера с триггером по цене, история закрытых сделок, маржа и P&L на реальных ценах.
+//! Деньги — в **центах** (`i128`). Реальных денег нет.
 
 use std::collections::HashMap;
 
@@ -10,7 +11,7 @@ use domain::account::UserId;
 /// Деньги в центах (1/100 USD).
 pub type Cents = i128;
 
-/// Сторона позиции.
+/// Сторона позиции/ордера.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PosSide {
     Long,
@@ -18,7 +19,6 @@ pub enum PosSide {
 }
 
 /// Стоимость `price · qty` в центах: `price_raw · qty_raw · 100 / 10^(pd+qd)`.
-/// `price_raw` может быть отрицательным (для дельты цены при расчёте PnL).
 fn value_cents(price_raw: i64, qty_raw: i64, pd: u8, qd: u8) -> Cents {
     price_raw as i128 * qty_raw as i128 * 100 / 10i128.pow(pd as u32 + qd as u32)
 }
@@ -29,15 +29,17 @@ pub struct Position {
     pub id: u64,
     pub instrument: u32,
     pub side: PosSide,
-    pub qty: i64,   // raw
-    pub entry: i64, // raw price
+    pub qty: i64,
+    pub entry: i64,
     pub pd: u8,
     pub qd: u8,
     pub margin: Cents,
+    pub sl: Option<i64>,
+    pub tp: Option<i64>,
 }
 
 impl Position {
-    /// Нереализованный P&L при марк-цене `mark_raw`.
+    /// Нереализованный P&L при марк-цене.
     pub fn unrealized(&self, mark_raw: i64) -> Cents {
         let diff = match self.side {
             PosSide::Long => mark_raw - self.entry,
@@ -47,20 +49,119 @@ impl Position {
     }
 }
 
+/// Отложенный (лимитный) ордер: срабатывает, когда цена достигает `price`.
 #[derive(Debug, Clone)]
-struct Account {
-    balance: Cents,
-    next_pos: u64,
-    positions: HashMap<u64, Position>,
+pub struct PendingOrder {
+    pub id: u64,
+    pub instrument: u32,
+    pub side: PosSide,
+    pub qty: i64,
+    pub price: i64,
+    pub pd: u8,
+    pub qd: u8,
+    pub sl: Option<i64>,
+    pub tp: Option<i64>,
 }
 
-/// Ошибка операции брокера.
+/// Закрытая сделка (история).
+#[derive(Debug, Clone)]
+pub struct ClosedDeal {
+    pub instrument: u32,
+    pub side: PosSide,
+    pub qty: i64,
+    pub entry: i64,
+    pub exit: i64,
+    pub pnl: Cents,
+    pub pd: u8,
+    pub qd: u8,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrokerError {
-    /// Недостаточно свободной маржи для открытия.
     InsufficientMargin,
-    /// Позиции с таким id нет.
     UnknownPosition,
+    UnknownPending,
+}
+
+#[derive(Debug, Default, Clone)]
+struct Account {
+    balance: Cents,
+    next_id: u64,
+    positions: HashMap<u64, Position>,
+    pendings: HashMap<u64, PendingOrder>,
+    closed: Vec<ClosedDeal>,
+}
+
+impl Account {
+    fn used_margin(&self) -> Cents {
+        self.positions.values().map(|p| p.margin).sum()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_open(&mut self, lev: i128, instrument: u32, side: PosSide, qty: i64, entry: i64, pd: u8, qd: u8, sl: Option<i64>, tp: Option<i64>) -> Result<u64, BrokerError> {
+        let margin = value_cents(entry, qty, pd, qd) / lev;
+        if self.balance - self.used_margin() < margin {
+            return Err(BrokerError::InsufficientMargin);
+        }
+        self.next_id += 1;
+        let id = self.next_id;
+        self.positions.insert(id, Position { id, instrument, side, qty, entry, pd, qd, margin, sl, tp });
+        Ok(id)
+    }
+
+    fn close_pos(&mut self, id: u64, mark: i64) -> Option<Cents> {
+        let pos = self.positions.remove(&id)?;
+        let pnl = pos.unrealized(mark);
+        self.balance += pnl;
+        self.closed.push(ClosedDeal { instrument: pos.instrument, side: pos.side, qty: pos.qty, entry: pos.entry, exit: mark, pnl, pd: pos.pd, qd: pos.qd });
+        Some(pnl)
+    }
+
+    fn run_triggers(&mut self, lev: i128, marks: &HashMap<u32, i64>) {
+        // Сработавшие лимитные ордера → открыть позицию.
+        let mut fire: Vec<PendingOrder> = Vec::new();
+        self.pendings.retain(|_, p| match marks.get(&p.instrument) {
+            Some(&m) => {
+                let hit = match p.side {
+                    PosSide::Long => m <= p.price,  // buy limit — ниже рынка
+                    PosSide::Short => m >= p.price, // sell limit — выше рынка
+                };
+                if hit {
+                    fire.push(p.clone());
+                    false
+                } else {
+                    true
+                }
+            }
+            None => true,
+        });
+        for p in fire {
+            let _ = self.try_open(lev, p.instrument, p.side, p.qty, p.price, p.pd, p.qd, p.sl, p.tp);
+        }
+
+        // SL/TP по открытым позициям.
+        let mut to_close: Vec<(u64, i64)> = Vec::new();
+        for pos in self.positions.values() {
+            if let Some(&m) = marks.get(&pos.instrument) {
+                let sl_hit = pos.sl.is_some_and(|sl| match pos.side {
+                    PosSide::Long => m <= sl,
+                    PosSide::Short => m >= sl,
+                });
+                let tp_hit = pos.tp.is_some_and(|tp| match pos.side {
+                    PosSide::Long => m >= tp,
+                    PosSide::Short => m <= tp,
+                });
+                if sl_hit {
+                    to_close.push((pos.id, pos.sl.unwrap()));
+                } else if tp_hit {
+                    to_close.push((pos.id, pos.tp.unwrap()));
+                }
+            }
+        }
+        for (id, mark) in to_close {
+            self.close_pos(id, mark);
+        }
+    }
 }
 
 pub struct Broker {
@@ -76,7 +177,7 @@ impl Broker {
 
     fn acct(&mut self, user: UserId) -> &mut Account {
         let start = self.start_balance;
-        self.accounts.entry(user).or_insert_with(|| Account { balance: start, next_pos: 0, positions: HashMap::new() })
+        self.accounts.entry(user).or_insert_with(|| Account { balance: start, ..Default::default() })
     }
 
     // ---- Чтение -----------------------------------------------------------
@@ -84,55 +185,68 @@ impl Broker {
     pub fn balance(&self, user: UserId) -> Cents {
         self.accounts.get(&user).map(|a| a.balance).unwrap_or(self.start_balance)
     }
-
     pub fn used_margin(&self, user: UserId) -> Cents {
-        self.accounts.get(&user).map(|a| a.positions.values().map(|p| p.margin).sum()).unwrap_or(0)
+        self.accounts.get(&user).map(|a| a.used_margin()).unwrap_or(0)
     }
-
     pub fn free_margin(&self, user: UserId) -> Cents {
         self.balance(user) - self.used_margin(user)
     }
-
     pub fn positions(&self, user: UserId) -> Vec<Position> {
         self.accounts.get(&user).map(|a| a.positions.values().cloned().collect()).unwrap_or_default()
     }
-
-    /// Суммарный нереализованный P&L при заданных марк-ценах (инструмент → raw цена).
+    pub fn pendings(&self, user: UserId) -> Vec<PendingOrder> {
+        self.accounts.get(&user).map(|a| a.pendings.values().cloned().collect()).unwrap_or_default()
+    }
+    pub fn closed_deals(&self, user: UserId) -> Vec<ClosedDeal> {
+        self.accounts.get(&user).map(|a| a.closed.clone()).unwrap_or_default()
+    }
     pub fn open_pnl(&self, user: UserId, marks: &HashMap<u32, i64>) -> Cents {
         self.accounts
             .get(&user)
             .map(|a| a.positions.values().map(|p| p.unrealized(*marks.get(&p.instrument).unwrap_or(&p.entry))).sum())
             .unwrap_or(0)
     }
-
-    /// Equity = баланс + нереализованный P&L.
     pub fn equity(&self, user: UserId, marks: &HashMap<u32, i64>) -> Cents {
         self.balance(user) + self.open_pnl(user, marks)
     }
 
     // ---- Операции ---------------------------------------------------------
 
-    /// Открыть позицию по цене входа `entry`. Возвращает id позиции.
+    /// Открыть позицию по рынку (с опциональными SL/TP).
     #[allow(clippy::too_many_arguments)]
-    pub fn open(&mut self, user: UserId, instrument: u32, side: PosSide, qty: i64, entry: i64, pd: u8, qd: u8) -> Result<u64, BrokerError> {
-        let notional = value_cents(entry, qty, pd, qd);
-        let margin = notional / self.leverage;
-        if self.free_margin(user) < margin {
-            return Err(BrokerError::InsufficientMargin);
-        }
-        let a = self.acct(user);
-        a.next_pos += 1;
-        let id = a.next_pos;
-        a.positions.insert(id, Position { id, instrument, side, qty, entry, pd, qd, margin });
-        Ok(id)
+    pub fn open(&mut self, user: UserId, instrument: u32, side: PosSide, qty: i64, entry: i64, pd: u8, qd: u8, sl: Option<i64>, tp: Option<i64>) -> Result<u64, BrokerError> {
+        let lev = self.leverage;
+        self.acct(user).try_open(lev, instrument, side, qty, entry, pd, qd, sl, tp)
     }
 
-    /// Закрыть позицию по марк-цене `mark`. Возвращает реализованный P&L (зачислен в баланс).
+    /// Закрыть позицию по марк-цене. Возвращает реализованный P&L.
     pub fn close(&mut self, user: UserId, id: u64, mark: i64) -> Result<Cents, BrokerError> {
+        self.acct(user).close_pos(id, mark).ok_or(BrokerError::UnknownPosition)
+    }
+
+    /// Разместить отложенный (лимитный) ордер. Возвращает его id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn place_pending(&mut self, user: UserId, instrument: u32, side: PosSide, qty: i64, price: i64, pd: u8, qd: u8, sl: Option<i64>, tp: Option<i64>) -> u64 {
         let a = self.acct(user);
-        let pos = a.positions.remove(&id).ok_or(BrokerError::UnknownPosition)?;
-        let pnl = pos.unrealized(mark);
-        a.balance += pnl;
-        Ok(pnl)
+        a.next_id += 1;
+        let id = a.next_id;
+        a.pendings.insert(id, PendingOrder { id, instrument, side, qty, price, pd, qd, sl, tp });
+        id
+    }
+
+    pub fn cancel_pending(&mut self, user: UserId, id: u64) -> Result<(), BrokerError> {
+        if self.acct(user).pendings.remove(&id).is_some() {
+            Ok(())
+        } else {
+            Err(BrokerError::UnknownPending)
+        }
+    }
+
+    /// Прогнать триггеры лимитных ордеров и SL/TP по всем счетам при текущих марк-ценах.
+    pub fn check(&mut self, marks: &HashMap<u32, i64>) {
+        let lev = self.leverage;
+        for a in self.accounts.values_mut() {
+            a.run_triggers(lev, marks);
+        }
     }
 }
