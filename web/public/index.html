@@ -45,33 +45,69 @@
           <button data-tf="86400">1D</button><button data-tf="604800">1W</button>
         </div>
         <span class="tb-sep"></span>
-        <select id="chartType" class="tbsel" title="Тип графика">
-          <option value="candles">Candles</option>
-          <option value="hollow">Hollow</option>
-          <option value="bars">Bars</option>
-          <option value="line">Line</option>
-          <option value="area">Area</option>
-        </select>
-        <div class="tb-ind">
-          <button id="indBtn" class="tbbtn">Indicators ▾</button>
-          <div id="indMenu" class="indmenu hidden">
-            <label><input type="checkbox" data-ov="sma"> SMA (20)</label>
-            <label><input type="checkbox" data-ov="ema"> EMA (20)</label>
-            <label><input type="checkbox" data-ov="boll"> Bollinger (20, 2)</label>
-            <hr>
-            <label class="oscrow">Oscillator
-              <select id="oscSel">
-                <option value="">None</option><option value="rsi">RSI (14)</option>
-                <option value="atr">ATR (14)</option><option value="adx">ADX (14)</option>
-                <option value="macd">MACD</option>
-              </select>
-            </label>
+        <div class="tb-dd">
+          <button id="ctBtn" class="tbbtn">Candles <span class="caret">▾</span></button>
+          <div id="ctMenu" class="dd hidden">
+            <div class="dd-item active" data-ct="candles">Candles</div>
+            <div class="dd-item" data-ct="hollow">Hollow Candles</div>
+            <div class="dd-item" data-ct="bars">Bars</div>
+            <div class="dd-item" data-ct="line">Line</div>
+            <div class="dd-item" data-ct="area">Area</div>
+            <div class="dd-item" data-ct="heikin">Heikin Ashi</div>
           </div>
         </div>
-        <select id="priceType" class="tbsel" title="Price type">
-          <option value="mid">Mid</option><option value="ask">Ask</option><option value="bid">Bid</option>
-        </select>
-        <label class="tbchk"><input type="checkbox" id="pipsChk"> PIPS</label>
+        <div class="tb-dd">
+          <button id="indBtn" class="tbbtn">Indicators <span class="caret">▾</span></button>
+          <div id="indMenu" class="dd dd--wide hidden">
+            <div class="dd-cat">Тренд</div>
+            <label><input type="checkbox" data-ov="sma"> Moving Average (SMA 20)</label>
+            <label><input type="checkbox" data-ov="ema"> EMA 20</label>
+            <label><input type="checkbox" data-ov="wma"> WMA 20</label>
+            <label><input type="checkbox" data-ov="supertrend"> SuperTrend</label>
+            <label><input type="checkbox" data-ov="psar"> Parabolic SAR</label>
+            <label><input type="checkbox" data-ov="ichimoku"> Ichimoku</label>
+            <label><input type="checkbox" data-ov="alligator"> Alligator</label>
+            <div class="dd-cat">Волатильность</div>
+            <label><input type="checkbox" data-ov="boll"> Bollinger Bands</label>
+            <label><input type="checkbox" data-ov="keltner"> Keltner Channels</label>
+            <label><input type="checkbox" data-ov="donchian"> Donchian Channels</label>
+            <div class="dd-cat">Объём</div>
+            <label><input type="checkbox" data-ov="vwap"> VWAP</label>
+            <div class="dd-cat">Осциллятор (внизу, один)</div>
+            <select id="oscSel">
+              <option value="">— нет —</option>
+              <optgroup label="Моментум">
+                <option value="rsi">RSI</option><option value="stoch">Stochastic</option>
+                <option value="cci">CCI</option><option value="momentum">Momentum</option>
+                <option value="williams">Williams %R</option><option value="roc">ROC</option>
+              </optgroup>
+              <optgroup label="Тренд">
+                <option value="adx">ADX / +DI / -DI</option><option value="macd">MACD</option>
+              </optgroup>
+              <optgroup label="Волатильность">
+                <option value="atr">ATR</option><option value="stddev">Std Deviation</option>
+              </optgroup>
+              <optgroup label="Объём">
+                <option value="obv">OBV</option><option value="ad">A/D</option>
+                <option value="cmf">Chaikin MF</option><option value="mfi">MFI</option>
+                <option value="force">Force Index</option>
+              </optgroup>
+              <optgroup label="Билл Вильямс">
+                <option value="ao">Awesome</option><option value="ac">Accelerator</option><option value="gator">Gator</option>
+              </optgroup>
+            </select>
+            <div class="note">Скоро: Volume Profile, TPO, Delta, Fibonacci, ZigZag, Pivot Points.</div>
+          </div>
+        </div>
+        <div class="tb-dd">
+          <button id="ptBtn" class="tbbtn">Mid <span class="caret">▾</span></button>
+          <div id="ptMenu" class="dd hidden">
+            <div class="dd-item active" data-pt="mid">Mid</div>
+            <div class="dd-item" data-pt="ask">Ask</div>
+            <div class="dd-item" data-pt="bid">Bid</div>
+          </div>
+        </div>
+        <button id="pipsBtn" class="tbbtn">PIPS</button>
       </div>
 
       <div class="chartwrap">

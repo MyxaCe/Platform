@@ -6,6 +6,15 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
   font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px; }
+
+/* Скроллбары */
+* { scrollbar-width: thin; scrollbar-color: #2a3444 transparent; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #26303f; border-radius: 6px; border: 2px solid var(--panel); }
+::-webkit-scrollbar-thumb:hover { background: #34435a; }
+input, select { outline: none; }
+input:focus, select:focus { border-color: var(--accent) !important; }
 .muted { color: var(--muted); } .small { font-size: 11px; } .ta-r { text-align: right; }
 .hidden { display: none !important; }
 button { font-family: inherit; }
@@ -53,15 +62,24 @@ button { font-family: inherit; }
 .tfs button { background: transparent; border: none; color: var(--muted); padding: 6px 8px; cursor: pointer; border-radius: 4px; font-weight: 600; }
 .tfs button:hover { color: var(--text); }
 .tfs button.active { background: var(--panel3); color: var(--accent); }
-.tb-sep { width: 1px; height: 20px; background: var(--border); }
-.tbsel, .tbbtn { background: var(--panel2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 5px 8px; font-size: 12px; cursor: pointer; }
-.tbchk { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 4px; cursor: pointer; }
-.tb-ind { position: relative; }
-.indmenu { position: absolute; top: 32px; left: 0; z-index: 20; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 7px; min-width: 190px; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
-.indmenu label { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
-.indmenu hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; width: 100%; }
-.indmenu .oscrow { flex-direction: column; align-items: flex-start; gap: 4px; }
-.indmenu select { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 4px; width: 100%; }
+.tb-sep { width: 1px; height: 20px; background: var(--border); margin: 0 2px; }
+.tbbtn { background: var(--panel2); border: 1px solid var(--border); color: var(--text); border-radius: 6px;
+  padding: 6px 10px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.tbbtn:hover { background: var(--panel3); }
+.tbbtn.on { border-color: var(--accent); color: var(--accent); }
+.tbbtn .caret { color: var(--muted); font-size: 10px; }
+.tb-dd { position: relative; }
+.dd { position: absolute; top: 34px; left: 0; z-index: 30; background: var(--panel2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px; min-width: 180px; box-shadow: 0 10px 30px rgba(0,0,0,.5); max-height: 70vh; overflow-y: auto; }
+.dd--wide { min-width: 240px; }
+.dd-item { padding: 7px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+.dd-item:hover { background: var(--panel3); }
+.dd-item.active { color: var(--accent); }
+.dd-cat { color: var(--accent); font-size: 10px; letter-spacing: .6px; text-transform: uppercase; padding: 8px 8px 4px; }
+.dd label { display: flex; align-items: center; gap: 7px; font-size: 12px; cursor: pointer; padding: 4px 8px; border-radius: 5px; }
+.dd label:hover { background: var(--panel3); }
+.dd select { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 6px; width: 100%; margin: 4px 0; }
+.dd .note { color: var(--muted); font-size: 10px; padding: 6px 8px; border-top: 1px solid var(--border); margin-top: 6px; }
 .chartwrap { flex: 1; position: relative; min-height: 0; }
 .chart { position: absolute; inset: 0; }
 .ohlc { position: absolute; top: 8px; left: 12px; z-index: 3; font-variant-numeric: tabular-nums; color: var(--muted); pointer-events: none; }

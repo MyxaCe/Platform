@@ -39,14 +39,24 @@ docker compose up --build   # gateway (внутренний) + web (nginx)
 - Общается только с [[gateway]] по HTTP/WS через nginx-прокси (`web/nginx.conf`, один origin — без CORS).
 - Основано на [[ADR-011-web-ui]], [[ADR-012-market-data-and-terminal-ui]].
 
-## Ограничения / TODO
+## Возможности
 
 - Данные **реальные с Binance** (ADR-013); **сделки бумажные** ([[broker]], ADR-014).
-- **Терминальные фичи:** таймфреймы 1M…1W; типы графика (Candles/Hollow/Bars/Line/Area);
-  индикаторы (оверлеи SMA/EMA/Bollinger + осциллятор RSI/ATR/ADX/MACD, считаются на клиенте);
-  price type (Mid/Ask/Bid); PIPS-режим; SL/TP-линии на графике; лимитные ордера (LIMIT ORDER →
-  `/pending`); вкладки OPEN DEALS / LIMIT ORDERS / CLOSED DEALS / SIGNALS.
-- **SIGNALS** — наши простые сигналы (RSI, MA-крест), **не Autochartist** (проприетарный, недоступен).
+- **Терминальные фичи:** таймфреймы 1M…**1W**; **типы графика** (Candles/Hollow/Bars/Line/Area/**Heikin
+  Ashi**) — кнопка-выпадашка; price type (Mid/Ask/Bid); **PIPS**-кнопка; SL/TP-линии на графике; лимитные
+  ордера; вкладки OPEN DEALS / LIMIT ORDERS / CLOSED DEALS / SIGNALS.
+- **Индикаторы** (кнопка Indicators, по категориям; считаются на клиенте из свечей):
+  - *Оверлеи:* SMA, EMA, WMA, SuperTrend, Parabolic SAR, Ichimoku, Alligator, Bollinger, Keltner,
+    Donchian, VWAP.
+  - *Осциллятор (один, подвал):* RSI, Stochastic, CCI, Momentum, Williams %R, ROC, ADX/+DI/−DI, MACD,
+    ATR, StdDev, OBV, A/D, CMF, MFI, Force Index, Awesome, Accelerator, Gator.
+- **SIGNALS** — наши простые сигналы (RSI, MA-крест), **не Autochartist** (проприетарный, недоступен) — в отладке.
+- UI-полировка: кастомные скроллбары, кнопки-выпадашки вместо `select`, PIPS-кнопка.
+
+## Ограничения / TODO
+
+- Индикаторы клиентские и базовые; **Ichimoku без сдвига облака, Alligator без сдвига** (упрощено).
+- Скоро: **Volume Profile, TPO, Delta, Fibonacci, ZigZag, Pivot Points** (нужен особый рендеринг/данные). [[backlog]]
 - Плечо/ликвидация, комиссии — [[backlog]].
 - Только крипто; форекс/сырьё/акции/индексы — платный провайдер, [[backlog]].
 - Токены Alice/Bob в UI (demo) — до настоящего auth. [[backlog]]
