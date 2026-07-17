@@ -30,6 +30,7 @@ updated: 2026-07-17
   - [[ADR-006-ledger-double-entry]] — Ledger: счета, балансы, двойная запись · `accepted`
   - [[ADR-007-workspace-crate-structure]] — структура крейтов: общий `domain` · `accepted`
   - [[ADR-008-orchestrator]] — путь ордера: резерв → матчинг → расчёт · `accepted`
+  - [[ADR-009-market-orders-and-stp]] — рыночные заявки и предотвращение self-trade · `accepted`
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc
@@ -42,9 +43,9 @@ updated: 2026-07-17
 
 | | |
 |---|---|
-| Фаза | **2 — деньги** ✅ Ledger + оркестратор (полный путь ордера с деньгами); 48 тестов + clippy |
+| Фаза | **2 — деньги** ✅ Ledger + оркестратор (лимитные + рыночные, STP); 55 тестов + clippy |
 | Стек | Rust workspace: `domain` + `core` + `ledger` + `orchestrator`; тулчейн через Docker |
-| Следующий шаг | рыночные заявки / self-trade prevention, затем Auth + Order Gateway (сеть) → Фаза 3 (журнал) |
+| Следующий шаг | Auth + Order Gateway (сетевой слой, первый живой сервис в Docker) → Фаза 3 (журнал событий) |
 | Дата | 2026-07-17 |
 
 ## 🗺️ Дорожная карта (фазы)

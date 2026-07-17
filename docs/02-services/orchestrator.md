@@ -19,10 +19,11 @@ updated: 2026-07-17
 - `register_instrument(Instrument)` — форвардит в движок.
 - `deposit(user, asset, Amount)` — пополнить счёт (форвардит в ledger).
 - `place_limit(user, instrument, id, side, price, qty, tif) -> Result<Vec<Event>, OrderReject>` ⭐
+- `place_market(user, instrument, id, side, qty) -> Result<Vec<Event>, OrderReject>` ⭐ (IOC по смыслу)
 - `cancel(user, instrument, id) -> Result<Vec<Event>, OrderReject>`
 - Чтение: `balance/available/held(user, asset)`, `total_supply(asset)`, `book(instrument)`,
   `snapshot(instrument, depth)`.
-- `enum OrderReject { InsufficientFunds, Engine(RejectReason), NotOwner }`
+- `enum OrderReject { InsufficientFunds, Engine(RejectReason), NotOwner, SelfTrade }`
 
 ## Путь заявки (`place_limit`)
 
@@ -35,6 +36,13 @@ updated: 2026-07-17
 
 Цена резерва покупателя в расчёте: taker-покупатель → его лимит (возврат разницы); maker-покупатель
 → цена сделки (возврата нет). См. [[ADR-008-orchestrator]].
+
+### Рыночные заявки и STP (ADR-009)
+
+- **Market sell**: резерв `base = объём`. **Market buy**: резерв = стоимость по стакану (`market_buy_cost`
+  пробегает ask-уровни; точно, т.к. синхронно и своих асков нет из-за STP). Не по карману → `InsufficientFunds`.
+- **Self-trade prevention** (`would_self_trade`): если входящая пересеклась бы со своей же встречной
+  стоящей заявкой — `SelfTrade`, без мутаций. Политика «отклонить входящую». См. [[ADR-009-market-orders-and-stp]].
 
 ## Состояние
 
@@ -55,12 +63,13 @@ updated: 2026-07-17
 
 ## Тесты
 
-`orchestrator/tests/order_path.rs` — 10 тестов: резерв buy/sell, недостаток средств, полный матч
-с движением денег, price improvement, частичное исполнение с остатком, отмена, отказ движка,
-защита от отмены чужой заявки, сходимость.
+`orchestrator/tests/order_path.rs` — 17 тестов: резерв buy/sell, недостаток средств, полный матч
+с движением денег, price improvement, частичное исполнение, отмена, отказ движка, защита от отмены
+чужой заявки, **рыночные заявки** (sell/buy, точная стоимость, тонкая ликвидность, недостаток средств),
+**STP** (лимитная/рыночная/непересекающаяся), сходимость.
 
 ## Ограничения / TODO
 
-- Только лимитные заявки. Рыночные (резерв при неизвестной цене) — [[backlog]].
-- Self-trade допускается (численно корректно) — предотвращение в [[backlog]].
+- STP — политика «отклонить входящую»; тонкие политики (cancel-resting, decrement) — [[backlog]].
+- Market-buy при недостатке средств отклоняется целиком (нет частичного по бюджету) — [[backlog]].
 - Нет журнала событий пути ордера — появится с event sourcing (Фаза 3).

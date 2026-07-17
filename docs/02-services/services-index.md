@@ -42,8 +42,8 @@ ledger/                     — счета/балансы (крейт ledger)   
 └── tests/ledger.rs         — 11 тестов (сходимость, price improvement)
 
 orchestrator/               — путь ордера (крейт orchestrator) → [[orchestrator]]
-├── src/lib.rs              — Orchestrator: place_limit/cancel (резерв→матчинг→расчёт)
-└── tests/order_path.rs     — 10 тестов (движение денег, сходимость)
+├── src/lib.rs              — Orchestrator: place_limit/place_market/cancel + STP
+└── tests/order_path.rs     — 17 тестов (движение денег, рыночные, STP, сходимость)
 ```
 
-Итого тестов: **48** (core 27 + ledger 11 + orchestrator 10). Запуск: `bash scripts/test.sh`.
+Итого тестов: **55** (core 27 + ledger 11 + orchestrator 17). Запуск: `bash scripts/test.sh`.

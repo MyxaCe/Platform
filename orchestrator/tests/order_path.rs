@@ -40,6 +40,12 @@ fn buy(o: &mut Orchestrator, u: UserId, id: u64, price: i64, qty: i64) -> Result
 fn sell(o: &mut Orchestrator, u: UserId, id: u64, price: i64, qty: i64) -> Result<(), OrderReject> {
     o.place_limit(u, INST, domain::order::OrderId(id), Side::Sell, Price(price), Qty(qty), TimeInForce::Gtc).map(|_| ())
 }
+fn market_buy(o: &mut Orchestrator, u: UserId, id: u64, qty: i64) -> Result<(), OrderReject> {
+    o.place_market(u, INST, domain::order::OrderId(id), Side::Buy, Qty(qty)).map(|_| ())
+}
+fn market_sell(o: &mut Orchestrator, u: UserId, id: u64, qty: i64) -> Result<(), OrderReject> {
+    o.place_market(u, INST, domain::order::OrderId(id), Side::Sell, Qty(qty)).map(|_| ())
+}
 
 // ---- Резерв ---------------------------------------------------------------
 
@@ -169,6 +175,111 @@ fn cannot_cancel_another_users_order() {
     assert_eq!(o.cancel(BOB, INST, domain::order::OrderId(1)), Err(OrderReject::NotOwner));
     assert_eq!(o.held(ALICE, BTC), amt(5)); // резерв не тронут
     assert!(o.book(INST).unwrap().best_ask().is_some()); // заявка на месте
+}
+
+// ---- Рыночные заявки ------------------------------------------------------
+
+#[test]
+fn market_sell_matches_resting_bid() {
+    let mut o = setup(1, 1, 1);
+    o.deposit(ALICE, BTC, amt(10));
+    o.deposit(BOB, USD, amt(500));
+
+    buy(&mut o, BOB, 1, 100, 5).unwrap(); // maker bid
+    market_sell(&mut o, ALICE, 2, 5).unwrap(); // taker market sell
+
+    assert_eq!(o.available(ALICE, USD), amt(500));
+    assert_eq!(o.available(ALICE, BTC), amt(5));
+    assert_eq!(o.available(BOB, BTC), amt(5));
+    assert_eq!(o.held(BOB, USD), Amount::ZERO);
+    assert_eq!(o.total_supply(USD), amt(500));
+    assert_eq!(o.total_supply(BTC), amt(10));
+}
+
+#[test]
+fn market_buy_sweeps_levels_with_exact_cost() {
+    let mut o = setup(1, 1, 1);
+    o.deposit(ALICE, BTC, amt(10));
+    o.deposit(BOB, USD, amt(1000));
+
+    sell(&mut o, ALICE, 1, 100, 5).unwrap();
+    sell(&mut o, ALICE, 2, 101, 5).unwrap();
+    market_buy(&mut o, BOB, 3, 8).unwrap(); // 5@100 + 3@101 = 803
+
+    assert_eq!(o.available(BOB, USD), amt(197)); // 1000 - 803
+    assert_eq!(o.held(BOB, USD), Amount::ZERO);
+    assert_eq!(o.available(BOB, BTC), amt(8));
+    assert_eq!(o.available(ALICE, USD), amt(803));
+    assert_eq!(o.book(INST).unwrap().qty_at(Side::Sell, Price(101)), Qty(2));
+    assert_eq!(o.total_supply(USD), amt(1000));
+    assert_eq!(o.total_supply(BTC), amt(10));
+}
+
+#[test]
+fn market_buy_insufficient_funds_is_rejected() {
+    let mut o = setup(1, 1, 1);
+    o.deposit(ALICE, BTC, amt(10));
+    o.deposit(BOB, USD, amt(300));
+    sell(&mut o, ALICE, 1, 100, 5).unwrap();
+
+    assert_eq!(market_buy(&mut o, BOB, 2, 5), Err(OrderReject::InsufficientFunds)); // нужно 500
+    assert_eq!(o.available(BOB, USD), amt(300));
+    assert_eq!(o.held(BOB, USD), Amount::ZERO);
+}
+
+#[test]
+fn market_buy_partial_on_thin_liquidity() {
+    let mut o = setup(1, 1, 1);
+    o.deposit(ALICE, BTC, amt(3));
+    o.deposit(BOB, USD, amt(1000));
+    sell(&mut o, ALICE, 1, 100, 3).unwrap();
+
+    market_buy(&mut o, BOB, 2, 5).unwrap(); // ликвидности только 3
+
+    assert_eq!(o.available(BOB, BTC), amt(3));
+    assert_eq!(o.available(BOB, USD), amt(700)); // потрачено 300
+    assert_eq!(o.held(BOB, USD), Amount::ZERO); // остаток резерва не повис
+    assert_eq!(o.total_supply(USD), amt(1000));
+}
+
+// ---- Self-trade prevention ------------------------------------------------
+
+#[test]
+fn self_trade_limit_is_rejected() {
+    let mut o = setup(1, 1, 1);
+    o.deposit(ALICE, BTC, amt(10));
+    o.deposit(ALICE, USD, amt(1000));
+    sell(&mut o, ALICE, 1, 100, 5).unwrap();
+
+    // Своя же покупка по 100 пересеклась бы со своей продажей.
+    assert_eq!(buy(&mut o, ALICE, 2, 100, 5), Err(OrderReject::SelfTrade));
+    // Продажа на месте, лишнего резерва нет.
+    assert_eq!(o.held(ALICE, BTC), amt(5));
+    assert_eq!(o.held(ALICE, USD), Amount::ZERO);
+    assert!(o.book(INST).unwrap().best_ask().is_some());
+}
+
+#[test]
+fn non_crossing_own_order_is_allowed() {
+    let mut o = setup(1, 1, 1);
+    o.deposit(ALICE, BTC, amt(10));
+    o.deposit(ALICE, USD, amt(1000));
+    sell(&mut o, ALICE, 1, 101, 5).unwrap();
+
+    // Покупка по 100 не пересекается со своей продажей по 101 — разрешено.
+    assert_eq!(buy(&mut o, ALICE, 2, 100, 5), Ok(()));
+    assert_eq!(o.book(INST).unwrap().best_bid(), Some(Price(100)));
+}
+
+#[test]
+fn self_trade_market_is_rejected() {
+    let mut o = setup(1, 1, 1);
+    o.deposit(ALICE, BTC, amt(10));
+    o.deposit(ALICE, USD, amt(1000));
+    sell(&mut o, ALICE, 1, 100, 5).unwrap();
+
+    assert_eq!(market_buy(&mut o, ALICE, 2, 5), Err(OrderReject::SelfTrade));
+    assert_eq!(o.held(ALICE, USD), Amount::ZERO);
 }
 
 #[test]
