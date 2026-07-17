@@ -3,56 +3,89 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Exchange — BTC-USDT</title>
+  <title>Exchange Terminal</title>
   <link rel="stylesheet" href="/style.css" />
   <script src="/vendor/lightweight-charts.js"></script>
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand"><span class="dot"></span> EXCHANGE <span class="muted">BTC-USDT · наш движок</span></div>
-    <div class="topbar__right">
-      <span id="lastPrice" class="lastprice">—</span>
-      <button id="autoBtn" class="btn btn--accent">▶ Авто-демо</button>
-      <span id="status" class="status status--off">● offline</span>
+  <!-- Верхняя панель -->
+  <header class="top">
+    <div class="logo"><span class="logo__mark">E</span> Exchange<span class="muted">Pro</span></div>
+    <div class="metrics">
+      <div class="metric"><span class="metric__l">BALANCE</span><span id="mBalance" class="metric__v">$0</span></div>
+      <div class="metric"><span class="metric__l">CREDIT</span><span class="metric__v">$0</span></div>
+      <div class="metric"><span class="metric__l">EQUITY</span><span id="mEquity" class="metric__v">$0</span></div>
+      <div class="metric"><span class="metric__l">MARGIN</span><span class="metric__v">$0</span></div>
+      <div class="metric"><span class="metric__l">FREE BALANCE</span><span id="mFree" class="metric__v">$0</span></div>
+      <div class="metric"><span class="metric__l">OPEN P&amp;L</span><span class="metric__v">$0</span></div>
+    </div>
+    <div class="top__right">
+      <button class="btn btn--deposit">DEPOSIT</button>
+      <select id="userSel" class="usersel"><option value="alice-token">alice@demo</option><option value="bob-token">bob@demo</option></select>
+      <span id="status" class="status status--off">●</span>
     </div>
   </header>
 
-  <main class="layout">
-    <!-- Стакан -->
-    <aside class="panel book">
-      <div class="panel__head">Стакан</div>
-      <div class="book__head"><span>Цена</span><span class="ta-right">Кол-во</span></div>
-      <div id="asks" class="book__side book__side--asks"></div>
-      <div id="spread" class="book__spread">—</div>
-      <div id="bids" class="book__side book__side--bids"></div>
+  <main class="grid">
+    <!-- Список инструментов -->
+    <aside class="watch">
+      <div class="watch__search"><input id="search" placeholder="Search…" /></div>
+      <div class="watch__title">⭐ POPULAR</div>
+      <div class="watch__head">
+        <span>INSTR.</span><span class="ta-r">CHANGE</span><span class="ta-r">SELL</span>
+        <span class="ta-r">BUY</span><span class="ta-r">SPREAD</span>
+      </div>
+      <div id="instruments" class="watch__rows"></div>
     </aside>
 
     <!-- График -->
-    <section class="panel chartpane">
-      <div class="panel__head">График (свечи из сделок)</div>
-      <div id="chart" class="chart"></div>
+    <section class="center">
+      <div class="toolbar">
+        <div id="tfs" class="tfs">
+          <button data-tf="60">1M</button><button data-tf="300">5M</button>
+          <button data-tf="900">15M</button><button data-tf="1800">30M</button>
+          <button data-tf="3600" class="active">1H</button><button data-tf="14400">4H</button>
+          <button data-tf="86400">1D</button>
+        </div>
+      </div>
+      <div class="chartwrap">
+        <div id="ohlc" class="ohlc"></div>
+        <div id="watermark" class="watermark">—</div>
+        <div id="chart" class="chart"></div>
+      </div>
+      <div class="bottom">
+        <div class="bottom__tabs"><span class="active">MARKET TRADES</span></div>
+        <div class="trades__head"><span>INSTR.</span><span class="ta-r">ЦЕНА</span><span class="ta-r">КОЛ-ВО</span><span class="ta-r">ВРЕМЯ</span></div>
+        <div id="tape" class="tape"></div>
+      </div>
     </section>
 
-    <!-- Сделки + форма -->
-    <aside class="panel side">
-      <div class="panel__head">Заявка</div>
-      <form id="orderForm" class="form">
-        <div class="row2">
-          <select id="actor"><option value="alice-token">Alice</option><option value="bob-token">Bob</option></select>
-          <select id="otype"><option value="limit">Лимит</option><option value="market">Рынок</option></select>
+    <!-- Панель сделки -->
+    <aside class="deal">
+      <div class="deal__tabs">
+        <button id="tabDeal" class="active">OPEN DEAL</button>
+        <button id="tabLimit">LIMIT ORDER</button>
+      </div>
+      <div class="deal__sym">
+        <div><div id="dealSym" class="deal__symname">—</div><div id="dealSub" class="muted small">—</div></div>
+        <div id="dealChange" class="deal__change">0.00%</div>
+      </div>
+
+      <div class="deal__body">
+        <label class="lbl">LOT</label>
+        <div class="lotrow">
+          <button id="lotMinus" class="btn lotbtn">−</button>
+          <input id="lot" type="number" step="0.001" value="0.01" />
+          <button id="lotPlus" class="btn lotbtn">+</button>
         </div>
-        <div class="row2">
-          <button type="button" class="btn side-btn side-btn--buy active" data-side="buy">Купить</button>
-          <button type="button" class="btn side-btn side-btn--sell" data-side="sell">Продать</button>
+        <div id="priceRow" class="pricerow hidden">
+          <label class="lbl">PRICE</label>
+          <input id="price" type="number" step="0.01" />
         </div>
-        <input id="price" type="number" step="0.01" placeholder="Цена" />
-        <input id="qty" type="number" step="0.001" placeholder="Кол-во" value="1" />
-        <button type="submit" class="btn btn--submit">Отправить</button>
-        <div id="formMsg" class="formmsg"></div>
-      </form>
-      <div class="panel__head">Лента сделок</div>
-      <div class="trades__head"><span>Цена</span><span class="ta-right">Кол-во</span><span class="ta-right">Время</span></div>
-      <div id="trades" class="trades"></div>
+        <button id="btnBuy" class="orderbtn buy">BUY <span id="askPx">—</span></button>
+        <button id="btnSell" class="orderbtn sell">SELL <span id="bidPx">—</span></button>
+        <div id="dealMsg" class="dealmsg"></div>
+      </div>
     </aside>
   </main>
 

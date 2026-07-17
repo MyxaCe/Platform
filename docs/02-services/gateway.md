@@ -29,13 +29,22 @@ docker compose down              # остановить
 |---|---|---|---|
 | GET | `/health` | — | проверка живости |
 | POST | `/admin/users` | — (dev) | создать пользователя `{token}` → `{user_id}` |
-| POST | `/admin/instruments` | — (dev) | зарегистрировать инструмент |
 | POST | `/admin/deposit` | — (dev) | пополнить счёт `{user_id, asset, amount}` |
+| GET | `/instruments` | — | список пар с `last/change/bid/ask/high/decimals` |
+| GET | `/candles/{instrument}?tf=SEC&limit=N` | — | свечи OHLCV таймфрейма |
 | POST | `/orders` | Bearer | разместить `{instrument, side, type, price?, qty, tif?}` → `{order_id, events}` |
 | DELETE | `/orders/{id}?instrument=N` | Bearer | отменить |
 | GET | `/book/{instrument}?depth=N` | — | снапшот стакана `{bids, asks}` |
 | GET | `/balance/{asset}` | Bearer | баланс `{available, held}` |
 | WS | `/stream` | — | живая лента событий (JSON) |
+
+## Market data и демо-симулятор (ADR-012)
+
+- Свечи ведёт [[marketdata|CandleStore]]: на каждую сделку `ingest(instrument, ts, price, qty)`
+  (ts — серверные секунды). Таймфреймы: 1m,5m,15m,30m,1h,4h,1d.
+- **Демо-симулятор** (`seed_market` + `spawn_simulator`): фоновая задача двигает котировки по 5 парам
+  (BTC/ETH/SOL/XRP/DOGE-USDT), обновляет стакан и делает встречные сделки (два sim-пользователя, без
+  self-trade). Плюс синтетический бэкфилл истории свечей при старте. Всё — **демо-данные**.
 
 Ошибки: `InsufficientFunds → 402`, `SelfTrade → 409`, `NotOwner → 403`, `Engine(reason) → 400`,
 нет/битый токен → `401`.

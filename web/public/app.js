@@ -1,81 +1,153 @@
 'use strict';
 
-// ---- Конфиг (демо-инструмент BTC-USDT) -----------------------------------
-const INSTRUMENT = 1;
-const PRICE_SCALE = 100;   // price_decimals = 2
-const QTY_SCALE = 1000;    // qty_decimals = 3
-const TOKENS = { alice: 'alice-token', bob: 'bob-token' };
+// ---- Состояние ------------------------------------------------------------
+let META = {};            // id -> {symbol, price_decimals, qty_decimals, ...}
+let selected = null;      // текущий инструмент id
+let tf = 3600;            // текущий таймфрейм (сек)
+let orderMode = 'market'; // 'market' | 'limit'
+const rowEls = {};        // id -> DOM строка списка
 
-const px = (raw) => raw / PRICE_SCALE;
-const qy = (raw) => raw / QTY_SCALE;
-const fmtP = (raw) => px(raw).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const fmtQ = (raw) => qy(raw).toFixed(3);
+const token = () => document.getElementById('userSel').value;
+const pdec = (id) => (META[id]?.price_decimals ?? 2);
+const qdec = (id) => (META[id]?.qty_decimals ?? 3);
+const pscale = (id) => 10 ** pdec(id);
+const qscale = (id) => 10 ** qdec(id);
+const fmtP = (id, raw) => (raw / pscale(id)).toLocaleString('en-US', { minimumFractionDigits: pdec(id), maximumFractionDigits: pdec(id) });
+const fmtQ = (id, raw) => (raw / qscale(id)).toFixed(qdec(id));
 
 // ---- График ---------------------------------------------------------------
 const chartEl = document.getElementById('chart');
 const chart = LightweightCharts.createChart(chartEl, {
   layout: { background: { color: '#0b0e14' }, textColor: '#6b7688' },
-  grid: { vertLines: { color: 'rgba(31,39,53,.5)' }, horzLines: { color: 'rgba(31,39,53,.5)' } },
+  grid: { vertLines: { color: 'rgba(31,39,53,.4)' }, horzLines: { color: 'rgba(31,39,53,.4)' } },
   rightPriceScale: { borderColor: '#1f2735' },
-  timeScale: { borderColor: '#1f2735', timeVisible: true, secondsVisible: true },
+  timeScale: { borderColor: '#1f2735', timeVisible: true, secondsVisible: tf < 60 },
+  crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
 });
 const candles = chart.addCandlestickSeries({
   upColor: '#26a69a', downColor: '#ef5350', borderUpColor: '#26a69a',
   borderDownColor: '#ef5350', wickUpColor: '#26a69a', wickDownColor: '#ef5350',
-  priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
 });
 const volume = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: '', color: '#2b3648' });
 volume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 new ResizeObserver(() => chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight })).observe(chartEl);
 
-let curBar = null; // {time, open, high, low, close}
-let curVol = 0;
+let lastBar = null;
+chart.subscribeCrosshairMove((p) => {
+  const d = p.seriesData?.get(candles);
+  const id = selected;
+  if (d) document.getElementById('ohlc').innerHTML =
+    `O <b>${fmtP(id, d.open * pscale(id))}</b> H <b>${fmtP(id, d.high * pscale(id))}</b> L <b>${fmtP(id, d.low * pscale(id))}</b> C <b>${fmtP(id, d.close * pscale(id))}</b>`;
+});
 
-function onTrade(rawPrice, rawQty) {
-  const price = px(rawPrice);
-  const t = Math.floor(Date.now() / 1000);
-  if (!curBar || curBar.time !== t) {
-    curBar = { time: t, open: price, high: price, low: price, close: price };
-    curVol = qy(rawQty);
-  } else {
-    curBar.high = Math.max(curBar.high, price);
-    curBar.low = Math.min(curBar.low, price);
-    curBar.close = price;
-    curVol += qy(rawQty);
-  }
-  candles.update(curBar);
-  volume.update({ time: t, value: curVol, color: curBar.close >= curBar.open ? 'rgba(38,166,154,.4)' : 'rgba(239,83,80,.4)' });
-  document.getElementById('lastPrice').textContent = fmtP(rawPrice);
+async function loadCandles(id, timeframe) {
+  const r = await fetch(`/candles/${id}?tf=${timeframe}&limit=300`);
+  const raw = await r.json();
+  const s = pscale(id), v = qscale(id);
+  candles.setData(raw.map((c) => ({ time: c.time, open: c.open / s, high: c.high / s, low: c.low / s, close: c.close / s })));
+  volume.setData(raw.map((c) => ({ time: c.time, value: c.volume / v, color: c.close >= c.open ? 'rgba(38,166,154,.4)' : 'rgba(239,83,80,.4)' })));
+  lastBar = raw.length ? { ...raw[raw.length - 1] } : null;
+  chart.timeScale().fitContent();
 }
 
-// ---- Стакан (опрос) -------------------------------------------------------
-async function refreshBook() {
+function onLiveTrade(id, rawPrice, rawQty) {
+  if (id !== selected || !lastBar) return;
+  const s = pscale(id);
+  const now = Math.floor(Date.now() / 1000);
+  const b = now - (now % tf);
+  if (b > lastBar.time) lastBar = { time: b, open: rawPrice, high: rawPrice, low: rawPrice, close: rawPrice, volume: rawQty };
+  else { lastBar.high = Math.max(lastBar.high, rawPrice); lastBar.low = Math.min(lastBar.low, rawPrice); lastBar.close = rawPrice; }
+  candles.update({ time: lastBar.time, open: lastBar.open / s, high: lastBar.high / s, low: lastBar.low / s, close: lastBar.close / s });
+}
+
+// ---- Список инструментов --------------------------------------------------
+async function refreshInstruments() {
+  const r = await fetch('/instruments');
+  const list = await r.json();
+  const cont = document.getElementById('instruments');
+  for (const it of list) {
+    META[it.id] = it;
+    let el = rowEls[it.id];
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'irow';
+      el.addEventListener('click', () => selectInstrument(it.id));
+      cont.appendChild(el);
+      rowEls[it.id] = el;
+      if (selected === null) selectInstrument(it.id);
+    }
+    const up = it.change >= 0;
+    el.innerHTML =
+      `<div class="sym">${it.symbol.split('-')[0]}<small>/${it.symbol.split('-')[1] || 'USDT'}</small></div>` +
+      `<div class="chg ta-r ${up ? 'up' : 'down'}">${up ? '+' : ''}${it.change.toFixed(2)}%</div>` +
+      `<div class="sell ta-r">${it.bid != null ? fmtP(it.id, it.bid) : '—'}</div>` +
+      `<div class="buy ta-r">${it.ask != null ? fmtP(it.id, it.ask) : '—'}</div>` +
+      `<div class="ta-r muted">${it.bid != null && it.ask != null ? (it.ask - it.bid) : '—'}</div>`;
+    el.classList.toggle('active', it.id === selected);
+  }
+  updateDealPanel();
+  updateMetrics();
+}
+
+// ---- Панель сделки --------------------------------------------------------
+function updateDealPanel() {
+  const it = META[selected];
+  if (!it) return;
+  document.getElementById('dealSym').textContent = it.symbol;
+  document.getElementById('dealSub').textContent = `база ${it.base} / котир. ${it.quote}`;
+  const chg = document.getElementById('dealChange');
+  const up = it.change >= 0;
+  chg.textContent = `${up ? '+' : ''}${it.change.toFixed(2)}%`;
+  chg.className = `deal__change ${up ? 'up' : 'down'}`;
+  document.getElementById('askPx').textContent = it.ask != null ? fmtP(it.id, it.ask) : '—';
+  document.getElementById('bidPx').textContent = it.bid != null ? fmtP(it.id, it.bid) : '—';
+  document.getElementById('watermark').textContent = it.symbol;
+  if (orderMode === 'limit' && !document.getElementById('price').value && it.last != null)
+    document.getElementById('price').value = (it.last / pscale(it.id)).toFixed(pdec(it.id));
+}
+
+async function updateMetrics() {
   try {
-    const r = await fetch(`/book/${INSTRUMENT}?depth=12`);
+    const it = META[selected]; if (!it) return;
+    const r = await fetch(`/balance/${it.quote}`, { headers: { Authorization: `Bearer ${token()}` } });
+    if (!r.ok) return;
     const b = await r.json();
-    const maxQ = Math.max(1, ...b.bids.map((l) => l.qty), ...b.asks.map((l) => l.qty));
-    const row = (l, cls) =>
-      `<div class="lvl ${cls}"><div class="bar" style="width:${(l.qty / maxQ) * 100}%"></div>` +
-      `<span class="p">${fmtP(l.price)}</span><span>${fmtQ(l.qty)}</span></div>`;
-    document.getElementById('asks').innerHTML = b.asks.slice().reverse().map((l) => row(l, 'ask')).join('');
-    document.getElementById('bids').innerHTML = b.bids.map((l) => row(l, 'bid')).join('');
-    const bestBid = b.bids[0]?.price, bestAsk = b.asks[0]?.price;
-    document.getElementById('spread').textContent =
-      bestBid && bestAsk ? `спред ${fmtP(bestAsk - bestBid)}` : '—';
+    const s = pscale(it.id); // котируемый актив в тех же decimals (упрощённо)
+    const av = b.available / s, eq = (b.available + b.held) / s;
+    const f = (n) => '$' + n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+    document.getElementById('mBalance').textContent = f(av);
+    document.getElementById('mEquity').textContent = f(eq);
+    document.getElementById('mFree').textContent = f(av);
   } catch (e) { /* игнор */ }
 }
-setInterval(refreshBook, 700);
-refreshBook();
+
+// ---- Выбор инструмента / таймфрейма ---------------------------------------
+async function selectInstrument(id) {
+  selected = id;
+  Object.entries(rowEls).forEach(([k, el]) => el.classList.toggle('active', +k === id));
+  document.getElementById('price').value = '';
+  await loadCandles(id, tf);
+  updateDealPanel();
+  updateMetrics();
+}
+
+document.getElementById('tfs').addEventListener('click', (e) => {
+  const btn = e.target.closest('button'); if (!btn) return;
+  tf = +btn.dataset.tf;
+  document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn));
+  chart.applyOptions({ timeScale: { secondsVisible: tf < 60 } });
+  if (selected != null) loadCandles(selected, tf);
+});
 
 // ---- Лента сделок ---------------------------------------------------------
-function addTrade(rawPrice, rawQty, side) {
-  const el = document.getElementById('trades');
+function addTape(id, rawPrice, rawQty, side) {
+  const el = document.getElementById('tape');
   const div = document.createElement('div');
-  div.className = 'trade';
-  const time = new Date().toLocaleTimeString('ru-RU', { hour12: false });
-  div.innerHTML = `<span class="p ${side}">${fmtP(rawPrice)}</span><span>${fmtQ(rawQty)}</span><span class="t">${time}</span>`;
+  div.className = 't';
+  const tm = new Date().toLocaleTimeString('ru-RU', { hour12: false });
+  div.innerHTML = `<span>${META[id]?.symbol || id}</span><span class="px ${side}">${fmtP(id, rawPrice)}</span><span>${fmtQ(id, rawQty)}</span><span class="tm">${tm}</span>`;
   el.prepend(div);
-  while (el.childElementCount > 40) el.removeChild(el.lastChild);
+  while (el.childElementCount > 60) el.removeChild(el.lastChild);
 }
 
 // ---- WebSocket ------------------------------------------------------------
@@ -83,77 +155,68 @@ function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/stream`);
   const st = document.getElementById('status');
-  ws.onopen = () => { st.textContent = '● live'; st.className = 'status status--on'; };
-  ws.onclose = () => { st.textContent = '● offline'; st.className = 'status status--off'; setTimeout(connectWS, 1500); };
+  ws.onopen = () => { st.className = 'status status--on'; };
+  ws.onclose = () => { st.className = 'status status--off'; setTimeout(connectWS, 1500); };
   ws.onmessage = (ev) => {
-    let events;
-    try { events = JSON.parse(ev.data); } catch { return; }
+    let events; try { events = JSON.parse(ev.data); } catch { return; }
     for (const e of events) {
-      if (e.type === 'trade') { onTrade(e.price, e.qty); addTrade(e.price, e.qty, e.taker_side); }
+      if (e.type === 'trade') { addTape(e.instrument, e.price, e.qty, e.taker_side); onLiveTrade(e.instrument, e.price, e.qty); }
     }
   };
 }
-connectWS();
 
-// ---- Форма заявки ---------------------------------------------------------
-let side = 'buy';
-document.querySelectorAll('.side-btn').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    side = btn.dataset.side;
-    document.querySelectorAll('.side-btn').forEach((b) => b.classList.toggle('active', b === btn));
-  });
-});
+// ---- Форма сделки ---------------------------------------------------------
+document.getElementById('tabDeal').addEventListener('click', () => setMode('market'));
+document.getElementById('tabLimit').addEventListener('click', () => setMode('limit'));
+function setMode(m) {
+  orderMode = m;
+  document.getElementById('tabDeal').classList.toggle('active', m === 'market');
+  document.getElementById('tabLimit').classList.toggle('active', m === 'limit');
+  document.getElementById('priceRow').classList.toggle('hidden', m !== 'limit');
+  updateDealPanel();
+}
+document.getElementById('lotMinus').addEventListener('click', () => stepLot(-1));
+document.getElementById('lotPlus').addEventListener('click', () => stepLot(1));
+function stepLot(d) {
+  const i = document.getElementById('lot');
+  const v = Math.max(0.001, (parseFloat(i.value) || 0) + d * 0.01);
+  i.value = v.toFixed(3);
+}
 
-async function placeOrder(token, side, otype, priceReal, qtyReal) {
-  const body = { instrument: INSTRUMENT, side, type: otype, qty: Math.round(qtyReal * QTY_SCALE) };
-  if (otype === 'limit') body.price = Math.round(priceReal * PRICE_SCALE);
+async function submit(side) {
+  const id = selected; if (id == null) return;
+  const lot = parseFloat(document.getElementById('lot').value);
+  const msg = document.getElementById('dealMsg');
+  if (!lot || lot <= 0) { msg.textContent = 'Укажи лот'; msg.style.color = 'var(--down)'; return; }
+  const body = { instrument: id, side, type: orderMode, qty: Math.round(lot * qscale(id)) };
+  if (orderMode === 'limit') {
+    const price = parseFloat(document.getElementById('price').value);
+    if (!(price > 0)) { msg.textContent = 'Укажи цену'; msg.style.color = 'var(--down)'; return; }
+    body.price = Math.round(price * pscale(id));
+  }
   const r = await fetch('/orders', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token()}` },
     body: JSON.stringify(body),
   });
-  return { ok: r.ok, status: r.status, data: await r.json().catch(() => null) };
+  const data = await r.json().catch(() => null);
+  msg.textContent = r.ok ? `OK: заявка #${data.order_id}` : `Отказ ${r.status}: ${data?.error || ''}`;
+  msg.style.color = r.ok ? 'var(--up)' : 'var(--down)';
+  updateMetrics();
 }
+document.getElementById('btnBuy').addEventListener('click', () => submit('buy'));
+document.getElementById('btnSell').addEventListener('click', () => submit('sell'));
+document.getElementById('userSel').addEventListener('change', updateMetrics);
 
-document.getElementById('orderForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const token = document.getElementById('actor').value;
-  const otype = document.getElementById('otype').value;
-  const price = parseFloat(document.getElementById('price').value);
-  const qty = parseFloat(document.getElementById('qty').value);
-  const msg = document.getElementById('formMsg');
-  if (!qty || qty <= 0 || (otype === 'limit' && !(price > 0))) { msg.textContent = 'Заполни цену и количество'; return; }
-  const res = await placeOrder(token, side, otype, price, qty);
-  msg.textContent = res.ok ? `OK: заявка #${res.data.order_id}` : `Отказ ${res.status}: ${res.data?.error || ''}`;
-  msg.style.color = res.ok ? 'var(--up)' : 'var(--down)';
-  refreshBook();
+// ---- Поиск ----------------------------------------------------------------
+document.getElementById('search').addEventListener('input', (e) => {
+  const q = e.target.value.toLowerCase();
+  Object.entries(rowEls).forEach(([id, el]) => {
+    el.style.display = (META[id]?.symbol || '').toLowerCase().includes(q) ? '' : 'none';
+  });
 });
 
-// ---- Авто-демо (alice продаёт, bob покупает — без self-trade) -------------
-let autoTimer = null;
-let mid = 500; // реальная цена, ~500.00
-async function autoTick() {
-  mid += (Math.random() - 0.5) * 0.8;
-  mid = Math.max(480, Math.min(520, mid));
-  const spread = 0.15;
-  const q = () => 1 + Math.floor(Math.random() * 3); // 0.001..0.003 в реальных единицах
-  const qr = (n) => n / QTY_SCALE;
-  try {
-    // ликвидность
-    await placeOrder(TOKENS.alice, 'sell', 'limit', +(mid + spread).toFixed(2), qr(q()));
-    await placeOrder(TOKENS.bob, 'buy', 'limit', +(mid - spread).toFixed(2), qr(q()));
-    // сделка
-    if (Math.random() < 0.5) await placeOrder(TOKENS.bob, 'buy', 'market', 0, qr(q()));
-    else await placeOrder(TOKENS.alice, 'sell', 'market', 0, qr(q()));
-  } catch (e) { /* игнор */ }
-}
-document.getElementById('autoBtn').addEventListener('click', () => {
-  const btn = document.getElementById('autoBtn');
-  if (autoTimer) {
-    clearInterval(autoTimer); autoTimer = null;
-    btn.classList.remove('on'); btn.textContent = '▶ Авто-демо';
-  } else {
-    autoTimer = setInterval(autoTick, 800);
-    btn.classList.add('on'); btn.textContent = '⏸ Авто-демо';
-  }
-});
+// ---- Старт ----------------------------------------------------------------
+refreshInstruments();
+setInterval(refreshInstruments, 1000);
+setInterval(() => { if (selected != null) loadCandles(selected, tf); }, 4000);
+connectWS();

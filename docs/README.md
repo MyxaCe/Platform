@@ -33,6 +33,7 @@ updated: 2026-07-17
   - [[ADR-009-market-orders-and-stp]] — рыночные заявки и предотвращение self-trade · `accepted`
   - [[ADR-010-gateway-stack]] — стек сетевого шлюза (tokio + axum + serde) · `accepted`
   - [[ADR-011-web-ui]] — веб-интерфейс (живой стакан + график) · `accepted`
+  - [[ADR-012-market-data-and-terminal-ui]] — свечи, несколько пар, терминальный UI · `accepted`
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc
@@ -45,10 +46,10 @@ updated: 2026-07-17
 
 | | |
 |---|---|
-| Фаза | **2c — сеть+UI** ✅ Gateway REST+WS + браузерный интерфейс (стакан/график/лента); 62 теста + clippy |
-| Стек | Rust: `domain`+`core`+`ledger`+`orchestrator`+`gateway` (tokio/axum) · web: nginx + JS (lightweight-charts) |
-| Запуск | `docker compose up --build` → **http://localhost:8888** (демо BTC-USDT; кнопка «Авто-демо») |
-| Следующий шаг | Фаза 3 — журнал событий (персистентная истина) / настоящий auth / серверные свечи+история |
+| Фаза | **2d — терминал** ✅ market data (свечи), 5 пар, симулятор, UI-терминал; 67 тестов + clippy |
+| Стек | Rust: `domain`+`core`+`ledger`+`orchestrator`+`marketdata`+`gateway` · web: nginx + JS (lightweight-charts) |
+| Запуск | `docker compose up --build` → **http://localhost:8888** (5 пар, рынок двигается симулятором) |
+| Следующий шаг | Фаза 3 — журнал событий (персистентная истина: durable свечи/аудит) / настоящий auth |
 | Дата | 2026-07-17 |
 
 ## 🗺️ Дорожная карта (фазы)

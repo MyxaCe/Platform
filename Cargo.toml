@@ -1,6 +1,6 @@
 # Cargo workspace — корень проекта.
 # domain — общий словарь; core — matching-ядро; ledger — счета/балансы;
-# orchestrator — путь ордера; gateway — сетевой шлюз (REST + WS).
+# orchestrator — путь ордера; marketdata — свечи; gateway — сетевой шлюз (REST + WS).
 [workspace]
 resolver = "2"
-members = ["domain", "core", "ledger", "orchestrator", "gateway"]
+members = ["domain", "core", "ledger", "orchestrator", "marketdata", "gateway"]

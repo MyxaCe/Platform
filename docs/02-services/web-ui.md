@@ -4,44 +4,43 @@ status: active
 updated: 2026-07-17
 ---
 
-# Web UI
+# Web UI (терминал)
 
 ## Назначение
 
-Браузерный интерфейс биржи: живой **стакан**, **лента сделок**, **свечной график** и **форма
-заявки** — на реальных данных [[gateway]]. Статический SPA (vanilla JS + TradingView Lightweight
-Charts), отдаётся nginx'ом, который проксирует API/WS на gateway. Каталог `web/`. ADR-011.
+Браузерный торговый терминал (стиль профессиональной платформы, ADR-012): верхняя панель метрик,
+левый список инструментов, свечной график с таймфреймами, правая панель BUY/SELL, нижняя лента
+сделок. На реальных данных [[gateway]]. Статический SPA (vanilla JS + TradingView Lightweight
+Charts) за nginx. Каталог `web/`.
 
 ## Запуск
 
 ```bash
-docker compose up --build     # gateway (внутренний) + web (nginx)
+docker compose up --build   # gateway (внутренний) + web (nginx)
 # → http://localhost:8888
 ```
 
-## Устройство
+## Компоненты и данные
 
-- `web/public/index.html` — разметка: стакан | график | (форма + лента).
-- `web/public/app.js`:
-  - **график** — свечи строятся из потока сделок WS `/stream`, агрегируются по секундным корзинам
-    (время — клиентское, ядро детерминировано и метки не шлёт);
-  - **стакан** — опрос `GET /book/1?depth=12` каждые 700 мс, отрисовка с барами объёма;
-  - **лента** — из trade-событий WS;
-  - **форма** — `POST /orders` с Bearer-токеном (Alice/Bob);
-  - **Авто-демо** — таймер шлёт заявки (alice продаёт, bob покупает — без self-trade), график
-    двигается сам.
-- `web/nginx.conf` — статика + прокси `/orders|/book|/balance|/admin|/health` и WS `/stream` на `gateway:8080`.
-- `web/Dockerfile` — вендорит lightweight-charts из npm, кладёт в nginx.
+- **Верх**: метрики BALANCE/EQUITY/FREE (из `/balance` котируемого актива текущего пользователя),
+  переключатель Alice/Bob, статус WS.
+- **Слева**: список пар — опрос `GET /instruments` каждую 1с (символ, change%, sell=bid, buy=ask, spread).
+  Клик по строке → выбор инструмента. Поиск фильтрует список.
+- **Центр**: тулбар таймфреймов (1M…1D) → `GET /candles/{id}?tf=`; свечи + объём; OHLC по курсору;
+  водяной знак с символом. Live-обновление последней свечи из WS-сделок + периодический refetch (4с).
+- **Справа**: вкладки OPEN DEAL (рынок) / LIMIT ORDER; лот-степпер; BUY/SELL с текущими ask/bid →
+  `POST /orders` с Bearer-токеном.
+- **Низ**: лента MARKET TRADES по всем парам из WS `/stream`.
 
-Масштаб сумм на клиенте: `PRICE_SCALE=100` (price_decimals=2), `QTY_SCALE=1000` (qty_decimals=3).
+Масштаб цен/объёмов — по `price_decimals`/`qty_decimals` из `/instruments` (хардкода нет).
 
 ## Связи
 
-- Общается только с [[gateway]] по HTTP/WS (один origin через nginx-прокси — без CORS).
-- Основано на [[ADR-011-web-ui]].
+- Общается только с [[gateway]] по HTTP/WS через nginx-прокси (`web/nginx.conf`, один origin — без CORS).
+- Основано на [[ADR-011-web-ui]], [[ADR-012-market-data-and-terminal-ui]].
 
 ## Ограничения / TODO
 
-- Свечи клиентские и по времени получения. Серверные свечи + история — с журналом (Фаза 3). [[backlog]]
-- Инструмент/масштабы захардкожены (демо BTC-USDT). Позже — из `/admin/instruments` или публичного эндпоинта.
-- Токены Alice/Bob прямо в UI (demo). Реальный вход — с настоящим auth. [[backlog]]
+- Свечи серверные, но **в памяти** (история появляется/растёт при работе симулятора + бэкфилл). [[marketdata]]
+- Метрики MARGIN/CREDIT/OPEN P&L — заглушки `$0` (нет позиций/маржи; спот). [[backlog]]
+- Токены Alice/Bob в UI (demo) — до настоящего auth. [[backlog]]
