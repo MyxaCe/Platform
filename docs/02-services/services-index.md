@@ -17,6 +17,7 @@ updated: 2026-07-17
 | Ledger (`ledger`) | [[ledger]] | ✅ active | 2 |
 | Orchestrator (`orchestrator`) | [[orchestrator]] | ✅ active | 2b |
 | Gateway REST+WS (`gateway`) | [[gateway]] | ✅ active | 2c |
+| Web UI (`web/`) | [[web-ui]] | ✅ active | 2c |
 | Auth (в gateway, dev) | [[gateway]] | 🟡 dev-уровень | 2c |
 
 ## Карта кода (workspace)
@@ -50,6 +51,11 @@ gateway/                    — сетевой шлюз (крейт gateway)    
 ├── src/main.rs             — бинарь: seed_demo + axum::serve на :8080
 ├── Dockerfile              — release-сборка → тонкий образ
 └── tests/api.rs            — 7 API-тестов (oneshot)
+
+web/                        — браузерный UI (nginx + JS)       → [[web-ui]]
+├── public/{index.html,app.js,style.css}  — стакан + график + лента + форма
+├── nginx.conf              — статика + прокси API/WS на gateway
+└── Dockerfile              — вендор lightweight-charts → nginx
 ```
 
 Итого тестов: **62** (core 27 + ledger 11 + orchestrator 17 + gateway 7).

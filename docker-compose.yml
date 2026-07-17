@@ -1,4 +1,4 @@
-# Живой сервис биржи: сетевой шлюз (REST + WS).
+# Живая биржа: gateway (REST+WS, внутренний) + web (UI на nginx, проксирует к gateway).
 # Наружу порт 8888 (диапазон 8080–8282 зарезервирован WinNAT на dev-машине).
 services:
   gateway:
@@ -6,6 +6,15 @@ services:
       context: .
       dockerfile: gateway/Dockerfile
     container_name: exchange-gateway
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: exchange-web
     ports:
-      - "8888:8080"
+      - "8888:80"
+    depends_on:
+      - gateway
     restart: unless-stopped
