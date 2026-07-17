@@ -19,6 +19,11 @@ const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigi
 let showSLTP = true;
 const favs = new Set(JSON.parse(localStorage.getItem('favs') || '[]'));
 const TFN = { 60: '1m', 300: '5m', 900: '15m', 1800: '30m', 3600: '1h', 14400: '4h', 86400: '1d', 604800: '1w' };
+const settings = Object.assign(
+  { shadows: true, shadowCustom: false, shadowColor: '#787b86', hollowColor: '#26a69a', priceLineWidth: 1, addLine: false, addLineWidth: 1, minChange: 'default' },
+  JSON.parse(localStorage.getItem('settings') || '{}')
+);
+const saveSettings = () => localStorage.setItem('settings', JSON.stringify(settings));
 
 // ---- Иконки (встроенные SVG, currentColor) --------------------------------
 const ICONS = {
@@ -31,6 +36,9 @@ const ICONS = {
   wallet: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2" y="4" width="11.5" height="8.5" rx="1.6"/><path d="M9.6 7.6H13v2.4H9.6a1.2 1.2 0 0 1 0-2.4Z" fill="currentColor" stroke="none"/></svg>',
   star: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 2l1.8 3.9 4.2.4-3.2 2.9.9 4.1L8 11.3 4.3 13.2l.9-4.1L2 6.3l4.2-.4z" stroke-linejoin="round"/></svg>',
   caret: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6l4 4 4-4"/></svg>',
+  reset: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M12.5 8a4.5 4.5 0 1 1-1.3-3.2"/><path d="M12.5 2.5V5H10"/></svg>',
+  fullscreen: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>',
+  settings: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.6v1.8M8 12.6v1.8M1.6 8h1.8M12.6 8h1.8M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>',
 };
 function renderIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { const n = el.dataset.icon; if (ICONS[n]) el.innerHTML = ICONS[n]; }); }
 
@@ -142,15 +150,28 @@ const isLineType = () => (chartType === 'line' || chartType === 'area');
 
 function heikin(cs) { const o = []; let po, pc; for (let i = 0; i < cs.length; i++) { const c = cs[i]; const hc = (c.open + c.high + c.low + c.close) / 4; const ho = i === 0 ? (c.open + c.close) / 2 : (po + pc) / 2; o.push({ time: c.time, open: ho, high: Math.max(c.high, ho, hc), low: Math.min(c.low, ho, hc), close: hc }); po = ho; pc = hc; } return o; }
 
+function candleColors() {
+  const wick = (def) => (settings.shadows ? (settings.shadowCustom ? settings.shadowColor : def) : 'rgba(0,0,0,0)');
+  if (chartType === 'hollow') return { upColor: 'rgba(0,0,0,0)', downColor: 'rgba(0,0,0,0)', borderUpColor: settings.hollowColor, borderDownColor: '#ef5350', wickUpColor: wick(settings.hollowColor), wickDownColor: wick('#ef5350') };
+  return { upColor: '#26a69a', downColor: '#ef5350', borderUpColor: '#26a69a', borderDownColor: '#ef5350', wickUpColor: wick('#26a69a'), wickDownColor: wick('#ef5350') };
+}
 function makeMainSeries() {
   if (mainSeries) chart.removeSeries(mainSeries);
-  if (chartType === 'candles' || chartType === 'hollow' || chartType === 'heikin') {
-    const hollow = chartType === 'hollow';
-    mainSeries = chart.addCandlestickSeries({ upColor: hollow ? 'rgba(0,0,0,0)' : '#26a69a', downColor: hollow ? 'rgba(0,0,0,0)' : '#ef5350', borderUpColor: '#26a69a', borderDownColor: '#ef5350', wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
-  } else if (chartType === 'bars') mainSeries = chart.addBarSeries({ upColor: '#26a69a', downColor: '#ef5350' });
+  if (chartType === 'candles' || chartType === 'hollow' || chartType === 'heikin') mainSeries = chart.addCandlestickSeries(candleColors());
+  else if (chartType === 'bars') mainSeries = chart.addBarSeries({ upColor: '#26a69a', downColor: '#ef5350' });
   else if (chartType === 'line') mainSeries = chart.addLineSeries({ color: '#f0b90b', lineWidth: 2 });
   else mainSeries = chart.addAreaSeries({ lineColor: '#f0b90b', topColor: 'rgba(240,185,11,.25)', bottomColor: 'rgba(240,185,11,.02)' });
-  if (selected != null) mainSeries.applyOptions({ priceFormat: { type: 'price', precision: pdec(selected), minMove: 1 / pscale(selected) } });
+  applySettings();
+}
+function applySettings() {
+  if (!mainSeries || selected == null) return;
+  let precision = pdec(selected), minMove = 1 / pscale(selected);
+  if (settings.minChange === '1:1') { precision = 0; minMove = 1; }
+  else if (settings.minChange === '1:10') { precision = pdec(selected) + 1; minMove = 1 / (pscale(selected) * 10); }
+  const opts = { priceFormat: { type: 'price', precision, minMove }, priceLineVisible: settings.priceLineWidth > 0, priceLineWidth: Math.max(1, settings.priceLineWidth || 1) };
+  if (chartType === 'candles' || chartType === 'hollow' || chartType === 'heikin') Object.assign(opts, candleColors());
+  mainSeries.applyOptions(opts);
+  redrawPriceLines();
 }
 function mainData() {
   if (isLineType()) return rawCandles.map((c) => ({ time: c.time, value: c.close }));
@@ -175,13 +196,13 @@ function applyIndicators() {
 function redrawPriceLines() {
   if (!mainSeries) return;
   priceLines.forEach((l) => mainSeries.removePriceLine(l)); priceLines = [];
-  if (!showSLTP) return;
   const s = pscale(selected);
-  for (const d of currentDeals) {
+  if (showSLTP) for (const d of currentDeals) {
     priceLines.push(mainSeries.createPriceLine({ price: d.entry / s, color: '#8899aa', lineStyle: 2, lineWidth: 1, title: `${d.side === 'buy' ? 'L' : 'S'}` }));
     if (d.sl != null) priceLines.push(mainSeries.createPriceLine({ price: d.sl / s, color: '#ef5350', lineWidth: 1, title: 'SL' }));
     if (d.tp != null) priceLines.push(mainSeries.createPriceLine({ price: d.tp / s, color: '#26a69a', lineWidth: 1, title: 'TP' }));
   }
+  if (settings.addLine && rawCandles.length > 1) priceLines.push(mainSeries.createPriceLine({ price: rawCandles[rawCandles.length - 2].close, color: '#f0b90b', lineStyle: 3, lineWidth: Math.max(1, settings.addLineWidth || 1), title: 'ref' }));
 }
 
 new ResizeObserver(() => chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight })).observe(chartEl);
@@ -258,6 +279,46 @@ document.getElementById('ptMenu').addEventListener('click', (e) => { const it = 
 document.getElementById('sltpBtn').addEventListener('click', () => { showSLTP = !showSLTP; document.getElementById('sltpBtn').classList.toggle('on', showSLTP); redrawPriceLines(); });
 document.getElementById('pipsBtn').addEventListener('click', () => { showPips = !showPips; document.getElementById('pipsBtn').classList.toggle('on', showPips); updateDealPanel(); pollDeals(); });
 
+// Reset / Fullscreen / Settings
+document.getElementById('resetBtn').addEventListener('click', () => { const n = rawCandles.length; if (n) chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 }); });
+document.getElementById('fullBtn').addEventListener('click', () => { const cw = document.querySelector('.chartwrap'); if (document.fullscreenElement) document.exitFullscreen(); else cw.requestFullscreen?.(); });
+document.getElementById('setBtn').addEventListener('click', () => toggleDD('setMenu'));
+function bindSetting(id, key, kind) {
+  const el = document.getElementById(id); if (!el) return;
+  if (kind === 'bool') el.checked = settings[key]; else el.value = settings[key];
+  el.addEventListener('change', () => { settings[key] = kind === 'bool' ? el.checked : (kind === 'num' ? Number(el.value) : el.value); saveSettings(); applySettings(); });
+}
+bindSetting('sHollow', 'hollowColor', 'str');
+bindSetting('sShadows', 'shadows', 'bool');
+bindSetting('sShadowCustom', 'shadowCustom', 'bool');
+bindSetting('sShadowColor', 'shadowColor', 'str');
+bindSetting('sPlw', 'priceLineWidth', 'num');
+bindSetting('sAddLine', 'addLine', 'bool');
+bindSetting('sAlw', 'addLineWidth', 'num');
+bindSetting('sMinChange', 'minChange', 'str');
+
+// Ресайз панелей (перетаскивание)
+const layout = Object.assign({ leftW: 280, rightW: 300, bottomH: 190 }, JSON.parse(localStorage.getItem('layout') || '{}'));
+function applyLayout() {
+  document.querySelector('.grid').style.gridTemplateColumns = `${layout.leftW}px 6px 1fr 6px ${layout.rightW}px`;
+  document.querySelector('.bottom').style.height = layout.bottomH + 'px';
+}
+function initResizers() {
+  document.querySelectorAll('[data-rsz]').forEach((h) => h.addEventListener('mousedown', (e) => {
+    e.preventDefault(); h.classList.add('drag');
+    const type = h.dataset.rsz, sx = e.clientX, sy = e.clientY, sl = layout.leftW, sr = layout.rightW, sb = layout.bottomH;
+    const mv = (ev) => {
+      if (type === 'left') layout.leftW = Math.min(520, Math.max(180, sl + (ev.clientX - sx)));
+      else if (type === 'right') layout.rightW = Math.min(560, Math.max(220, sr - (ev.clientX - sx)));
+      else layout.bottomH = Math.min(window.innerHeight - 220, Math.max(80, sb - (ev.clientY - sy)));
+      applyLayout();
+    };
+    const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); document.body.style.userSelect = ''; h.classList.remove('drag'); localStorage.setItem('layout', JSON.stringify(layout)); };
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+  }));
+}
+
 // ============================ Лента + WS ===================================
 function addTape(id, p, q, side) { const el = document.getElementById('tape'); const d = document.createElement('div'); d.className = 't'; d.innerHTML = `<span>${META[id]?.symbol || id}</span><span class="px ${side}">${fmtP(id, p)}</span><span>${fmtQ(id, q)}</span><span class="tm">${new Date().toLocaleTimeString('ru-RU', { hour12: false })}</span>`; el.prepend(d); while (el.childElementCount > 60) el.removeChild(el.lastChild); }
 function connectWS() { const proto = location.protocol === 'https:' ? 'wss' : 'ws'; const ws = new WebSocket(`${proto}://${location.host}/stream`); const st = document.getElementById('status'); ws.onopen = () => { st.className = 'status status--on'; }; ws.onclose = () => { st.className = 'status status--off'; setTimeout(connectWS, 1500); }; ws.onmessage = (ev) => { let e; try { e = JSON.parse(ev.data); } catch { return; } for (const x of e) if (x.type === 'trade') { addTape(x.instrument, x.price, x.qty, x.taker_side); onLiveTrade(x.instrument, x.price, x.qty); } }; }
@@ -308,6 +369,8 @@ document.getElementById('instruments').addEventListener('click', (e) => { const 
 
 // ============================ Старт ========================================
 renderIcons();
+applyLayout();
+initResizers();
 refreshInstruments();
 setInterval(refreshInstruments, 1000);
 setInterval(syncLast, 2000);

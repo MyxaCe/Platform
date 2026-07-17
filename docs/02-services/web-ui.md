@@ -58,6 +58,11 @@ docker compose up --build   # gateway (внутренний) + web (nginx)
   **SL/TP** (текст-тумблер: показать/скрыть линии, акцент когда вкл), **PIPS** (кошелёк-тумблер).
 - **Инфо-окно на графике** (legend): символ, ТФ, дата/время, O/H/L/C (обновляется по курсору и вживую).
 - **Список монет:** звёздочка-**избранное** (в localStorage, избранные наверх) + колонки CHANGE/SELL/BUY/SPREAD/**HIGH**.
+- **Метрики и тулбар** растянуты на всю ширину (`space-between`; правая группа тулбара — `margin-left:auto`).
+- **Ресайз панелей** перетаскиванием (левая/правая/нижняя; размеры в localStorage).
+- **Кнопки тулбара справа:** Reset (сброс зума на ~90 баров), Fullscreen (Fullscreen API на графике), Settings (⚙).
+- **Настройки** (⚙, в localStorage): Hollow candle color; Candle shadows вкл/выкл + свой цвет теней;
+  Price line width (0 = выкл); Additional price line вкл/выкл + width; Minimal price change (Default / 1:1 / 1:10).
 
 ## Ограничения / TODO
 

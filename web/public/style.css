@@ -25,8 +25,8 @@ button { font-family: inherit; }
 .logo { font-weight: 700; font-size: 15px; letter-spacing: .5px; white-space: nowrap; }
 .logo__mark { display: inline-flex; width: 24px; height: 24px; border-radius: 6px; background: var(--accent);
   color: #000; align-items: center; justify-content: center; font-weight: 800; margin-right: 6px; vertical-align: middle; }
-.metrics { display: flex; gap: 26px; flex: 1; }
-.metric { display: flex; flex-direction: column; gap: 2px; }
+.metrics { display: flex; flex: 1; justify-content: space-between; padding: 0 8px; }
+.metric { display: flex; flex: 1; flex-direction: column; align-items: center; gap: 2px; }
 .metric__l { color: var(--muted); font-size: 10px; letter-spacing: .6px; }
 .metric__v { font-weight: 600; font-variant-numeric: tabular-nums; }
 .top__right { display: flex; align-items: center; gap: 12px; }
@@ -37,8 +37,12 @@ button { font-family: inherit; }
 .status { font-size: 16px; color: var(--down); }
 .status--on { color: var(--up); }
 
-/* Сетка */
-.grid { display: grid; grid-template-columns: 280px 1fr 300px; height: calc(100vh - 52px); }
+/* Сетка (с ресайзерами) */
+.grid { display: grid; grid-template-columns: 280px 6px 1fr 6px 300px; height: calc(100vh - 52px); }
+.rsz-v { cursor: col-resize; background: transparent; transition: background .12s; }
+.rsz-v:hover, .rsz-v.drag { background: var(--accent); }
+.rsz-h { cursor: row-resize; height: 6px; background: transparent; transition: background .12s; flex: 0 0 6px; }
+.rsz-h:hover, .rsz-h.drag { background: var(--accent); }
 
 /* Список инструментов */
 .watch { background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
@@ -91,6 +95,14 @@ button { font-family: inherit; }
 .dd label:hover { background: var(--panel3); }
 .dd select { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 6px; width: 100%; margin: 4px 0; }
 .dd .note { color: var(--muted); font-size: 10px; padding: 6px 8px; border-top: 1px solid var(--border); margin-top: 6px; }
+.dd--right { left: auto; right: 0; }
+.tb-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+#setMenu label { justify-content: space-between; }
+#setMenu input[type="number"] { width: 52px; background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 3px 5px; }
+#setMenu input[type="color"] { width: 28px; height: 22px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); padding: 1px; cursor: pointer; }
+#setMenu select { margin: 4px 0; }
+/* Полноэкранный график */
+.chartwrap:fullscreen { background: var(--bg); }
 .chartwrap { flex: 1; position: relative; min-height: 0; }
 .chart { position: absolute; inset: 0; }
 .legend { position: absolute; top: 10px; left: 12px; z-index: 3; pointer-events: none;

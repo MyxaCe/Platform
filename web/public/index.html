@@ -36,6 +36,8 @@
       <div id="instruments" class="watch__rows"></div>
     </aside>
 
+    <div class="rsz rsz-v" data-rsz="left"></div>
+
     <section class="center">
       <div class="toolbar">
         <div id="tfs" class="tfs">
@@ -109,6 +111,26 @@
         </div>
         <button id="sltpBtn" class="tbbtn tbtext on" title="Показать линии SL/TP">SL/TP</button>
         <button id="pipsBtn" class="tbbtn iconbtn" title="Display PIPS"><span class="ic" data-icon="wallet"></span></button>
+
+        <div class="tb-right">
+          <button id="resetBtn" class="tbbtn iconbtn" title="Сбросить график"><span class="ic" data-icon="reset"></span></button>
+          <button id="fullBtn" class="tbbtn iconbtn" title="На весь экран"><span class="ic" data-icon="fullscreen"></span></button>
+          <div class="tb-dd">
+            <button id="setBtn" class="tbbtn iconbtn" title="Настройки"><span class="ic" data-icon="settings"></span></button>
+            <div id="setMenu" class="dd dd--wide dd--right hidden">
+              <div class="dd-cat">Свечи</div>
+              <label>Hollow candle color <input type="color" id="sHollow" value="#26a69a"></label>
+              <label><input type="checkbox" id="sShadows" checked> Candle shadows</label>
+              <label><input type="checkbox" id="sShadowCustom"> Свой цвет теней <input type="color" id="sShadowColor" value="#787b86"></label>
+              <div class="dd-cat">Линии цены</div>
+              <label>Price line width <input type="number" id="sPlw" min="0" max="4" step="1" value="1"></label>
+              <label><input type="checkbox" id="sAddLine"> Additional price line</label>
+              <label>&nbsp;&nbsp;↳ width <input type="number" id="sAlw" min="1" max="4" step="1" value="1"></label>
+              <div class="dd-cat">Minimal price change</div>
+              <select id="sMinChange"><option value="default">Default</option><option value="1:1">1 : 1</option><option value="1:10">1 : 10</option></select>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="chartwrap">
@@ -121,6 +143,7 @@
         <div id="chart" class="chart"></div>
       </div>
 
+      <div class="rsz rsz-h" data-rsz="bottom"></div>
       <div class="bottom">
         <div class="bottom__tabs">
           <span id="tab-trades" class="active" data-pane="trades">MARKET TRADES</span>
@@ -152,6 +175,8 @@
         </div>
       </div>
     </section>
+
+    <div class="rsz rsz-v" data-rsz="right"></div>
 
     <aside class="deal">
       <div class="deal__tabs">
