@@ -16,7 +16,8 @@ updated: 2026-07-17
 | Instrument Registry (`domain`) | [[instrument-registry]] | ✅ active | 1 |
 | Ledger (`ledger`) | [[ledger]] | ✅ active | 2 |
 | Orchestrator (`orchestrator`) | [[orchestrator]] | ✅ active | 2b |
-| Market Data (`marketdata`) | [[marketdata]] | ✅ active | 2d |
+| Market Data (`marketdata`) | [[marketdata]] | 💤 dormant (не исп. в real-режиме) | 2d |
+| Real feed Binance (`gateway/feed.rs`) | [[gateway]] | ✅ active | 2e |
 | Gateway REST+WS (`gateway`) | [[gateway]] | ✅ active | 2c |
 | Web UI терминал (`web/`) | [[web-ui]] | ✅ active | 2d |
 | Auth (в gateway, dev) | [[gateway]] | 🟡 dev-уровень | 2c |

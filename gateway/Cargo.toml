@@ -17,11 +17,14 @@ domain = { path = "../domain" }
 exchange-core = { path = "../core" }
 ledger = { path = "../ledger" }
 orchestrator = { path = "../orchestrator" }
-marketdata = { path = "../marketdata" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time"] }
 axum = { version = "0.7", features = ["ws"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Реальные данные (Binance): REST — reqwest, WebSocket — tokio-tungstenite (ADR-013).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = "0.3"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

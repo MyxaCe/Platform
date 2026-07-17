@@ -218,25 +218,16 @@ function stepLot(d) {
   i.value = Math.max(0.001, (parseFloat(i.value) || 0) + d * 0.01).toFixed(3);
 }
 
-async function submit(side) {
+// Исполнение сделок — следующий этап (broker-режим: позиции/маржа/P&L).
+// Пока показываем намерение по реальной рыночной цене, без фактического исполнения.
+function submit(side) {
   const id = selected; if (id == null) return;
-  const lot = parseFloat(document.getElementById('lot').value);
+  const it = META[id];
+  const px = side === 'buy' ? it?.ask : it?.bid;
+  const lot = parseFloat(document.getElementById('lot').value) || 0;
   const msg = document.getElementById('dealMsg');
-  if (!lot || lot <= 0) { msg.textContent = 'Укажи лот'; msg.style.color = 'var(--down)'; return; }
-  const body = { instrument: id, side, type: orderMode, qty: Math.round(lot * qscale(id)) };
-  if (orderMode === 'limit') {
-    const price = parseFloat(document.getElementById('price').value);
-    if (!(price > 0)) { msg.textContent = 'Укажи цену'; msg.style.color = 'var(--down)'; return; }
-    body.price = Math.round(price * pscale(id));
-  }
-  const r = await fetch('/orders', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token()}` },
-    body: JSON.stringify(body),
-  });
-  const data = await r.json().catch(() => null);
-  msg.textContent = r.ok ? `OK: заявка #${data.order_id}` : `Отказ ${r.status}: ${data?.error || ''}`;
-  msg.style.color = r.ok ? 'var(--up)' : 'var(--down)';
-  updateMetrics();
+  msg.textContent = `${side === 'buy' ? 'BUY' : 'SELL'} ${lot} @ ${px != null ? fmtP(id, px) : '—'} — исполнение будет в broker-режиме (скоро)`;
+  msg.style.color = 'var(--accent)';
 }
 document.getElementById('btnBuy').addEventListener('click', () => submit('buy'));
 document.getElementById('btnSell').addEventListener('click', () => submit('sell'));

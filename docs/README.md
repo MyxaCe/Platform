@@ -34,6 +34,7 @@ updated: 2026-07-17
   - [[ADR-010-gateway-stack]] — стек сетевого шлюза (tokio + axum + serde) · `accepted`
   - [[ADR-011-web-ui]] — веб-интерфейс (живой стакан + график) · `accepted`
   - [[ADR-012-market-data-and-terminal-ui]] — свечи, несколько пар, терминальный UI · `accepted`
+  - [[ADR-013-real-market-data-broker-pivot]] — реальные данные Binance, разворот к брокер-терминалу · `accepted`
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc
@@ -46,10 +47,10 @@ updated: 2026-07-17
 
 | | |
 |---|---|
-| Фаза | **2d — терминал** ✅ market data (свечи), 5 пар, симулятор, UI-терминал; 67 тестов + clippy |
-| Стек | Rust: `domain`+`core`+`ledger`+`orchestrator`+`marketdata`+`gateway` · web: nginx + JS (lightweight-charts) |
-| Запуск | `docker compose up --build` → **http://localhost:8888** (5 пар, рынок двигается симулятором) |
-| Следующий шаг | Фаза 3 — журнал событий (персистентная истина: durable свечи/аудит) / настоящий auth |
+| Фаза | **2e — реальные данные** ✅ Binance (топ-30 крипто), симуляция убрана; 67 тестов + clippy |
+| Стек | Rust: `domain`+`core`+`ledger`+`orchestrator`+`gateway` (reqwest/tungstenite→Binance) · web: nginx + JS |
+| Запуск | `docker compose up --build` → **http://localhost:8888** (реальные крипто-цены Binance) |
+| Следующий шаг | Broker-исполнение (позиции/маржа/P&L) · не-крипто рынки (платный провайдер) · настоящий auth |
 | Дата | 2026-07-17 |
 
 ## 🗺️ Дорожная карта (фазы)

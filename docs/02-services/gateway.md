@@ -38,13 +38,16 @@ docker compose down              # остановить
 | GET | `/balance/{asset}` | Bearer | баланс `{available, held}` |
 | WS | `/stream` | — | живая лента событий (JSON) |
 
-## Market data и демо-симулятор (ADR-012)
+## Market data — реальные с Binance (ADR-013)
 
-- Свечи ведёт [[marketdata|CandleStore]]: на каждую сделку `ingest(instrument, ts, price, qty)`
-  (ts — серверные секунды). Таймфреймы: 1m,5m,15m,30m,1h,4h,1d.
-- **Демо-симулятор** (`seed_market` + `spawn_simulator`): фоновая задача двигает котировки по 5 парам
-  (BTC/ETH/SOL/XRP/DOGE-USDT), обновляет стакан и делает встречные сделки (два sim-пользователя, без
-  self-trade). Плюс синтетический бэкфилл истории свечей при старте. Всё — **демо-данные**.
+Симуляции **нет**. Данные реальные, публичный Binance без ключа (модуль `gateway/src/feed.rs`):
+- `/candles` → REST `api/v3/klines` (реальный OHLCV), кэш ~2с; таймфреймы 1m..1d.
+- `/instruments` → WS `@ticker` (last/change/high/bid/ask по 30 парам).
+- `/stream` (лента + live-цена) ← WS `@aggTrade` (реальные сделки).
+- Топ-30 крипто-пар; у каждой свои `price_decimals`/`qty_decimals` (строки Binance → целые raw).
+- Реконнект при обрыве. Проверено: ETH ≈ 1822 = Binance/TradingView.
+
+Не-крипто рынки (форекс/сырьё/акции/индексы) — требуют платного провайдера, в [[backlog]].
 
 Ошибки: `InsufficientFunds → 402`, `SelfTrade → 409`, `NotOwner → 403`, `Engine(reason) → 400`,
 нет/битый токен → `401`.
