@@ -1,0 +1,11 @@
+# Живой сервис биржи: сетевой шлюз (REST + WS).
+# Наружу порт 8888 (диапазон 8080–8282 зарезервирован WinNAT на dev-машине).
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    container_name: exchange-gateway
+    ports:
+      - "8888:8080"
+    restart: unless-stopped

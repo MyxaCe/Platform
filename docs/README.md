@@ -31,6 +31,7 @@ updated: 2026-07-17
   - [[ADR-007-workspace-crate-structure]] — структура крейтов: общий `domain` · `accepted`
   - [[ADR-008-orchestrator]] — путь ордера: резерв → матчинг → расчёт · `accepted`
   - [[ADR-009-market-orders-and-stp]] — рыночные заявки и предотвращение self-trade · `accepted`
+  - [[ADR-010-gateway-stack]] — стек сетевого шлюза (tokio + axum + serde) · `accepted`
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc
@@ -43,14 +44,15 @@ updated: 2026-07-17
 
 | | |
 |---|---|
-| Фаза | **2 — деньги** ✅ Ledger + оркестратор (лимитные + рыночные, STP); 55 тестов + clippy |
-| Стек | Rust workspace: `domain` + `core` + `ledger` + `orchestrator`; тулчейн через Docker |
-| Следующий шаг | Auth + Order Gateway (сетевой слой, первый живой сервис в Docker) → Фаза 3 (журнал событий) |
+| Фаза | **2c — сеть** ✅ Gateway REST+WS (первый живой сервис в Docker); 62 теста + clippy |
+| Стек | Rust workspace: `domain` + `core` + `ledger` + `orchestrator` + `gateway` (tokio/axum) |
+| Запуск | `docker compose up --build` → http://localhost:8888 (демо: BTC-USDT, alice-token/bob-token) |
+| Следующий шаг | Фаза 3 — журнал событий (персистентная истина) / настоящий auth / подписки WS по инструменту |
 | Дата | 2026-07-17 |
 
 ## 🗺️ Дорожная карта (фазы)
 
 1. **Фаза 1** ✅ — Matching Engine + Order Book + инструменты + снапшот
-2. **Фаза 2** ✅ — Ledger (балансы/холды/двойная запись) + оркестратор (путь ордера) · далее Auth + Gateway
-3. **Фаза 3** — Журнал событий (Kafka/NATS) + распил на сервисы
+2. **Фаза 2** ✅ — Ledger + оркестратор (путь ордера) + Gateway REST/WS (живой сервис в Docker)
+3. **Фаза 3** — Журнал событий (Kafka/NATS) + распил на сервисы; настоящий auth
 4. **Фаза 4** — Реальное custody (безопасность + юр. проработка)

@@ -16,8 +16,8 @@ updated: 2026-07-17
 | Instrument Registry (`domain`) | [[instrument-registry]] | ✅ active | 1 |
 | Ledger (`ledger`) | [[ledger]] | ✅ active | 2 |
 | Orchestrator (`orchestrator`) | [[orchestrator]] | ✅ active | 2b |
-| Auth / Users | _(появится)_ | ⏳ не начат | 2 |
-| Order Gateway (API) | _(появится)_ | ⏳ не начат | 2 |
+| Gateway REST+WS (`gateway`) | [[gateway]] | ✅ active | 2c |
+| Auth (в gateway, dev) | [[gateway]] | 🟡 dev-уровень | 2c |
 
 ## Карта кода (workspace)
 
@@ -44,6 +44,13 @@ ledger/                     — счета/балансы (крейт ledger)   
 orchestrator/               — путь ордера (крейт orchestrator) → [[orchestrator]]
 ├── src/lib.rs              — Orchestrator: place_limit/place_market/cancel + STP
 └── tests/order_path.rs     — 17 тестов (движение денег, рыночные, STP, сходимость)
+
+gateway/                    — сетевой шлюз (крейт gateway)     → [[gateway]]
+├── src/lib.rs              — AppState, роутер, DTO, хендлеры, auth, WS
+├── src/main.rs             — бинарь: seed_demo + axum::serve на :8080
+├── Dockerfile              — release-сборка → тонкий образ
+└── tests/api.rs            — 7 API-тестов (oneshot)
 ```
 
-Итого тестов: **55** (core 27 + ledger 11 + orchestrator 17). Запуск: `bash scripts/test.sh`.
+Итого тестов: **62** (core 27 + ledger 11 + orchestrator 17 + gateway 7).
+Запуск тестов: `bash scripts/test.sh`. Запуск сервиса: `docker compose up --build` → http://localhost:8888.
