@@ -18,6 +18,7 @@ updated: 2026-07-17
 | Orchestrator (`orchestrator`) | [[orchestrator]] | ✅ active | 2b |
 | Market Data (`marketdata`) | [[marketdata]] | 💤 dormant (не исп. в real-режиме) | 2d |
 | Real feed Binance (`gateway/feed.rs`) | [[gateway]] | ✅ active | 2e |
+| Broker бумажный (`broker`) | [[broker]] | ✅ active | 2f |
 | Gateway REST+WS (`gateway`) | [[gateway]] | ✅ active | 2c |
 | Web UI терминал (`web/`) | [[web-ui]] | ✅ active | 2d |
 | Auth (в gateway, dev) | [[gateway]] | 🟡 dev-уровень | 2c |
@@ -64,5 +65,5 @@ web/                        — терминальный UI (nginx + JS)     →
 └── Dockerfile              — вендор lightweight-charts → nginx
 ```
 
-Итого тестов: **67** (core 27 + ledger 11 + orchestrator 17 + gateway 7 + marketdata 5).
+Итого тестов: **75** (core 27 + ledger 11 + orchestrator 17 + gateway 7 + marketdata 5 + broker 8).
 Запуск тестов: `bash scripts/test.sh`. Запуск сервиса: `docker compose up --build` → http://localhost:8888.

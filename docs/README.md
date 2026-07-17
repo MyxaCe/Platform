@@ -35,6 +35,7 @@ updated: 2026-07-17
   - [[ADR-011-web-ui]] — веб-интерфейс (живой стакан + график) · `accepted`
   - [[ADR-012-market-data-and-terminal-ui]] — свечи, несколько пар, терминальный UI · `accepted`
   - [[ADR-013-real-market-data-broker-pivot]] — реальные данные Binance, разворот к брокер-терминалу · `accepted`
+  - [[ADR-014-paper-broker]] — бумажный брокер: позиции, маржа, P&L · `accepted`
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc
@@ -47,10 +48,10 @@ updated: 2026-07-17
 
 | | |
 |---|---|
-| Фаза | **2e — реальные данные** ✅ Binance (топ-30 крипто), симуляция убрана; 67 тестов + clippy |
-| Стек | Rust: `domain`+`core`+`ledger`+`orchestrator`+`gateway` (reqwest/tungstenite→Binance) · web: nginx + JS |
-| Запуск | `docker compose up --build` → **http://localhost:8888** (реальные крипто-цены Binance) |
-| Следующий шаг | Broker-исполнение (позиции/маржа/P&L) · не-крипто рынки (платный провайдер) · настоящий auth |
+| Фаза | **2f — брокер** ✅ бумажные сделки/позиции/P&L на реальных ценах; 75 тестов + clippy |
+| Стек | Rust: `domain`+`core`+`ledger`+`orchestrator`+`broker`+`gateway` (→Binance) · web: nginx + JS |
+| Запуск | `docker compose up --build` → **http://localhost:8888** (реальные цены; BUY/SELL — бумажные сделки) |
+| Следующий шаг | Плечо/ликвидация/стоп-тейк · не-крипто рынки (платный провайдер) · настоящий auth · персистентность |
 | Дата | 2026-07-17 |
 
 ## 🗺️ Дорожная карта (фазы)

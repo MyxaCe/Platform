@@ -124,7 +124,7 @@ async function refreshInstruments() {
     el.classList.toggle('active', it.id === selected);
   }
   updateDealPanel();
-  updateMetrics();
+  pollAccount();
 }
 
 // ---- Панель сделки --------------------------------------------------------
@@ -143,21 +143,6 @@ function updateDealPanel() {
     document.getElementById('price').value = (it.last / pscale(it.id)).toFixed(pdec(it.id));
 }
 
-async function updateMetrics() {
-  try {
-    const it = META[selected]; if (!it) return;
-    const r = await fetch(`/balance/${it.quote}`, { headers: { Authorization: `Bearer ${token()}` } });
-    if (!r.ok) return;
-    const bal = await r.json();
-    const s = pscale(it.id);
-    const av = bal.available / s, eq = (bal.available + bal.held) / s;
-    const f = (n) => '$' + n.toLocaleString('en-US', { maximumFractionDigits: 2 });
-    document.getElementById('mBalance').textContent = f(av);
-    document.getElementById('mEquity').textContent = f(eq);
-    document.getElementById('mFree').textContent = f(av);
-  } catch (e) { /* игнор */ }
-}
-
 // ---- Выбор инструмента / таймфрейма ---------------------------------------
 async function selectInstrument(id) {
   selected = id;
@@ -165,7 +150,7 @@ async function selectInstrument(id) {
   document.getElementById('price').value = '';
   await loadCandles(id, tf);
   updateDealPanel();
-  updateMetrics();
+  pollAccount();
 }
 
 document.getElementById('tfs').addEventListener('click', (e) => {
@@ -218,20 +203,85 @@ function stepLot(d) {
   i.value = Math.max(0.001, (parseFloat(i.value) || 0) + d * 0.01).toFixed(3);
 }
 
-// Исполнение сделок — следующий этап (broker-режим: позиции/маржа/P&L).
-// Пока показываем намерение по реальной рыночной цене, без фактического исполнения.
-function submit(side) {
+// Открыть бумажную сделку по рыночной цене (broker-режим, ADR-014).
+async function openDeal(side) {
   const id = selected; if (id == null) return;
-  const it = META[id];
-  const px = side === 'buy' ? it?.ask : it?.bid;
   const lot = parseFloat(document.getElementById('lot').value) || 0;
   const msg = document.getElementById('dealMsg');
-  msg.textContent = `${side === 'buy' ? 'BUY' : 'SELL'} ${lot} @ ${px != null ? fmtP(id, px) : '—'} — исполнение будет в broker-режиме (скоро)`;
-  msg.style.color = 'var(--accent)';
+  if (lot <= 0) { msg.textContent = 'Укажи объём'; msg.style.color = 'var(--down)'; return; }
+  const body = { instrument: id, side, qty: Math.round(lot * qscale(id)) };
+  const r = await fetch('/deals', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token()}` },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => null);
+  if (r.ok) {
+    msg.textContent = `Открыта #${data.id}: ${side === 'buy' ? 'BUY' : 'SELL'} ${lot} @ ${fmtP(id, data.entry)}`;
+    msg.style.color = 'var(--up)';
+    switchBottom('deals');
+    pollAccount(); pollDeals();
+  } else {
+    msg.textContent = `Отказ ${r.status}: ${data?.error || ''}`;
+    msg.style.color = 'var(--down)';
+  }
 }
-document.getElementById('btnBuy').addEventListener('click', () => submit('buy'));
-document.getElementById('btnSell').addEventListener('click', () => submit('sell'));
-document.getElementById('userSel').addEventListener('change', updateMetrics);
+document.getElementById('btnBuy').addEventListener('click', () => openDeal('buy'));
+document.getElementById('btnSell').addEventListener('click', () => openDeal('sell'));
+document.getElementById('userSel').addEventListener('change', () => { pollAccount(); pollDeals(); });
+
+// ---- Счёт (метрики) + позиции ---------------------------------------------
+const usd = (cents) => '$' + (cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+async function pollAccount() {
+  try {
+    const r = await fetch('/account', { headers: { Authorization: `Bearer ${token()}` } });
+    if (!r.ok) return;
+    const a = await r.json();
+    document.getElementById('mBalance').textContent = usd(a.balance);
+    document.getElementById('mEquity').textContent = usd(a.equity);
+    document.getElementById('mMargin').textContent = usd(a.used_margin);
+    document.getElementById('mFree').textContent = usd(a.free_margin);
+    const pnl = document.getElementById('mPnl');
+    pnl.textContent = usd(a.open_pnl);
+    pnl.style.color = a.open_pnl > 0 ? 'var(--up)' : a.open_pnl < 0 ? 'var(--down)' : '';
+  } catch (e) { /* игнор */ }
+}
+
+async function pollDeals() {
+  try {
+    const r = await fetch('/deals', { headers: { Authorization: `Bearer ${token()}` } });
+    if (!r.ok) return;
+    const list = await r.json();
+    const cont = document.getElementById('deals');
+    cont.innerHTML = list.map((d) => {
+      const pos = d.pnl >= 0;
+      const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals);
+      const f = (raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals);
+      return `<div class="deal-row"><span>${d.symbol}</span>` +
+        `<span class="sd ${d.side}">${d.side === 'buy' ? 'BUY' : 'SELL'}</span>` +
+        `<span>${lot}</span><span>${f(d.entry)}</span><span>${f(d.mark)}</span>` +
+        `<span class="pnl ${pos ? 'pos' : 'neg'}">${usd(d.pnl)}</span>` +
+        `<button class="closebtn" data-id="${d.id}">Close</button></div>`;
+    }).join('') || '<div class="deal-row muted"><span>нет открытых позиций</span></div>';
+    cont.querySelectorAll('.closebtn').forEach((btn) =>
+      btn.addEventListener('click', () => closeDeal(+btn.dataset.id)));
+  } catch (e) { /* игнор */ }
+}
+
+async function closeDeal(id) {
+  const r = await fetch(`/deals/${id}/close`, { method: 'POST', headers: { Authorization: `Bearer ${token()}` } });
+  if (r.ok) { pollAccount(); pollDeals(); }
+}
+
+// ---- Переключение нижних вкладок ------------------------------------------
+function switchBottom(which) {
+  document.getElementById('tabTrades').classList.toggle('active', which === 'trades');
+  document.getElementById('tabDeals').classList.toggle('active', which === 'deals');
+  document.getElementById('paneTrades').classList.toggle('hidden', which !== 'trades');
+  document.getElementById('paneDeals').classList.toggle('hidden', which !== 'deals');
+}
+document.getElementById('tabTrades').addEventListener('click', () => switchBottom('trades'));
+document.getElementById('tabDeals').addEventListener('click', () => switchBottom('deals'));
 
 // ---- Поиск ----------------------------------------------------------------
 document.getElementById('search').addEventListener('input', (e) => {
@@ -243,6 +293,10 @@ document.getElementById('search').addEventListener('input', (e) => {
 
 // ---- Старт ----------------------------------------------------------------
 refreshInstruments();
-setInterval(refreshInstruments, 1000); // список слева + метрики
+setInterval(refreshInstruments, 1000); // список слева
 setInterval(syncLast, 2000);           // сверка последней свечи (без сброса зума)
+setInterval(pollAccount, 1000);        // метрики счёта (equity/P&L)
+setInterval(pollDeals, 1200);          // открытые позиции + live P&L
 connectWS();
+pollAccount();
+pollDeals();

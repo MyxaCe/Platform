@@ -17,6 +17,7 @@ domain = { path = "../domain" }
 exchange-core = { path = "../core" }
 ledger = { path = "../ledger" }
 orchestrator = { path = "../orchestrator" }
+broker = { path = "../broker" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time"] }
 axum = { version = "0.7", features = ["ws"] }
 serde = { version = "1", features = ["derive"] }

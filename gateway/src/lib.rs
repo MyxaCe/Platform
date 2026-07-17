@@ -26,6 +26,7 @@ use domain::instrument::{AssetId, Instrument, InstrumentId};
 use domain::money::{Amount, Price, Qty};
 use domain::order::{OrderId, Side, TimeInForce};
 
+use broker::{Broker, PosSide};
 use exchange_core::Event;
 use orchestrator::{OrderReject, Orchestrator};
 
@@ -62,6 +63,8 @@ pub struct AppState {
     feed_instruments: Arc<Vec<feed::FeedInstrument>>,
     tickers: Arc<Mutex<HashMap<u32, feed::Ticker>>>,
     klines_cache: Arc<Mutex<KlineCache>>,
+    // Бумажный брокер (ADR-014):
+    broker: Arc<Mutex<Broker>>,
 }
 
 pub fn build_state() -> AppState {
@@ -74,7 +77,13 @@ pub fn build_state() -> AppState {
         feed_instruments: Arc::new(feed::instruments()),
         tickers: Arc::new(Mutex::new(HashMap::new())),
         klines_cache: Arc::new(Mutex::new(HashMap::new())),
+        broker: Arc::new(Mutex::new(Broker::new(10_000_000, 1))), // старт $100k, leverage 1
     }
+}
+
+/// Текущие марк-цены (инструмент → last) из фида — для P&L/equity брокера.
+async fn marks(st: &AppState) -> HashMap<u32, i64> {
+    st.tickers.lock().await.iter().map(|(id, t)| (*id, t.last)).collect()
 }
 
 /// Разослать события в живую ленту.
@@ -98,6 +107,9 @@ pub fn router(state: AppState) -> Router {
         .route("/orders/:id", delete(cancel_order))
         .route("/book/:instrument", get(get_book))
         .route("/balance/:asset", get(get_balance))
+        .route("/deals", post(open_deal).get(list_deals))
+        .route("/deals/:id/close", post(close_deal))
+        .route("/account", get(account))
         .route("/stream", get(ws_stream))
         .with_state(state)
 }
@@ -181,6 +193,34 @@ struct CandleDto {
     close: i64,
     volume: i64,
 }
+#[derive(Deserialize)]
+struct DealReq {
+    instrument: u32,
+    side: String,
+    qty: i64,
+}
+#[derive(Serialize)]
+struct DealDto {
+    id: u64,
+    instrument: u32,
+    symbol: String,
+    side: String,
+    qty: i64,
+    entry: i64,
+    mark: i64,
+    pnl: i128,
+    price_decimals: u8,
+    qty_decimals: u8,
+}
+#[derive(Serialize)]
+struct AccountDto {
+    balance: i128,
+    equity: i128,
+    used_margin: i128,
+    free_margin: i128,
+    open_pnl: i128,
+}
+
 #[derive(Serialize)]
 struct InstrumentDto {
     id: u32,
@@ -394,6 +434,88 @@ async fn get_balance(State(st): State<AppState>, headers: HeaderMap, Path(asset)
     let o = st.orch.lock().await;
     let b = o.balance(user, AssetId(asset));
     Ok(Json(BalanceResp { asset, available: b.available.0, held: b.held.0 }))
+}
+
+// ---- Бумажный брокер (ADR-014) --------------------------------------------
+
+fn feed_by_id(st: &AppState, id: u32) -> Option<feed::FeedInstrument> {
+    st.feed_instruments.iter().find(|f| f.id == id).cloned()
+}
+
+/// Открыть сделку по текущей рыночной цене (buy=ask, sell=bid).
+async fn open_deal(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<DealReq>) -> Result<Json<DealDto>, ApiErr> {
+    let user = authed(&st, &headers).await?;
+    let side = match req.side.as_str() {
+        "buy" => PosSide::Long,
+        "sell" => PosSide::Short,
+        _ => return Err(err(StatusCode::BAD_REQUEST, "side must be buy|sell")),
+    };
+    if req.qty <= 0 {
+        return Err(err(StatusCode::BAD_REQUEST, "qty must be > 0"));
+    }
+    let fi = feed_by_id(&st, req.instrument).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
+    let (entry, mark) = {
+        let tickers = st.tickers.lock().await;
+        let t = tickers.get(&req.instrument).ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "no price yet"))?;
+        (if matches!(side, PosSide::Long) { t.ask } else { t.bid }, t.last)
+    };
+    let id = {
+        let mut b = st.broker.lock().await;
+        b.open(user, req.instrument, side, req.qty, entry, fi.price_decimals, fi.qty_decimals)
+            .map_err(|_| err(StatusCode::PAYMENT_REQUIRED, "insufficient_margin"))?
+    };
+    Ok(Json(DealDto {
+        id, instrument: req.instrument, symbol: fi.symbol, side: req.side, qty: req.qty, entry, mark, pnl: 0,
+        price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals,
+    }))
+}
+
+/// Список открытых позиций с live P&L.
+async fn list_deals(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<DealDto>>, ApiErr> {
+    let user = authed(&st, &headers).await?;
+    let m = marks(&st).await;
+    let b = st.broker.lock().await;
+    let out = b
+        .positions(user)
+        .into_iter()
+        .map(|p| {
+            let mark = *m.get(&p.instrument).unwrap_or(&p.entry);
+            let symbol = feed_by_id(&st, p.instrument).map(|f| f.symbol).unwrap_or_default();
+            DealDto {
+                id: p.id, instrument: p.instrument, symbol,
+                side: if matches!(p.side, PosSide::Long) { "buy" } else { "sell" }.to_string(),
+                qty: p.qty, entry: p.entry, mark, pnl: p.unrealized(mark),
+                price_decimals: p.pd, qty_decimals: p.qd,
+            }
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+/// Закрыть позицию по текущей цене (last).
+async fn close_deal(State(st): State<AppState>, headers: HeaderMap, Path(id): Path<u64>) -> Result<Json<serde_json::Value>, ApiErr> {
+    let user = authed(&st, &headers).await?;
+    let m = marks(&st).await;
+    let mut b = st.broker.lock().await;
+    let inst = b.positions(user).into_iter().find(|p| p.id == id).map(|p| p.instrument);
+    let Some(inst) = inst else {
+        return Err(err(StatusCode::NOT_FOUND, "unknown position"));
+    };
+    let mark = *m.get(&inst).unwrap_or(&0);
+    let pnl = b.close(user, id, mark).map_err(|_| err(StatusCode::NOT_FOUND, "unknown position"))?;
+    Ok(Json(serde_json::json!({ "pnl": pnl, "mark": mark })))
+}
+
+/// Сводка счёта: баланс/equity/маржа/free/open P&L (в центах).
+async fn account(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<AccountDto>, ApiErr> {
+    let user = authed(&st, &headers).await?;
+    let m = marks(&st).await;
+    let b = st.broker.lock().await;
+    let balance = b.balance(user);
+    let open_pnl = b.open_pnl(user, &m);
+    let used = b.used_margin(user);
+    let equity = balance + open_pnl;
+    Ok(Json(AccountDto { balance, equity, used_margin: used, free_margin: equity - used, open_pnl }))
 }
 
 async fn ws_stream(State(st): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {

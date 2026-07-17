@@ -15,9 +15,9 @@
       <div class="metric"><span class="metric__l">BALANCE</span><span id="mBalance" class="metric__v">$0</span></div>
       <div class="metric"><span class="metric__l">CREDIT</span><span class="metric__v">$0</span></div>
       <div class="metric"><span class="metric__l">EQUITY</span><span id="mEquity" class="metric__v">$0</span></div>
-      <div class="metric"><span class="metric__l">MARGIN</span><span class="metric__v">$0</span></div>
+      <div class="metric"><span class="metric__l">MARGIN</span><span id="mMargin" class="metric__v">$0</span></div>
       <div class="metric"><span class="metric__l">FREE BALANCE</span><span id="mFree" class="metric__v">$0</span></div>
-      <div class="metric"><span class="metric__l">OPEN P&amp;L</span><span class="metric__v">$0</span></div>
+      <div class="metric"><span class="metric__l">OPEN P&amp;L</span><span id="mPnl" class="metric__v">$0</span></div>
     </div>
     <div class="top__right">
       <button class="btn btn--deposit">DEPOSIT</button>
@@ -54,9 +54,18 @@
         <div id="chart" class="chart"></div>
       </div>
       <div class="bottom">
-        <div class="bottom__tabs"><span class="active">MARKET TRADES</span></div>
-        <div class="trades__head"><span>INSTR.</span><span class="ta-r">ЦЕНА</span><span class="ta-r">КОЛ-ВО</span><span class="ta-r">ВРЕМЯ</span></div>
-        <div id="tape" class="tape"></div>
+        <div class="bottom__tabs">
+          <span id="tabTrades" class="active">MARKET TRADES</span>
+          <span id="tabDeals">OPEN DEALS</span>
+        </div>
+        <div id="paneTrades">
+          <div class="trades__head"><span>INSTR.</span><span class="ta-r">ЦЕНА</span><span class="ta-r">КОЛ-ВО</span><span class="ta-r">ВРЕМЯ</span></div>
+          <div id="tape" class="tape"></div>
+        </div>
+        <div id="paneDeals" class="hidden">
+          <div class="deals__head"><span>INSTR.</span><span>СТОРОНА</span><span class="ta-r">ОБЪЁМ</span><span class="ta-r">ВХОД</span><span class="ta-r">ЦЕНА</span><span class="ta-r">P&amp;L</span><span></span></div>
+          <div id="deals" class="deals"></div>
+        </div>
       </div>
     </section>
 

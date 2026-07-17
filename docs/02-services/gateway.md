@@ -36,7 +36,14 @@ docker compose down              # остановить
 | DELETE | `/orders/{id}?instrument=N` | Bearer | отменить |
 | GET | `/book/{instrument}?depth=N` | — | снапшот стакана `{bids, asks}` |
 | GET | `/balance/{asset}` | Bearer | баланс `{available, held}` |
+| POST | `/deals` | Bearer | открыть сделку `{instrument, side, qty}` → позиция ([[broker]]) |
+| GET | `/deals` | Bearer | открытые позиции с live P&L |
+| POST | `/deals/{id}/close` | Bearer | закрыть позицию → realized P&L |
+| GET | `/account` | Bearer | `{balance, equity, used_margin, free_margin, open_pnl}` (центы) |
 | WS | `/stream` | — | живая лента событий (JSON) |
+
+> ⚠️ При добавлении нового REST-пути **обязательно** добавить его в регекс-прокси `web/nginx.conf`
+> (иначе 405/SPA вместо API). См. [[bug-log]] BUG-004.
 
 ## Market data — реальные с Binance (ADR-013)
 

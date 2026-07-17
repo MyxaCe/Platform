@@ -1,0 +1,12 @@
+[package]
+name = "broker"
+version = "0.1.0"
+edition = "2021"
+description = "Бумажный брокер: позиции, маржа, P&L на реальных ценах (ADR-014)"
+
+[lib]
+name = "broker"
+path = "src/lib.rs"
+
+[dependencies]
+domain = { path = "../domain" }
