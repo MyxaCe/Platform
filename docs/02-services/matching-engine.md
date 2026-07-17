@@ -27,6 +27,7 @@ updated: 2026-07-17
 - `register_instrument(Instrument)` — зарегистрировать инструмент и создать его пустую книгу (до торгов).
 - `apply(Command) -> Vec<Event>` ⭐ — применить команду (маршрутизируется по `instrument`).
 - `book(InstrumentId) -> Option<&OrderBook>` — только чтение (снапшоты/тесты/будущие проекции).
+- `snapshot(InstrumentId, depth) -> Option<DepthSnapshot>` — снапшот глубины стакана инструмента ([[order-book]]).
 
 ## Команды
 

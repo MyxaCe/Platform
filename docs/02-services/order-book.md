@@ -32,6 +32,12 @@ updated: 2026-07-17
 - `cancel(OrderId) -> Option<Qty>` — снять; `None`, если заявки нет
 - `cross(taker_side, limit: Option<Price>, qty) -> (Vec<Fill>, remaining: Qty)` ⭐ — снять ликвидность
   встречной стороны; `limit=None` для рыночной. Обход строго по приоритету цена→время → детерминизм.
+- `snapshot(depth) -> DepthSnapshot` — read-модель: до `depth` лучших уровней с каждой стороны.
+
+### Снапшот стакана (read-model)
+- `struct Level { price, qty, orders }` — агрегированный ценовой уровень (суммарный объём + число заявок).
+- `struct DepthSnapshot { bids, asks }` — `bids` по убыванию цены, `asks` по возрастанию (лучший первым).
+- Проекция для market data / визуализации. Пример вывода — `core/examples/demo.rs` («лестница» стакана).
 
 ## Связи
 

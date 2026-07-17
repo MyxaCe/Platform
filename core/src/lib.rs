@@ -16,7 +16,7 @@ pub mod engine;
 pub mod event;
 
 // Публичный фасад ядра — то, чем пользуются адаптеры (шлюз ордеров, тесты и т.д.).
-pub use book::{OrderBook, RestingOrder};
+pub use book::{DepthSnapshot, Level, OrderBook, RestingOrder};
 pub use command::Command;
 pub use domain::instrument::{AssetId, Instrument, InstrumentId, InstrumentRegistry};
 pub use domain::money::{Price, Qty};

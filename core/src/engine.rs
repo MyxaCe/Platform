@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::book::{OrderBook, RestingOrder};
+use crate::book::{DepthSnapshot, OrderBook, RestingOrder};
 use crate::command::Command;
 use crate::domain::instrument::{Instrument, InstrumentId, InstrumentRegistry};
 use crate::domain::money::{Price, Qty};
@@ -45,6 +45,12 @@ impl MatchingEngine {
     /// Только для чтения: книга инструмента (тесты, снапшоты, будущие проекции).
     pub fn book(&self, instrument: InstrumentId) -> Option<&OrderBook> {
         self.books.get(&instrument)
+    }
+
+    /// Снапшот глубины стакана инструмента (до `depth` уровней с каждой стороны).
+    /// `None`, если инструмент не зарегистрирован.
+    pub fn snapshot(&self, instrument: InstrumentId, depth: usize) -> Option<DepthSnapshot> {
+        self.books.get(&instrument).map(|b| b.snapshot(depth))
     }
 
     /// Применить команду. Чистое по духу преобразование состояния: возвращает список событий.

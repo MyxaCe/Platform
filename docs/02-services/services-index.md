@@ -31,8 +31,10 @@ core/
 │   │   └── instrument.rs   — Instrument, InstrumentRegistry  → [[instrument-registry]]
 │   ├── command.rs          — Command (вход ядра)
 │   ├── event.rs            — Event, TradeId, RejectReason (выход ядра)
-│   ├── book.rs             — OrderBook, RestingOrder, Fill   → [[order-book]]
-│   └── engine.rs           — MatchingEngine.apply()          → [[matching-engine]]
-└── tests/
-    └── matching.rs         — 22 интеграционных теста (+ фаззинг инвариантов)
+│   ├── book.rs             — OrderBook, Fill, DepthSnapshot   → [[order-book]]
+│   └── engine.rs           — MatchingEngine.apply()/snapshot() → [[matching-engine]]
+├── tests/
+│   └── matching.rs         — 27 интеграционных тестов (+ фаззинг инвариантов)
+└── examples/
+    └── demo.rs             — печатает стакан «лестницей» (bash scripts/demo.sh)
 ```

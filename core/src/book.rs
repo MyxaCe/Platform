@@ -34,6 +34,24 @@ pub struct Fill {
     pub maker_fully_filled: bool,
 }
 
+/// Один агрегированный ценовой уровень в снапшоте стакана.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Level {
+    pub price: Price,
+    /// Суммарный объём всех заявок на этом уровне.
+    pub qty: Qty,
+    /// Число заявок на уровне.
+    pub orders: u32,
+}
+
+/// Снапшот глубины стакана (read-model): агрегированные уровни bid/ask.
+/// `bids` — по убыванию цены, `asks` — по возрастанию (лучшая цена в начале каждого списка).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepthSnapshot {
+    pub bids: Vec<Level>,
+    pub asks: Vec<Level>,
+}
+
 #[derive(Debug, Default)]
 pub struct OrderBook {
     /// Покупки. Лучшая цена — максимальная (`keys().next_back()`).
@@ -78,6 +96,22 @@ impl OrderBook {
     /// Инвариант рынка: bid не должен быть ≥ ask (иначе книга «скрещена» — это баг матчинга).
     pub fn is_crossed(&self) -> bool {
         matches!((self.best_bid(), self.best_ask()), (Some(b), Some(a)) if b >= a)
+    }
+
+    /// Снапшот глубины: до `depth` лучших ценовых уровней с каждой стороны, с агрегированным
+    /// объёмом и числом заявок. Read-only проекция для market data / визуализации.
+    pub fn snapshot(&self, depth: usize) -> DepthSnapshot {
+        fn aggregate((price, level): (&Price, &VecDeque<RestingOrder>)) -> Level {
+            Level {
+                price: *price,
+                qty: level.iter().fold(Qty::ZERO, |acc, o| acc + o.qty),
+                orders: level.len() as u32,
+            }
+        }
+        // bids: BTreeMap по возрастанию → rev даёт лучшую (максимальную) цену первой.
+        let bids = self.bids.iter().rev().take(depth).map(aggregate).collect();
+        let asks = self.asks.iter().take(depth).map(aggregate).collect();
+        DepthSnapshot { bids, asks }
     }
 
     /// Поставить заявку в стакан как maker.

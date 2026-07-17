@@ -294,6 +294,66 @@ fn instruments_have_isolated_books() {
     assert_eq!(e.book(i2).unwrap().qty_at(Side::Buy, Price(100)), Qty(5));
 }
 
+// ---- Снапшот стакана ------------------------------------------------------
+
+#[test]
+fn snapshot_of_empty_book_is_empty() {
+    let e = engine();
+    let snap = e.snapshot(I1, 10).unwrap();
+    assert!(snap.bids.is_empty());
+    assert!(snap.asks.is_empty());
+}
+
+#[test]
+fn snapshot_aggregates_qty_and_order_count_per_level() {
+    let mut e = engine();
+    e.apply(limit(1, Side::Buy, 100, 5, TimeInForce::Gtc));
+    e.apply(limit(2, Side::Buy, 100, 3, TimeInForce::Gtc)); // тот же уровень
+    e.apply(limit(3, Side::Buy, 99, 4, TimeInForce::Gtc));
+
+    let snap = e.snapshot(I1, 10).unwrap();
+    // Лучший бид — 100, агрегирует две заявки (5+3), затем 99.
+    assert_eq!(snap.bids[0].price, Price(100));
+    assert_eq!(snap.bids[0].qty, Qty(8));
+    assert_eq!(snap.bids[0].orders, 2);
+    assert_eq!(snap.bids[1].price, Price(99));
+    assert_eq!(snap.bids[1].qty, Qty(4));
+    assert_eq!(snap.bids[1].orders, 1);
+}
+
+#[test]
+fn snapshot_orders_sides_correctly() {
+    let mut e = engine();
+    e.apply(limit(1, Side::Buy, 100, 1, TimeInForce::Gtc));
+    e.apply(limit(2, Side::Buy, 98, 1, TimeInForce::Gtc));
+    e.apply(limit(3, Side::Sell, 101, 1, TimeInForce::Gtc));
+    e.apply(limit(4, Side::Sell, 103, 1, TimeInForce::Gtc));
+
+    let snap = e.snapshot(I1, 10).unwrap();
+    // Биды по убыванию (лучший первый), аски по возрастанию (лучший первый).
+    assert_eq!(snap.bids.iter().map(|l| l.price.0).collect::<Vec<_>>(), vec![100, 98]);
+    assert_eq!(snap.asks.iter().map(|l| l.price.0).collect::<Vec<_>>(), vec![101, 103]);
+    assert_eq!(snap.bids[0].price.0, e.book(I1).unwrap().best_bid().unwrap().0);
+    assert_eq!(snap.asks[0].price.0, e.book(I1).unwrap().best_ask().unwrap().0);
+}
+
+#[test]
+fn snapshot_respects_depth_limit() {
+    let mut e = engine();
+    for i in 0..5 {
+        e.apply(limit(i + 1, Side::Buy, 100 - i as i64, 1, TimeInForce::Gtc));
+    }
+    let snap = e.snapshot(I1, 2).unwrap();
+    assert_eq!(snap.bids.len(), 2); // только 2 лучших уровня
+    assert_eq!(snap.bids.iter().map(|l| l.price.0).collect::<Vec<_>>(), vec![100, 99]);
+}
+
+#[test]
+fn snapshot_unknown_instrument_is_none() {
+    let e = engine();
+    assert!(e.snapshot(InstrumentId(99), 10).is_none());
+}
+
 // ---- Инварианты и детерминизм ---------------------------------------------
 
 #[test]
