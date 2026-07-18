@@ -31,11 +31,11 @@
       <div class="watch__title">⭐ POPULAR</div>
       <div class="watch__head">
         <span></span><span>INSTR.</span>
-        <span class="sortable" data-sort="change">CHANGE<i></i></span>
-        <span class="sortable" data-sort="sell">SELL<i></i></span>
-        <span class="sortable" data-sort="buy">BUY<i></i></span>
-        <span class="sortable" data-sort="spread">SPREAD<i></i></span>
-        <span class="sortable" data-sort="high">HIGH<i></i></span>
+        <span class="sortable c-change" data-sort="change">CHANGE<i></i></span>
+        <span class="sortable c-sell" data-sort="sell">SELL<i></i></span>
+        <span class="sortable c-buy" data-sort="buy">BUY<i></i></span>
+        <span class="sortable c-spread" data-sort="spread">SPREAD<i></i></span>
+        <span class="sortable c-high" data-sort="high">HIGH<i></i></span>
       </div>
       <div id="instruments" class="watch__rows"></div>
     </aside>
@@ -131,6 +131,12 @@
               <label class="setrow"><span>Additional line width</span><input type="number" id="sAlw" min="1" max="4" step="1" value="1"></label>
               <div class="dd-cat">Minimal price change</div>
               <label class="setrow"><span>Step</span><select id="sMinChange"><option value="default">Default</option><option value="1:1">1 : 1</option><option value="1:10">1 : 10</option></select></label>
+              <div class="dd-cat">Watchlist columns</div>
+              <label class="setrow"><span>Change</span><input type="checkbox" id="cChange" class="sw" checked></label>
+              <label class="setrow"><span>Sell</span><input type="checkbox" id="cSell" class="sw" checked></label>
+              <label class="setrow"><span>Buy</span><input type="checkbox" id="cBuy" class="sw" checked></label>
+              <label class="setrow"><span>Spread</span><input type="checkbox" id="cSpread" class="sw" checked></label>
+              <label class="setrow"><span>High</span><input type="checkbox" id="cHigh" class="sw" checked></label>
             </div>
           </div>
         </div>

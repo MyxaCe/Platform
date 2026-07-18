@@ -224,3 +224,8 @@ button { font-family: inherit; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .irow .symtxt small { display: inline; }
+
+/* Watchlist column visibility */
+.watch__head, .irow { grid-template-columns: var(--watch-cols, 18px 1.55fr .82fr .85fr .85fr .7fr .85fr); }
+.watch.hide-change .c-change, .watch.hide-sell .c-sell, .watch.hide-buy .c-buy,
+.watch.hide-spread .c-spread, .watch.hide-high .c-high { display: none; }

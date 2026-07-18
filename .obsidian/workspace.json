@@ -193,6 +193,9 @@
   },
   "active": "6241147a75a872e0",
   "lastOpenFiles": [
+    "docs/05-improvements/backlog.md.tmp.38752.59bc17702b23",
+    "web/public/app.js.tmp.38752.1c507193ef82",
+    "web/public/index.html.tmp.38752.48a6f24b05aa",
     "docs/05-improvements/backlog.md.tmp.38752.d654ef83542f",
     "web/public/app.js.tmp.38752.6c716377f380",
     "web/public/index.html.tmp.38752.77293bc7e2cd",
@@ -202,7 +205,6 @@
     "web/public/style.css.tmp.38752.2865cb88f8eb",
     "docs/04-bugs/bug-log.md",
     "web/public/style.css.tmp.38752.2d73b91805ef",
-    "web/public/index.html.tmp.38752.946aadf9b94f",
     "docs/02-services/matching-engine.md"
   ]
 }

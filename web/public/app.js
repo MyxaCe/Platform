@@ -243,11 +243,11 @@ async function refreshInstruments() {
     const up = it.change >= 0; const [b, q] = it.symbol.split('-');
     el.innerHTML = `<span class="star ${favs.has(it.id) ? 'on' : ''}" data-icon="star"></span>` +
       `<div class="sym">${coinHtml(b)}<span class="symtxt">${b}<small>/${q || 'USDT'}</small></span></div>` +
-      `<div class="num chg ${up ? 'up' : 'down'}">${up ? '+' : ''}${it.change.toFixed(2)}%</div>` +
-      `<div class="num sell">${it.bid != null ? fmtP(it.id, it.bid) : '—'}</div>` +
-      `<div class="num buy">${it.ask != null ? fmtP(it.id, it.ask) : '—'}</div>` +
-      `<div class="num muted">${it.bid != null && it.ask != null ? it.ask - it.bid : '—'}</div>` +
-      `<div class="num">${it.high != null ? fmtP(it.id, it.high) : '—'}</div>`;
+      `<div class="num chg c-change ${up ? 'up' : 'down'}">${up ? '+' : ''}${it.change.toFixed(2)}%</div>` +
+      `<div class="num sell c-sell">${it.bid != null ? fmtP(it.id, it.bid) : '—'}</div>` +
+      `<div class="num buy c-buy">${it.ask != null ? fmtP(it.id, it.ask) : '—'}</div>` +
+      `<div class="num muted c-spread">${it.bid != null && it.ask != null ? it.ask - it.bid : '—'}</div>` +
+      `<div class="num c-high">${it.high != null ? fmtP(it.id, it.high) : '—'}</div>`;
     el.classList.toggle('active', it.id === selected);
     if (isNew && selected === null) selectInstrument(it.id);
   }
@@ -315,6 +315,19 @@ function bindSetting(id, key, kind) {
 }
 bindSetting('sHollow', 'hollowColor', 'str'); bindSetting('sShadows', 'shadows', 'bool'); bindSetting('sShadowCustom', 'shadowCustom', 'bool'); bindSetting('sShadowColor', 'shadowColor', 'str');
 bindSetting('sPlw', 'priceLineWidth', 'num'); bindSetting('sAddLine', 'addLine', 'bool'); bindSetting('sAlw', 'addLineWidth', 'num'); bindSetting('sMinChange', 'minChange', 'str');
+
+// Watchlist column visibility
+const cols = Object.assign({ change: 1, sell: 1, buy: 1, spread: 1, high: 1 }, JSON.parse(localStorage.getItem('cols') || '{}'));
+const COLW = { change: '.82fr', sell: '.85fr', buy: '.85fr', spread: '.7fr', high: '.85fr' };
+function applyCols() {
+  const order = ['change', 'sell', 'buy', 'spread', 'high'];
+  const tracks = ['18px', '1.55fr', ...order.filter((k) => cols[k]).map((k) => COLW[k])];
+  const watch = document.querySelector('.watch');
+  watch.style.setProperty('--watch-cols', tracks.join(' '));
+  order.forEach((k) => watch.classList.toggle('hide-' + k, !cols[k]));
+}
+function bindCol(id, key) { const el = document.getElementById(id); if (!el) return; el.checked = !!cols[key]; el.addEventListener('change', () => { cols[key] = el.checked ? 1 : 0; localStorage.setItem('cols', JSON.stringify(cols)); applyCols(); }); }
+bindCol('cChange', 'change'); bindCol('cSell', 'sell'); bindCol('cBuy', 'buy'); bindCol('cSpread', 'spread'); bindCol('cHigh', 'high');
 
 // Panel/toolbar resizing
 const layout = Object.assign({ leftW: 280, rightW: 300, bottomH: 190, toolbarH: 42 }, JSON.parse(localStorage.getItem('layout') || '{}'));
@@ -400,6 +413,7 @@ document.querySelectorAll('.watch__head .sortable').forEach((h) => h.addEventLis
 // ============================ Start ========================================
 renderIcons();
 applyLayout();
+applyCols();
 initResizers();
 refreshInstruments();
 setInterval(refreshInstruments, 1000);
