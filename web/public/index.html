@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -30,8 +30,12 @@
       <div class="watch__search"><input id="search" placeholder="Search…" /></div>
       <div class="watch__title">⭐ POPULAR</div>
       <div class="watch__head">
-        <span></span><span>INSTR.</span><span class="ta-r">CHANGE</span><span class="ta-r">SELL</span>
-        <span class="ta-r">BUY</span><span class="ta-r">SPREAD</span><span class="ta-r">HIGH</span>
+        <span></span><span>INSTR.</span>
+        <span class="sortable" data-sort="change">CHANGE<i></i></span>
+        <span class="sortable" data-sort="sell">SELL<i></i></span>
+        <span class="sortable" data-sort="buy">BUY<i></i></span>
+        <span class="sortable" data-sort="spread">SPREAD<i></i></span>
+        <span class="sortable" data-sort="high">HIGH<i></i></span>
       </div>
       <div id="instruments" class="watch__rows"></div>
     </aside>
@@ -48,7 +52,7 @@
         </div>
         <span class="tb-sep"></span>
         <div class="tb-dd">
-          <button id="ctBtn" class="tbbtn"><span class="ic" data-icon="candles"></span><span id="ctLabel">Candles</span><span class="caret" data-icon="caret"></span></button>
+          <button id="ctBtn" class="tbbtn" data-tip="Chart type"><span class="ic" data-icon="candles"></span><span id="ctLabel">Candles</span><span class="caret" data-icon="caret"></span></button>
           <div id="ctMenu" class="dd hidden">
             <div class="dd-item active" data-ct="candles"><span class="ic" data-icon="candles"></span> Candles</div>
             <div class="dd-item" data-ct="hollow"><span class="ic" data-icon="hollow"></span> Hollow Candles</div>
@@ -59,79 +63,80 @@
           </div>
         </div>
         <div class="tb-dd">
-          <button id="indBtn" class="tbbtn iconbtn" title="Indicators"><span class="ic" data-icon="indicators"></span></button>
+          <button id="indBtn" class="tbbtn iconbtn" data-tip="Indicators"><span class="ic" data-icon="indicators"></span></button>
           <div id="indMenu" class="dd dd--wide hidden">
-            <div class="dd-cat">Тренд</div>
-            <label><input type="checkbox" data-ov="sma"> Moving Average (SMA 20)</label>
-            <label><input type="checkbox" data-ov="ema"> EMA 20</label>
-            <label><input type="checkbox" data-ov="wma"> WMA 20</label>
-            <label><input type="checkbox" data-ov="supertrend"> SuperTrend</label>
-            <label><input type="checkbox" data-ov="psar"> Parabolic SAR</label>
-            <label><input type="checkbox" data-ov="ichimoku"> Ichimoku</label>
-            <label><input type="checkbox" data-ov="alligator"> Alligator</label>
-            <div class="dd-cat">Волатильность</div>
-            <label><input type="checkbox" data-ov="boll"> Bollinger Bands</label>
-            <label><input type="checkbox" data-ov="keltner"> Keltner Channels</label>
-            <label><input type="checkbox" data-ov="donchian"> Donchian Channels</label>
-            <div class="dd-cat">Объём</div>
-            <label><input type="checkbox" data-ov="vwap"> VWAP</label>
-            <div class="dd-cat">Осциллятор (внизу, один)</div>
-            <select id="oscSel">
-              <option value="">— нет —</option>
-              <optgroup label="Моментум">
-                <option value="rsi">RSI</option><option value="stoch">Stochastic</option>
-                <option value="cci">CCI</option><option value="momentum">Momentum</option>
-                <option value="williams">Williams %R</option><option value="roc">ROC</option>
-              </optgroup>
-              <optgroup label="Тренд">
-                <option value="adx">ADX / +DI / -DI</option><option value="macd">MACD</option>
-              </optgroup>
-              <optgroup label="Волатильность">
-                <option value="atr">ATR</option><option value="stddev">Std Deviation</option>
-              </optgroup>
-              <optgroup label="Объём">
-                <option value="obv">OBV</option><option value="ad">A/D</option>
-                <option value="cmf">Chaikin MF</option><option value="mfi">MFI</option>
-                <option value="force">Force Index</option>
-              </optgroup>
-              <optgroup label="Билл Вильямс">
-                <option value="ao">Awesome</option><option value="ac">Accelerator</option><option value="gator">Gator</option>
-              </optgroup>
-            </select>
-            <div class="note">Скоро: Volume Profile, TPO, Delta, Fibonacci, ZigZag, Pivot Points.</div>
+            <div class="dd-cat">Trend</div>
+            <div class="dd-toggle" data-ov="sma">Moving Average (SMA 20)</div>
+            <div class="dd-toggle" data-ov="ema">EMA 20</div>
+            <div class="dd-toggle" data-ov="wma">WMA 20</div>
+            <div class="dd-toggle" data-ov="supertrend">SuperTrend</div>
+            <div class="dd-toggle" data-ov="psar">Parabolic SAR</div>
+            <div class="dd-toggle" data-ov="ichimoku">Ichimoku</div>
+            <div class="dd-toggle" data-ov="alligator">Alligator</div>
+            <div class="dd-cat">Volatility</div>
+            <div class="dd-toggle" data-ov="boll">Bollinger Bands</div>
+            <div class="dd-toggle" data-ov="keltner">Keltner Channels</div>
+            <div class="dd-toggle" data-ov="donchian">Donchian Channels</div>
+            <div class="dd-cat">Volume</div>
+            <div class="dd-toggle" data-ov="vwap">VWAP</div>
+            <div class="dd-cat">Oscillator (bottom, one)</div>
+            <div class="osc-list">
+              <div class="dd-toggle osc active" data-osc="">None</div>
+              <div class="dd-toggle osc" data-osc="rsi">RSI</div>
+              <div class="dd-toggle osc" data-osc="stoch">Stochastic</div>
+              <div class="dd-toggle osc" data-osc="cci">CCI</div>
+              <div class="dd-toggle osc" data-osc="momentum">Momentum</div>
+              <div class="dd-toggle osc" data-osc="williams">Williams %R</div>
+              <div class="dd-toggle osc" data-osc="roc">ROC</div>
+              <div class="dd-toggle osc" data-osc="adx">ADX / +DI / -DI</div>
+              <div class="dd-toggle osc" data-osc="macd">MACD</div>
+              <div class="dd-toggle osc" data-osc="atr">ATR</div>
+              <div class="dd-toggle osc" data-osc="stddev">Std Deviation</div>
+              <div class="dd-toggle osc" data-osc="obv">OBV</div>
+              <div class="dd-toggle osc" data-osc="ad">A/D</div>
+              <div class="dd-toggle osc" data-osc="cmf">Chaikin MF</div>
+              <div class="dd-toggle osc" data-osc="mfi">MFI</div>
+              <div class="dd-toggle osc" data-osc="force">Force Index</div>
+              <div class="dd-toggle osc" data-osc="ao">Awesome</div>
+              <div class="dd-toggle osc" data-osc="ac">Accelerator</div>
+              <div class="dd-toggle osc" data-osc="gator">Gator</div>
+            </div>
+            <div class="note">Soon: Volume Profile, TPO, Delta, Fibonacci, ZigZag, Pivot Points.</div>
           </div>
         </div>
         <div class="tb-dd">
-          <button id="ptBtn" class="tbbtn tbtext"><span id="ptLabel">MID</span><span class="caret" data-icon="caret"></span></button>
+          <button id="ptBtn" class="tbbtn tbtext" data-tip="Price type"><span id="ptLabel">MID</span><span class="caret" data-icon="caret"></span></button>
           <div id="ptMenu" class="dd hidden">
             <div class="dd-item active" data-pt="mid">Mid</div>
             <div class="dd-item" data-pt="ask">Ask</div>
             <div class="dd-item" data-pt="bid">Bid</div>
           </div>
         </div>
-        <button id="sltpBtn" class="tbbtn tbtext on" title="Показать линии SL/TP">SL/TP</button>
-        <button id="pipsBtn" class="tbbtn iconbtn" title="Display PIPS"><span class="ic" data-icon="wallet"></span></button>
+        <button id="sltpBtn" class="tbbtn tbtext on" data-tip="Show SL/TP lines">SL/TP</button>
+        <button id="pipsBtn" class="tbbtn iconbtn" data-tip="Display PIPS"><span class="ic" data-icon="wallet"></span></button>
 
         <div class="tb-right">
-          <button id="resetBtn" class="tbbtn iconbtn" title="Сбросить график"><span class="ic" data-icon="reset"></span></button>
-          <button id="fullBtn" class="tbbtn iconbtn" title="На весь экран"><span class="ic" data-icon="fullscreen"></span></button>
+          <button id="resetBtn" class="tbbtn iconbtn" data-tip="Reset chart"><span class="ic" data-icon="reset"></span></button>
+          <button id="fullBtn" class="tbbtn iconbtn" data-tip="Fullscreen"><span class="ic" data-icon="fullscreen"></span></button>
           <div class="tb-dd">
-            <button id="setBtn" class="tbbtn iconbtn" title="Настройки"><span class="ic" data-icon="settings"></span></button>
-            <div id="setMenu" class="dd dd--wide dd--right hidden">
-              <div class="dd-cat">Свечи</div>
-              <label>Hollow candle color <input type="color" id="sHollow" value="#26a69a"></label>
-              <label><input type="checkbox" id="sShadows" checked> Candle shadows</label>
-              <label><input type="checkbox" id="sShadowCustom"> Свой цвет теней <input type="color" id="sShadowColor" value="#787b86"></label>
-              <div class="dd-cat">Линии цены</div>
-              <label>Price line width <input type="number" id="sPlw" min="0" max="4" step="1" value="1"></label>
-              <label><input type="checkbox" id="sAddLine"> Additional price line</label>
-              <label>&nbsp;&nbsp;↳ width <input type="number" id="sAlw" min="1" max="4" step="1" value="1"></label>
+            <button id="setBtn" class="tbbtn iconbtn" data-tip="Settings"><span class="ic" data-icon="settings"></span></button>
+            <div id="setMenu" class="dd setmenu dd--right hidden">
+              <div class="dd-cat">Candles</div>
+              <label class="setrow"><span>Hollow candle color</span><input type="color" id="sHollow" value="#26a69a"></label>
+              <label class="setrow"><span>Candle shadows</span><input type="checkbox" id="sShadows" class="sw" checked></label>
+              <label class="setrow"><span>Custom shadow color</span><span class="setrow__r"><input type="checkbox" id="sShadowCustom" class="sw"><input type="color" id="sShadowColor" value="#787b86"></span></label>
+              <div class="dd-cat">Price lines</div>
+              <label class="setrow"><span>Price line width</span><input type="number" id="sPlw" min="0" max="4" step="1" value="1"></label>
+              <label class="setrow"><span>Additional price line</span><input type="checkbox" id="sAddLine" class="sw"></label>
+              <label class="setrow"><span>Additional line width</span><input type="number" id="sAlw" min="1" max="4" step="1" value="1"></label>
               <div class="dd-cat">Minimal price change</div>
-              <select id="sMinChange"><option value="default">Default</option><option value="1:1">1 : 1</option><option value="1:10">1 : 10</option></select>
+              <label class="setrow"><span>Step</span><select id="sMinChange"><option value="default">Default</option><option value="1:1">1 : 1</option><option value="1:10">1 : 10</option></select></label>
             </div>
           </div>
         </div>
       </div>
+
+      <div class="rsz rsz-h" data-rsz="toolbar"></div>
 
       <div class="chartwrap">
         <div id="legend" class="legend">
@@ -140,38 +145,34 @@
           <div id="lgOhlc" class="legend__ohlc">—</div>
         </div>
         <div id="watermark" class="watermark">—</div>
+        <div id="loading" class="loading hidden"><span class="spinner"></span></div>
         <div id="chart" class="chart"></div>
       </div>
 
       <div class="rsz rsz-h" data-rsz="bottom"></div>
       <div class="bottom">
         <div class="bottom__tabs">
-          <span id="tab-trades" class="active" data-pane="trades">MARKET TRADES</span>
-          <span id="tab-deals" data-pane="deals">OPEN DEALS</span>
+          <span id="tab-deals" class="active" data-pane="deals">OPEN DEALS</span>
           <span id="tab-pending" data-pane="pending">LIMIT ORDERS</span>
           <span id="tab-closed" data-pane="closed">CLOSED DEALS</span>
           <span id="tab-signals" data-pane="signals">SIGNALS</span>
         </div>
-        <div id="pane-trades" class="pane">
-          <div class="trades__head"><span>INSTR.</span><span class="ta-r">ЦЕНА</span><span class="ta-r">КОЛ-ВО</span><span class="ta-r">ВРЕМЯ</span></div>
-          <div id="tape" class="tape"></div>
-        </div>
-        <div id="pane-deals" class="pane hidden">
-          <div class="deals__head"><span>INSTR.</span><span>СТОРОНА</span><span class="ta-r">ОБЪЁМ</span><span class="ta-r">ВХОД</span><span class="ta-r">ЦЕНА</span><span class="ta-r">P&amp;L</span><span></span></div>
+        <div id="pane-deals" class="pane">
+          <div class="deals__head"><span>INSTR.</span><span>SIDE</span><span class="ta-r">QTY</span><span class="ta-r">ENTRY</span><span class="ta-r">PRICE</span><span class="ta-r">P&amp;L</span><span></span></div>
           <div id="deals" class="rows"></div>
         </div>
         <div id="pane-pending" class="pane hidden">
-          <div class="deals__head"><span>INSTR.</span><span>СТОРОНА</span><span class="ta-r">ОБЪЁМ</span><span class="ta-r">ЦЕНА</span><span class="ta-r">SL</span><span class="ta-r">TP</span><span></span></div>
+          <div class="deals__head"><span>INSTR.</span><span>SIDE</span><span class="ta-r">QTY</span><span class="ta-r">PRICE</span><span class="ta-r">SL</span><span class="ta-r">TP</span><span></span></div>
           <div id="pending" class="rows"></div>
         </div>
         <div id="pane-closed" class="pane hidden">
-          <div class="deals__head"><span>INSTR.</span><span>СТОРОНА</span><span class="ta-r">ОБЪЁМ</span><span class="ta-r">ВХОД</span><span class="ta-r">ВЫХОД</span><span class="ta-r">P&amp;L</span><span></span></div>
+          <div class="deals__head"><span>INSTR.</span><span>SIDE</span><span class="ta-r">QTY</span><span class="ta-r">ENTRY</span><span class="ta-r">EXIT</span><span class="ta-r">P&amp;L</span><span></span></div>
           <div id="closed" class="rows"></div>
         </div>
         <div id="pane-signals" class="pane hidden">
-          <div class="deals__head"><span>INSTR.</span><span>СИГНАЛ</span><span>TF</span><span class="ta-r">НАПРАВЛЕНИЕ</span></div>
+          <div class="deals__head"><span>INSTR.</span><span>SIGNAL</span><span>TF</span><span class="ta-r">DIRECTION</span></div>
           <div id="signals" class="rows"></div>
-          <div class="signals-note muted">Наши простые сигналы по индикаторам (RSI, MA-кросс). Не Autochartist.</div>
+          <div class="signals-note muted">Our simple indicator-based signals (RSI, MA cross). Not Autochartist.</div>
         </div>
       </div>
     </section>
@@ -195,7 +196,7 @@
           <button id="lotPlus" class="btn lotbtn">+</button>
         </div>
         <div id="priceRow" class="pricerow hidden">
-          <label class="lbl">PRICE (лимит)</label>
+          <label class="lbl">PRICE (limit)</label>
           <input id="price" type="number" step="0.01" />
         </div>
         <div class="sltp">
@@ -210,6 +211,7 @@
     </aside>
   </main>
 
+  <div id="tip" class="tip hidden"></div>
   <script src="/app.js"></script>
 </body>
 </html>

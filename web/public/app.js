@@ -1,12 +1,14 @@
 'use strict';
 
-// ============================ Состояние ====================================
+// ============================ State ========================================
 let META = {}, selected = null, tf = 3600, orderMode = 'market';
-let chartType = 'candles', priceType = 'mid', showPips = false;
+let chartType = 'candles', priceType = 'mid', showPips = false, showSLTP = true;
 const overlays = { sma: 0, ema: 0, wma: 0, supertrend: 0, psar: 0, ichimoku: 0, alligator: 0, boll: 0, keltner: 0, donchian: 0, vwap: 0 };
 let oscillator = '';
 let rawCandles = [], currentDeals = [];
 const rowEls = {};
+let sortKey = null, sortDir = -1;
+const favs = new Set(JSON.parse(localStorage.getItem('favs') || '[]'));
 
 const token = () => document.getElementById('userSel').value;
 const pdec = (id) => (META[id]?.price_decimals ?? 2);
@@ -16,8 +18,6 @@ const qscale = (id) => 10 ** qdec(id);
 const fmtP = (id, raw) => (raw / pscale(id)).toLocaleString('en-US', { minimumFractionDigits: pdec(id), maximumFractionDigits: pdec(id) });
 const fmtQ = (id, raw) => (raw / qscale(id)).toFixed(qdec(id));
 const usd = (c) => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-let showSLTP = true;
-const favs = new Set(JSON.parse(localStorage.getItem('favs') || '[]'));
 const TFN = { 60: '1m', 300: '5m', 900: '15m', 1800: '30m', 3600: '1h', 14400: '4h', 86400: '1d', 604800: '1w' };
 const settings = Object.assign(
   { shadows: true, shadowCustom: false, shadowColor: '#787b86', hollowColor: '#26a69a', priceLineWidth: 1, addLine: false, addLineWidth: 1, minChange: 'default' },
@@ -25,7 +25,7 @@ const settings = Object.assign(
 );
 const saveSettings = () => localStorage.setItem('settings', JSON.stringify(settings));
 
-// ---- Иконки (встроенные SVG, currentColor) --------------------------------
+// ---- Icons (inline SVG, currentColor) -------------------------------------
 const ICONS = {
   candles: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M5 2v3M5 11v3M11 3v3M11 10v3"/><rect x="3.3" y="5" width="3.4" height="6" fill="currentColor" stroke="none"/><rect x="9.3" y="6" width="3.4" height="4" fill="currentColor" stroke="none"/></svg>',
   hollow: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M5 2v3M5 11v3M11 3v3M11 10v3"/><rect x="3.3" y="5" width="3.4" height="6"/><rect x="9.3" y="6" width="3.4" height="4"/></svg>',
@@ -41,9 +41,11 @@ const ICONS = {
   settings: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.6v1.8M8 12.6v1.8M1.6 8h1.8M12.6 8h1.8M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>',
 };
 function renderIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { const n = el.dataset.icon; if (ICONS[n]) el.innerHTML = ICONS[n]; }); }
+function hue(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return h; }
+function coinHtml(b) { return `<span class="coinwrap"><span class="coinbadge" style="background:hsl(${hue(b)} 52% 40%)">${b[0]}</span><img class="coin" src="/vendor/coins/${b.toLowerCase()}.svg" onerror="this.remove()" alt=""></span>`; }
 
-// ---- Легенда (инфо-окно на графике) ---------------------------------------
-function fmtDT(t) { return new Date(t * 1000).toLocaleString('ru-RU', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+// ---- Legend (chart info card) ---------------------------------------------
+function fmtDT(t) { return new Date(t * 1000).toLocaleString('en-GB', { timeZone: 'UTC', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) + ' UTC'; }
 function updateLegend(id, t, c) {
   const rf = (x) => x.toLocaleString('en-US', { minimumFractionDigits: pdec(id), maximumFractionDigits: pdec(id) });
   document.getElementById('lgSym').textContent = META[id]?.symbol || '';
@@ -53,11 +55,19 @@ function updateLegend(id, t, c) {
 }
 function refreshLegend() { if (selected == null) return; let c; if (formingRaw) { const s = pscale(selected); c = { time: formingRaw.time, open: formingRaw.open / s, high: formingRaw.high / s, low: formingRaw.low / s, close: formingRaw.close / s }; } else if (rawCandles.length) c = rawCandles[rawCandles.length - 1]; if (c) updateLegend(selected, c.time, c); }
 
-// ---- Избранное ------------------------------------------------------------
-function toggleFav(id) { if (favs.has(id)) favs.delete(id); else favs.add(id); localStorage.setItem('favs', JSON.stringify([...favs])); const el = rowEls[id]; if (el) el.querySelector('.star')?.classList.toggle('on', favs.has(id)); reorderRows(); }
-function reorderRows() { const cont = document.getElementById('instruments'); Object.keys(rowEls).map(Number).sort((a, b) => (favs.has(b) - favs.has(a)) || a - b).forEach((id) => cont.appendChild(rowEls[id])); }
+// ---- Favorites / sorting --------------------------------------------------
+function toggleFav(id) { if (favs.has(id)) favs.delete(id); else favs.add(id); localStorage.setItem('favs', JSON.stringify([...favs])); rowEls[id]?.querySelector('.star')?.classList.toggle('on', favs.has(id)); reorderRows(); }
+const SORT_METRIC = { change: (it) => it.change, sell: (it) => it.bid ?? -Infinity, buy: (it) => it.ask ?? -Infinity, spread: (it) => (it.ask != null && it.bid != null ? it.ask - it.bid : -Infinity), high: (it) => it.high ?? -Infinity };
+function reorderRows() {
+  const cont = document.getElementById('instruments');
+  Object.keys(rowEls).map(Number).sort((a, b) => {
+    const fa = favs.has(a), fb = favs.has(b); if (fa !== fb) return fb - fa;
+    if (sortKey && META[a] && META[b]) { const m = SORT_METRIC[sortKey]; const d = (m(META[a]) - m(META[b])) * sortDir; if (d) return d; }
+    return a - b;
+  }).forEach((id) => cont.appendChild(rowEls[id]));
+}
 
-// ============================ Индикаторы (математика) ======================
+// ============================ Indicators (math) ============================
 const HL2 = (c) => (c.high + c.low) / 2;
 const HLC3 = (c) => (c.high + c.low + c.close) / 3;
 const toSeries = (arr, t) => arr.map((v, i) => (v == null || !isFinite(v) ? null : { time: t[i], value: v })).filter(Boolean);
@@ -72,7 +82,7 @@ function atr(cs, p) { const tr = trueRange(cs), o = new Array(cs.length).fill(nu
 function rsi(v, p) { const o = new Array(v.length).fill(null); let ag = 0, al = 0; for (let i = 1; i < v.length; i++) { const c = v[i] - v[i - 1], g = Math.max(c, 0), l = Math.max(-c, 0); if (i <= p) { ag += g; al += l; if (i === p) { ag /= p; al /= p; o[i] = 100 - 100 / (1 + (al === 0 ? 100 : ag / al)); } } else { ag = (ag * (p - 1) + g) / p; al = (al * (p - 1) + l) / p; o[i] = 100 - 100 / (1 + (al === 0 ? 100 : ag / al)); } } return o; }
 function highest(cs, p, i) { let h = -Infinity; for (let j = i - p + 1; j <= i; j++) h = Math.max(h, cs[j].high); return h; }
 function lowest(cs, p, i) { let l = Infinity; for (let j = i - p + 1; j <= i; j++) l = Math.min(l, cs[j].low); return l; }
-function stoch(cs, kP, dP) { const k = new Array(cs.length).fill(null); for (let i = kP - 1; i < cs.length; i++) { const h = highest(cs, kP, i), l = lowest(cs, kP, i); k[i] = h === l ? 50 : 100 * (cs[i].close - l) / (h - l); } const kk = k.map((x) => (x == null ? null : x)); const d = new Array(cs.length).fill(null); for (let i = kP - 1 + dP - 1; i < cs.length; i++) { let s = 0; for (let j = 0; j < dP; j++) s += k[i - j]; d[i] = s / dP; } return [kk, d]; }
+function stoch(cs, kP, dP) { const k = new Array(cs.length).fill(null); for (let i = kP - 1; i < cs.length; i++) { const h = highest(cs, kP, i), l = lowest(cs, kP, i); k[i] = h === l ? 50 : 100 * (cs[i].close - l) / (h - l); } const d = new Array(cs.length).fill(null); for (let i = kP - 1 + dP - 1; i < cs.length; i++) { let s = 0; for (let j = 0; j < dP; j++) s += k[i - j]; d[i] = s / dP; } return [k, d]; }
 function cci(cs, p) { const tp = cs.map(HLC3), o = new Array(cs.length).fill(null); for (let i = p - 1; i < cs.length; i++) { let m = 0; for (let j = i - p + 1; j <= i; j++) m += tp[j]; m /= p; let md = 0; for (let j = i - p + 1; j <= i; j++) md += Math.abs(tp[j] - m); md /= p; o[i] = md === 0 ? 0 : (tp[i] - m) / (0.015 * md); } return o; }
 function momentum(v, p) { const o = new Array(v.length).fill(null); for (let i = p; i < v.length; i++) o[i] = v[i] - v[i - p]; return o; }
 function roc(v, p) { const o = new Array(v.length).fill(null); for (let i = p; i < v.length; i++) o[i] = v[i - p] ? 100 * (v[i] - v[i - p]) / v[i - p] : 0; return o; }
@@ -103,7 +113,6 @@ function ichimoku(cs) { const n = cs.length, ten = new Array(n).fill(null), kij 
 function vwap(cs) { const o = []; let cpv = 0, cv = 0; for (let i = 0; i < cs.length; i++) { cpv += HLC3(cs[i]) * cs[i].volume; cv += cs[i].volume; o.push(cv > 0 ? cpv / cv : null); } return [{ color: '#f0b90b', values: o, width: 2 }]; }
 function alligator(cs) { const m = cs.map(HL2); return [{ color: '#2196f3', values: smma(m, 13) }, { color: '#ef5350', values: smma(m, 8) }, { color: '#26a69a', values: smma(m, 5) }]; }
 
-// Реестры: overlay (на цене) и осцилляторы (в подвале). Каждая fn → массив линий {color, values, width?}.
 const OVERLAYS = {
   sma: (cs) => [{ color: '#4fc3f7', values: sma(cs.map((c) => c.close), 20) }],
   ema: (cs) => [{ color: '#ba68c8', values: ema(cs.map((c) => c.close), 20) }],
@@ -131,10 +140,10 @@ const OSC = {
   gator: (cs) => { const [j, t, l] = alligator(cs).map((x) => x.values); return [{ color: '#26a69a', values: j.map((v, i) => (v != null && t[i] != null ? Math.abs(v - t[i]) : null)) }, { color: '#ef5350', values: t.map((v, i) => (v != null && l[i] != null ? -Math.abs(v - l[i]) : null)) }]; },
 };
 
-// ============================ График =======================================
+// ============================ Chart ========================================
 const chartEl = document.getElementById('chart');
 const chart = LightweightCharts.createChart(chartEl, {
-  layout: { background: { color: '#0b0e14' }, textColor: '#6b7688' },
+  layout: { background: { color: '#0b0e14' }, textColor: '#6b7688', attributionLogo: false },
   grid: { vertLines: { color: 'rgba(31,39,53,.4)' }, horzLines: { color: 'rgba(31,39,53,.4)' } },
   rightPriceScale: { borderColor: '#1f2735' },
   timeScale: { borderColor: '#1f2735', timeVisible: true, secondsVisible: false },
@@ -149,7 +158,6 @@ const volColor = (c) => (c.close >= c.open ? 'rgba(38,166,154,.4)' : 'rgba(239,8
 const isLineType = () => (chartType === 'line' || chartType === 'area');
 
 function heikin(cs) { const o = []; let po, pc; for (let i = 0; i < cs.length; i++) { const c = cs[i]; const hc = (c.open + c.high + c.low + c.close) / 4; const ho = i === 0 ? (c.open + c.close) / 2 : (po + pc) / 2; o.push({ time: c.time, open: ho, high: Math.max(c.high, ho, hc), low: Math.min(c.low, ho, hc), close: hc }); po = ho; pc = hc; } return o; }
-
 function candleColors() {
   const wick = (def) => (settings.shadows ? (settings.shadowCustom ? settings.shadowColor : def) : 'rgba(0,0,0,0)');
   if (chartType === 'hollow') return { upColor: 'rgba(0,0,0,0)', downColor: 'rgba(0,0,0,0)', borderUpColor: settings.hollowColor, borderDownColor: '#ef5350', wickUpColor: wick(settings.hollowColor), wickDownColor: wick('#ef5350') };
@@ -178,7 +186,6 @@ function mainData() {
   const src = chartType === 'heikin' ? heikin(rawCandles) : rawCandles;
   return src.map((c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }));
 }
-
 function applyIndicators() {
   overlaySeries.forEach((s) => chart.removeSeries(s)); overlaySeries = [];
   oscSeriesList.forEach((s) => chart.removeSeries(s)); oscSeriesList = [];
@@ -192,13 +199,12 @@ function applyIndicators() {
     OSC[oscillator](rawCandles).forEach((ln, i) => { const s = chart.addLineSeries({ color: ln.color, lineWidth: 1, priceScaleId: 'osc', priceLineVisible: false, lastValueVisible: false }); if (i === 0) s.priceScale().applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } }); s.setData(toSeries(ln.values, times)); oscSeriesList.push(s); });
   } else volume.applyOptions({ visible: true });
 }
-
 function redrawPriceLines() {
   if (!mainSeries) return;
   priceLines.forEach((l) => mainSeries.removePriceLine(l)); priceLines = [];
   const s = pscale(selected);
   if (showSLTP) for (const d of currentDeals) {
-    priceLines.push(mainSeries.createPriceLine({ price: d.entry / s, color: '#8899aa', lineStyle: 2, lineWidth: 1, title: `${d.side === 'buy' ? 'L' : 'S'}` }));
+    priceLines.push(mainSeries.createPriceLine({ price: d.entry / s, color: '#8899aa', lineStyle: 2, lineWidth: 1, title: d.side === 'buy' ? 'L' : 'S' }));
     if (d.sl != null) priceLines.push(mainSeries.createPriceLine({ price: d.sl / s, color: '#ef5350', lineWidth: 1, title: 'SL' }));
     if (d.tp != null) priceLines.push(mainSeries.createPriceLine({ price: d.tp / s, color: '#26a69a', lineWidth: 1, title: 'TP' }));
   }
@@ -209,22 +215,25 @@ new ResizeObserver(() => chart.applyOptions({ width: chartEl.clientWidth, height
 chart.subscribeCrosshairMove((p) => { const id = selected; if (id == null) return; const d = p.seriesData?.get(mainSeries); if (p.time && d) { const c = d.close != null ? d : { open: d.value, high: d.value, low: d.value, close: d.value }; updateLegend(id, p.time, c); } else refreshLegend(); });
 
 async function loadCandles(id, timeframe) {
-  const r = await fetch(`/candles/${id}?tf=${timeframe}&limit=300`);
-  const raw = await r.json().catch(() => []);
-  const s = pscale(id), v = qscale(id);
-  rawCandles = raw.map((c) => ({ time: c.time, open: c.open / s, high: c.high / s, low: c.low / s, close: c.close / s, volume: c.volume / v }));
-  makeMainSeries();
-  mainSeries.setData(mainData());
-  volume.setData(rawCandles.map((c) => ({ time: c.time, value: c.volume, color: volColor(c) })));
-  applyIndicators(); redrawPriceLines(); computeSignals();
-  if (rawCandles.length) { const last = raw[raw.length - 1]; lastBarTime = last.time; formingRaw = { ...last }; const n = rawCandles.length; chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 }); } else { lastBarTime = 0; formingRaw = null; }
-  refreshLegend();
+  const load = document.getElementById('loading'); load.classList.remove('hidden');
+  try {
+    const r = await fetch(`/candles/${id}?tf=${timeframe}&limit=300`);
+    const raw = await r.json().catch(() => []);
+    const s = pscale(id), v = qscale(id);
+    rawCandles = raw.map((c) => ({ time: c.time, open: c.open / s, high: c.high / s, low: c.low / s, close: c.close / s, volume: c.volume / v }));
+    makeMainSeries();
+    mainSeries.setData(mainData());
+    volume.setData(rawCandles.map((c) => ({ time: c.time, value: c.volume, color: volColor(c) })));
+    applyIndicators(); redrawPriceLines(); computeSignals();
+    if (rawCandles.length) { const last = raw[raw.length - 1]; lastBarTime = last.time; formingRaw = { ...last }; const n = rawCandles.length; chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 }); } else { lastBarTime = 0; formingRaw = null; }
+    refreshLegend();
+  } finally { load.classList.add('hidden'); }
 }
 function drawForming() { if (!formingRaw || !mainSeries || chartType === 'heikin') return; const s = pscale(selected); mainSeries.update(isLineType() ? { time: formingRaw.time, value: formingRaw.close / s } : { time: formingRaw.time, open: formingRaw.open / s, high: formingRaw.high / s, low: formingRaw.low / s, close: formingRaw.close / s }); refreshLegend(); }
 function onLiveTrade(id, price, qty) { if (id !== selected) return; const now = Math.floor(Date.now() / 1000); const b = now - (now % tf); if (!formingRaw || b > formingRaw.time) formingRaw = { time: b, open: price, high: price, low: price, close: price, volume: qty }; else { formingRaw.high = Math.max(formingRaw.high, price); formingRaw.low = Math.min(formingRaw.low, price); formingRaw.close = price; } if (formingRaw.time >= lastBarTime) { lastBarTime = formingRaw.time; drawForming(); } }
 async function syncLast() { const id = selected; if (id == null) return; const r = await fetch(`/candles/${id}?tf=${tf}&limit=2`); const raw = await r.json().catch(() => []); if (!raw.length) return; const last = raw[raw.length - 1]; if (last.time >= lastBarTime) { lastBarTime = last.time; formingRaw = { ...last }; drawForming(); } }
 
-// ============================ Инструменты ==================================
+// ============================ Instruments ==================================
 async function refreshInstruments() {
   const r = await fetch('/instruments'); const list = await r.json().catch(() => []);
   const cont = document.getElementById('instruments');
@@ -233,12 +242,12 @@ async function refreshInstruments() {
     if (isNew) { el = document.createElement('div'); el.className = 'irow'; el.dataset.id = it.id; cont.appendChild(el); rowEls[it.id] = el; }
     const up = it.change >= 0; const [b, q] = it.symbol.split('-');
     el.innerHTML = `<span class="star ${favs.has(it.id) ? 'on' : ''}" data-icon="star"></span>` +
-      `<div class="sym">${b}<small>/${q || 'USDT'}</small></div>` +
-      `<div class="chg ta-r ${up ? 'up' : 'down'}">${up ? '+' : ''}${it.change.toFixed(2)}%</div>` +
-      `<div class="sell ta-r">${it.bid != null ? fmtP(it.id, it.bid) : '—'}</div>` +
-      `<div class="buy ta-r">${it.ask != null ? fmtP(it.id, it.ask) : '—'}</div>` +
-      `<div class="ta-r muted">${it.bid != null && it.ask != null ? it.ask - it.bid : '—'}</div>` +
-      `<div class="high">${it.high != null ? fmtP(it.id, it.high) : '—'}</div>`;
+      `<div class="sym">${coinHtml(b)}<span class="symtxt">${b}<small>/${q || 'USDT'}</small></span></div>` +
+      `<div class="num chg ${up ? 'up' : 'down'}">${up ? '+' : ''}${it.change.toFixed(2)}%</div>` +
+      `<div class="num sell">${it.bid != null ? fmtP(it.id, it.bid) : '—'}</div>` +
+      `<div class="num buy">${it.ask != null ? fmtP(it.id, it.ask) : '—'}</div>` +
+      `<div class="num muted">${it.bid != null && it.ask != null ? it.ask - it.bid : '—'}</div>` +
+      `<div class="num">${it.high != null ? fmtP(it.id, it.high) : '—'}</div>`;
     el.classList.toggle('active', it.id === selected);
     if (isNew && selected === null) selectInstrument(it.id);
   }
@@ -255,13 +264,13 @@ function updateDealPanel() {
   document.getElementById('bidPx').textContent = it.bid != null ? fmtP(it.id, it.bid) : '—';
   document.getElementById('watermark').textContent = it.symbol;
   const pips = document.getElementById('pipsInfo');
-  if (showPips && it.bid != null && it.ask != null) { pips.classList.remove('hidden'); pips.textContent = `Спред: ${it.ask - it.bid} pips`; } else pips.classList.add('hidden');
+  if (showPips && it.bid != null && it.ask != null) { pips.classList.remove('hidden'); pips.textContent = `Spread: ${it.ask - it.bid} pips`; } else pips.classList.add('hidden');
   if (orderMode === 'limit' && !document.getElementById('price').value && ref != null) document.getElementById('price').value = (ref / pscale(it.id)).toFixed(pdec(it.id));
 }
 async function selectInstrument(id) { selected = id; Object.entries(rowEls).forEach(([k, el]) => el.classList.toggle('active', +k === id)); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); pollDeals(); }
 document.getElementById('tfs').addEventListener('click', (e) => { const btn = e.target.closest('button'); if (!btn) return; tf = +btn.dataset.tf; document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
 
-// ============================ Тулбар (выпадашки) ===========================
+// ============================ Toolbar (dropdowns) ==========================
 function closeDD() { document.querySelectorAll('.dd').forEach((d) => d.classList.add('hidden')); }
 function toggleDD(id) { const m = document.getElementById(id); const wasHidden = m.classList.contains('hidden'); closeDD(); if (wasHidden) m.classList.remove('hidden'); }
 document.addEventListener('click', (e) => { if (!e.target.closest('.tb-dd')) closeDD(); });
@@ -270,8 +279,12 @@ document.getElementById('ctBtn').addEventListener('click', () => toggleDD('ctMen
 document.getElementById('ctMenu').addEventListener('click', (e) => { const it = e.target.closest('[data-ct]'); if (!it) return; chartType = it.dataset.ct; document.querySelectorAll('#ctMenu .dd-item').forEach((x) => x.classList.toggle('active', x === it)); const icName = it.querySelector('[data-icon]')?.dataset.icon || 'candles'; const btnIc = document.querySelector('#ctBtn .ic'); if (btnIc) { btnIc.dataset.icon = icName; btnIc.innerHTML = ICONS[icName]; } document.getElementById('ctLabel').textContent = it.textContent.trim(); closeDD(); makeMainSeries(); mainSeries.setData(mainData()); applyIndicators(); redrawPriceLines(); });
 
 document.getElementById('indBtn').addEventListener('click', () => toggleDD('indMenu'));
-document.querySelectorAll('#indMenu input[data-ov]').forEach((c) => c.addEventListener('change', (e) => { overlays[e.target.dataset.ov] = e.target.checked ? 1 : 0; applyIndicators(); }));
-document.getElementById('oscSel').addEventListener('change', (e) => { oscillator = e.target.value; applyIndicators(); });
+document.getElementById('indMenu').addEventListener('click', (e) => {
+  const ov = e.target.closest('[data-ov]');
+  const os = e.target.closest('[data-osc]');
+  if (ov) { const k = ov.dataset.ov; overlays[k] = overlays[k] ? 0 : 1; ov.classList.toggle('on', !!overlays[k]); applyIndicators(); }
+  else if (os) { oscillator = os.dataset.osc; document.querySelectorAll('#indMenu .osc').forEach((x) => x.classList.toggle('on', x === os)); applyIndicators(); }
+});
 
 document.getElementById('ptBtn').addEventListener('click', () => toggleDD('ptMenu'));
 document.getElementById('ptMenu').addEventListener('click', (e) => { const it = e.target.closest('[data-pt]'); if (!it) return; priceType = it.dataset.pt; document.querySelectorAll('#ptMenu .dd-item').forEach((x) => x.classList.toggle('active', x === it)); document.getElementById('ptLabel').textContent = it.textContent.trim().toUpperCase(); closeDD(); updateDealPanel(); });
@@ -279,8 +292,20 @@ document.getElementById('ptMenu').addEventListener('click', (e) => { const it = 
 document.getElementById('sltpBtn').addEventListener('click', () => { showSLTP = !showSLTP; document.getElementById('sltpBtn').classList.toggle('on', showSLTP); redrawPriceLines(); });
 document.getElementById('pipsBtn').addEventListener('click', () => { showPips = !showPips; document.getElementById('pipsBtn').classList.toggle('on', showPips); updateDealPanel(); pollDeals(); });
 
-// Reset / Fullscreen / Settings
-document.getElementById('resetBtn').addEventListener('click', () => { const n = rawCandles.length; if (n) chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 }); });
+// Reset (full) / Fullscreen / Settings
+function resetChart() {
+  chartType = 'candles';
+  Object.keys(overlays).forEach((k) => (overlays[k] = 0));
+  oscillator = '';
+  document.querySelectorAll('#indMenu [data-ov]').forEach((x) => x.classList.remove('on'));
+  document.querySelectorAll('#indMenu .osc').forEach((x) => x.classList.toggle('on', x.dataset.osc === ''));
+  document.querySelectorAll('#ctMenu .dd-item').forEach((x) => x.classList.toggle('active', x.dataset.ct === 'candles'));
+  const btnIc = document.querySelector('#ctBtn .ic'); if (btnIc) { btnIc.dataset.icon = 'candles'; btnIc.innerHTML = ICONS.candles; }
+  document.getElementById('ctLabel').textContent = 'Candles';
+  makeMainSeries(); mainSeries.setData(mainData()); applyIndicators(); redrawPriceLines();
+  const n = rawCandles.length; if (n) chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 });
+}
+document.getElementById('resetBtn').addEventListener('click', resetChart);
 document.getElementById('fullBtn').addEventListener('click', () => { const cw = document.querySelector('.chartwrap'); if (document.fullscreenElement) document.exitFullscreen(); else cw.requestFullscreen?.(); });
 document.getElementById('setBtn').addEventListener('click', () => toggleDD('setMenu'));
 function bindSetting(id, key, kind) {
@@ -288,29 +313,25 @@ function bindSetting(id, key, kind) {
   if (kind === 'bool') el.checked = settings[key]; else el.value = settings[key];
   el.addEventListener('change', () => { settings[key] = kind === 'bool' ? el.checked : (kind === 'num' ? Number(el.value) : el.value); saveSettings(); applySettings(); });
 }
-bindSetting('sHollow', 'hollowColor', 'str');
-bindSetting('sShadows', 'shadows', 'bool');
-bindSetting('sShadowCustom', 'shadowCustom', 'bool');
-bindSetting('sShadowColor', 'shadowColor', 'str');
-bindSetting('sPlw', 'priceLineWidth', 'num');
-bindSetting('sAddLine', 'addLine', 'bool');
-bindSetting('sAlw', 'addLineWidth', 'num');
-bindSetting('sMinChange', 'minChange', 'str');
+bindSetting('sHollow', 'hollowColor', 'str'); bindSetting('sShadows', 'shadows', 'bool'); bindSetting('sShadowCustom', 'shadowCustom', 'bool'); bindSetting('sShadowColor', 'shadowColor', 'str');
+bindSetting('sPlw', 'priceLineWidth', 'num'); bindSetting('sAddLine', 'addLine', 'bool'); bindSetting('sAlw', 'addLineWidth', 'num'); bindSetting('sMinChange', 'minChange', 'str');
 
-// Ресайз панелей (перетаскивание)
-const layout = Object.assign({ leftW: 280, rightW: 300, bottomH: 190 }, JSON.parse(localStorage.getItem('layout') || '{}'));
+// Panel/toolbar resizing
+const layout = Object.assign({ leftW: 280, rightW: 300, bottomH: 190, toolbarH: 42 }, JSON.parse(localStorage.getItem('layout') || '{}'));
 function applyLayout() {
   document.querySelector('.grid').style.gridTemplateColumns = `${layout.leftW}px 6px 1fr 6px ${layout.rightW}px`;
   document.querySelector('.bottom').style.height = layout.bottomH + 'px';
+  document.querySelector('.toolbar').style.height = layout.toolbarH + 'px';
 }
 function initResizers() {
   document.querySelectorAll('[data-rsz]').forEach((h) => h.addEventListener('mousedown', (e) => {
     e.preventDefault(); h.classList.add('drag');
-    const type = h.dataset.rsz, sx = e.clientX, sy = e.clientY, sl = layout.leftW, sr = layout.rightW, sb = layout.bottomH;
+    const type = h.dataset.rsz, sx = e.clientX, sy = e.clientY, sl = layout.leftW, sr = layout.rightW, sb = layout.bottomH, stH = layout.toolbarH;
     const mv = (ev) => {
       if (type === 'left') layout.leftW = Math.min(520, Math.max(180, sl + (ev.clientX - sx)));
       else if (type === 'right') layout.rightW = Math.min(560, Math.max(220, sr - (ev.clientX - sx)));
-      else layout.bottomH = Math.min(window.innerHeight - 220, Math.max(80, sb - (ev.clientY - sy)));
+      else if (type === 'bottom') layout.bottomH = Math.min(window.innerHeight - 220, Math.max(80, sb - (ev.clientY - sy)));
+      else layout.toolbarH = Math.min(140, Math.max(40, stH + (ev.clientY - sy)));
       applyLayout();
     };
     const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); document.body.style.userSelect = ''; h.classList.remove('drag'); localStorage.setItem('layout', JSON.stringify(layout)); };
@@ -319,11 +340,15 @@ function initResizers() {
   }));
 }
 
-// ============================ Лента + WS ===================================
-function addTape(id, p, q, side) { const el = document.getElementById('tape'); const d = document.createElement('div'); d.className = 't'; d.innerHTML = `<span>${META[id]?.symbol || id}</span><span class="px ${side}">${fmtP(id, p)}</span><span>${fmtQ(id, q)}</span><span class="tm">${new Date().toLocaleTimeString('ru-RU', { hour12: false })}</span>`; el.prepend(d); while (el.childElementCount > 60) el.removeChild(el.lastChild); }
-function connectWS() { const proto = location.protocol === 'https:' ? 'wss' : 'ws'; const ws = new WebSocket(`${proto}://${location.host}/stream`); const st = document.getElementById('status'); ws.onopen = () => { st.className = 'status status--on'; }; ws.onclose = () => { st.className = 'status status--off'; setTimeout(connectWS, 1500); }; ws.onmessage = (ev) => { let e; try { e = JSON.parse(ev.data); } catch { return; } for (const x of e) if (x.type === 'trade') { addTape(x.instrument, x.price, x.qty, x.taker_side); onLiveTrade(x.instrument, x.price, x.qty); } }; }
+// ============================ Tooltip ======================================
+const tip = document.getElementById('tip');
+document.addEventListener('mouseover', (e) => { const t = e.target.closest('[data-tip]'); if (!t) return; tip.textContent = t.dataset.tip; tip.classList.remove('hidden'); const r = t.getBoundingClientRect(); tip.style.left = r.left + r.width / 2 + 'px'; tip.style.top = r.bottom + 7 + 'px'; });
+document.addEventListener('mouseout', (e) => { if (e.target.closest('[data-tip]')) tip.classList.add('hidden'); });
 
-// ============================ Форма сделки =================================
+// ============================ WebSocket ====================================
+function connectWS() { const proto = location.protocol === 'https:' ? 'wss' : 'ws'; const ws = new WebSocket(`${proto}://${location.host}/stream`); const st = document.getElementById('status'); ws.onopen = () => { st.className = 'status status--on'; }; ws.onclose = () => { st.className = 'status status--off'; setTimeout(connectWS, 1500); }; ws.onmessage = (ev) => { let e; try { e = JSON.parse(ev.data); } catch { return; } for (const x of e) if (x.type === 'trade') onLiveTrade(x.instrument, x.price, x.qty); }; }
+
+// ============================ Order form ===================================
 document.getElementById('tabDeal').addEventListener('click', () => setMode('market'));
 document.getElementById('tabLimit').addEventListener('click', () => setMode('limit'));
 function setMode(m) { orderMode = m; document.getElementById('tabDeal').classList.toggle('active', m === 'market'); document.getElementById('tabLimit').classList.toggle('active', m === 'limit'); document.getElementById('priceRow').classList.toggle('hidden', m !== 'limit'); updateDealPanel(); }
@@ -333,41 +358,46 @@ function stepLot(d) { const i = document.getElementById('lot'); i.value = Math.m
 function readSlTp(id) { const sl = parseFloat(document.getElementById('sl').value), tp = parseFloat(document.getElementById('tp').value); return { sl: sl > 0 ? Math.round(sl * pscale(id)) : null, tp: tp > 0 ? Math.round(tp * pscale(id)) : null }; }
 async function submit(side) {
   const id = selected; if (id == null) return; const lot = parseFloat(document.getElementById('lot').value) || 0; const msg = document.getElementById('dealMsg');
-  if (lot <= 0) { msg.textContent = 'Укажи объём'; msg.style.color = 'var(--down)'; return; }
+  if (lot <= 0) { msg.textContent = 'Enter volume'; msg.style.color = 'var(--down)'; return; }
   const { sl, tp } = readSlTp(id); const qty = Math.round(lot * qscale(id)); let url, body;
-  if (orderMode === 'limit') { const price = parseFloat(document.getElementById('price').value); if (!(price > 0)) { msg.textContent = 'Укажи цену'; msg.style.color = 'var(--down)'; return; } url = '/pending'; body = { instrument: id, side, qty, price: Math.round(price * pscale(id)), sl, tp }; }
+  if (orderMode === 'limit') { const price = parseFloat(document.getElementById('price').value); if (!(price > 0)) { msg.textContent = 'Enter price'; msg.style.color = 'var(--down)'; return; } url = '/pending'; body = { instrument: id, side, qty, price: Math.round(price * pscale(id)), sl, tp }; }
   else { url = '/deals'; body = { instrument: id, side, qty, sl, tp }; }
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token()}` }, body: JSON.stringify(body) });
   const data = await r.json().catch(() => null);
-  if (r.ok) { msg.textContent = orderMode === 'limit' ? `Лимитный ордер #${data.id}` : `Открыта #${data.id}: ${side.toUpperCase()} @ ${fmtP(id, data.entry)}`; msg.style.color = 'var(--up)'; switchBottom(orderMode === 'limit' ? 'pending' : 'deals'); pollAccount(); pollDeals(); pollPending(); }
-  else { msg.textContent = `Отказ ${r.status}: ${data?.error || ''}`; msg.style.color = 'var(--down)'; }
+  if (r.ok) { msg.textContent = orderMode === 'limit' ? `Limit order #${data.id}` : `Opened #${data.id}: ${side.toUpperCase()} @ ${fmtP(id, data.entry)}`; msg.style.color = 'var(--up)'; switchBottom(orderMode === 'limit' ? 'pending' : 'deals'); pollAccount(); pollDeals(); pollPending(); }
+  else { msg.textContent = `Rejected ${r.status}: ${data?.error || ''}`; msg.style.color = 'var(--down)'; }
 }
 document.getElementById('btnBuy').addEventListener('click', () => submit('buy'));
 document.getElementById('btnSell').addEventListener('click', () => submit('sell'));
 document.getElementById('userSel').addEventListener('change', () => { pollAccount(); pollDeals(); pollPending(); pollClosed(); });
 
-// ============================ Счёт / позиции / история =====================
+// ============================ Account / positions / history ================
 async function pollAccount() { try { const r = await fetch('/account', { headers: { Authorization: `Bearer ${token()}` } }); if (!r.ok) return; const a = await r.json(); document.getElementById('mBalance').textContent = usd(a.balance); document.getElementById('mEquity').textContent = usd(a.equity); document.getElementById('mMargin').textContent = usd(a.used_margin); document.getElementById('mFree').textContent = usd(a.free_margin); const p = document.getElementById('mPnl'); p.textContent = usd(a.open_pnl); p.style.color = a.open_pnl > 0 ? 'var(--up)' : a.open_pnl < 0 ? 'var(--down)' : ''; } catch (e) { /* */ } }
 async function pollDeals() {
   try { const r = await fetch('/deals', { headers: { Authorization: `Bearer ${token()}` } }); if (!r.ok) return; const list = await r.json(); currentDeals = list.filter((d) => d.instrument === selected); redrawPriceLines();
-    document.getElementById('deals').innerHTML = list.map((d) => { const pos = d.pnl >= 0; const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals); const pips = showPips ? ` (${d.side === 'buy' ? d.mark - d.entry : d.entry - d.mark}p)` : ''; return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.entry)}</span><span>${f(d.mark)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${usd(d.pnl)}${pips}</span><button class="closebtn" data-id="${d.id}">Close</button></div>`; }).join('') || '<div class="deal-row muted"><span>нет открытых позиций</span></div>';
+    document.getElementById('deals').innerHTML = list.map((d) => { const pos = d.pnl >= 0; const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals); const pips = showPips ? ` (${d.side === 'buy' ? d.mark - d.entry : d.entry - d.mark}p)` : ''; return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.entry)}</span><span>${f(d.mark)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${usd(d.pnl)}${pips}</span><button class="closebtn" data-id="${d.id}">Close</button></div>`; }).join('') || '<div class="deal-row muted"><span>No open positions</span></div>';
     document.querySelectorAll('#deals .closebtn').forEach((b) => b.addEventListener('click', () => closeDeal(+b.dataset.id))); } catch (e) { /* */ }
 }
 async function closeDeal(id) { const r = await fetch(`/deals/${id}/close`, { method: 'POST', headers: { Authorization: `Bearer ${token()}` } }); if (r.ok) { pollAccount(); pollDeals(); pollClosed(); } }
-async function pollPending() { try { const r = await fetch('/pending', { headers: { Authorization: `Bearer ${token()}` } }); if (!r.ok) return; const list = await r.json(); document.getElementById('pending').innerHTML = list.map((d) => { const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw == null ? '—' : (raw / 10 ** d.price_decimals).toFixed(d.price_decimals)); return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.price)}</span><span>${f(d.sl)}</span><span>${f(d.tp)}</span><button class="closebtn" data-id="${d.id}">Cancel</button></div>`; }).join('') || '<div class="deal-row muted"><span>нет лимитных ордеров</span></div>'; document.querySelectorAll('#pending .closebtn').forEach((b) => b.addEventListener('click', () => cancelPending(+b.dataset.id))); } catch (e) { /* */ } }
+async function pollPending() { try { const r = await fetch('/pending', { headers: { Authorization: `Bearer ${token()}` } }); if (!r.ok) return; const list = await r.json(); document.getElementById('pending').innerHTML = list.map((d) => { const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw == null ? '—' : (raw / 10 ** d.price_decimals).toFixed(d.price_decimals)); return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.price)}</span><span>${f(d.sl)}</span><span>${f(d.tp)}</span><button class="closebtn" data-id="${d.id}">Cancel</button></div>`; }).join('') || '<div class="deal-row muted"><span>No limit orders</span></div>'; document.querySelectorAll('#pending .closebtn').forEach((b) => b.addEventListener('click', () => cancelPending(+b.dataset.id))); } catch (e) { /* */ } }
 async function cancelPending(id) { const r = await fetch(`/pending/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token()}` } }); if (r.ok) pollPending(); }
-async function pollClosed() { try { const r = await fetch('/deals/closed', { headers: { Authorization: `Bearer ${token()}` } }); if (!r.ok) return; const list = await r.json(); document.getElementById('closed').innerHTML = list.map((d) => { const pos = d.pnl >= 0; const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals); return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.entry)}</span><span>${f(d.exit)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${usd(d.pnl)}</span><span></span></div>`; }).join('') || '<div class="deal-row muted"><span>история пуста</span></div>'; } catch (e) { /* */ } }
+async function pollClosed() { try { const r = await fetch('/deals/closed', { headers: { Authorization: `Bearer ${token()}` } }); if (!r.ok) return; const list = await r.json(); document.getElementById('closed').innerHTML = list.map((d) => { const pos = d.pnl >= 0; const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals); return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.entry)}</span><span>${f(d.exit)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${usd(d.pnl)}</span><span></span></div>`; }).join('') || '<div class="deal-row muted"><span>No history</span></div>'; } catch (e) { /* */ } }
 
-// ============================ Сигналы ======================================
-function computeSignals() { const cont = document.getElementById('signals'); const it = META[selected]; if (!it || rawCandles.length < 30) { cont.innerHTML = ''; return; } const close = rawCandles.map((c) => c.close); const sig = []; const r = rsi(close, 14), rv = r[r.length - 1]; if (rv != null && rv > 70) sig.push(['RSI перекуплен', 'SELL']); else if (rv != null && rv < 30) sig.push(['RSI перепродан', 'BUY']); const f = sma(close, 9), s = sma(close, 21), i = close.length - 1; if (f[i] != null && s[i] != null && f[i - 1] != null && s[i - 1] != null) { if (f[i - 1] <= s[i - 1] && f[i] > s[i]) sig.push(['MA 9/21 крест вверх', 'BUY']); else if (f[i - 1] >= s[i - 1] && f[i] < s[i]) sig.push(['MA 9/21 крест вниз', 'SELL']); } const tfName = { 60: '1m', 300: '5m', 900: '15m', 1800: '30m', 3600: '1h', 14400: '4h', 86400: '1d', 604800: '1w' }[tf]; cont.innerHTML = sig.map(([n, dir]) => `<div class="deal-row"><span>${it.symbol}</span><span>${n}</span><span>${tfName}</span><span class="dir ${dir === 'BUY' ? 'buy' : 'sell'} ta-r">${dir}</span></div>`).join('') || '<div class="deal-row muted"><span>нет сигналов на этом ТФ</span></div>'; }
+// ============================ Signals ======================================
+function computeSignals() { const cont = document.getElementById('signals'); const it = META[selected]; if (!it || rawCandles.length < 30) { cont.innerHTML = ''; return; } const close = rawCandles.map((c) => c.close); const sig = []; const r = rsi(close, 14), rv = r[r.length - 1]; if (rv != null && rv > 70) sig.push(['RSI overbought', 'SELL']); else if (rv != null && rv < 30) sig.push(['RSI oversold', 'BUY']); const f = sma(close, 9), s = sma(close, 21), i = close.length - 1; if (f[i] != null && s[i] != null && f[i - 1] != null && s[i - 1] != null) { if (f[i - 1] <= s[i - 1] && f[i] > s[i]) sig.push(['MA 9/21 cross up', 'BUY']); else if (f[i - 1] >= s[i - 1] && f[i] < s[i]) sig.push(['MA 9/21 cross down', 'SELL']); } cont.innerHTML = sig.map(([n, dir]) => `<div class="deal-row"><span>${it.symbol}</span><span>${n}</span><span>${TFN[tf]}</span><span class="dir ${dir === 'BUY' ? 'buy' : 'sell'} ta-r">${dir}</span></div>`).join('') || '<div class="deal-row muted"><span>No signals on this TF</span></div>'; }
 
-// ============================ Вкладки + поиск ==============================
-function switchBottom(w) { ['trades', 'deals', 'pending', 'closed', 'signals'].forEach((n) => { document.getElementById(`tab-${n}`).classList.toggle('active', n === w); document.getElementById(`pane-${n}`).classList.toggle('hidden', n !== w); }); }
+// ============================ Bottom tabs + search + sort ==================
+function switchBottom(w) { ['deals', 'pending', 'closed', 'signals'].forEach((n) => { document.getElementById(`tab-${n}`).classList.toggle('active', n === w); document.getElementById(`pane-${n}`).classList.toggle('hidden', n !== w); }); }
 document.querySelectorAll('.bottom__tabs span').forEach((t) => t.addEventListener('click', () => switchBottom(t.dataset.pane)));
 document.getElementById('search').addEventListener('input', (e) => { const q = e.target.value.toLowerCase(); Object.entries(rowEls).forEach(([id, el]) => { el.style.display = (META[id]?.symbol || '').toLowerCase().includes(q) ? '' : 'none'; }); });
 document.getElementById('instruments').addEventListener('click', (e) => { const row = e.target.closest('.irow'); if (!row) return; const id = +row.dataset.id; if (e.target.closest('.star')) { toggleFav(id); return; } selectInstrument(id); });
+document.querySelectorAll('.watch__head .sortable').forEach((h) => h.addEventListener('click', () => {
+  const k = h.dataset.sort; if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = -1; }
+  document.querySelectorAll('.watch__head .sortable').forEach((x) => x.classList.remove('asc', 'desc'));
+  h.classList.add(sortDir === 1 ? 'asc' : 'desc'); reorderRows();
+}));
 
-// ============================ Старт ========================================
+// ============================ Start ========================================
 renderIcons();
 applyLayout();
 initResizers();

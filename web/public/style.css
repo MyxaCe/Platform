@@ -168,3 +168,59 @@ button { font-family: inherit; }
 .orderbtn.buy { background: var(--up); } .orderbtn.sell { background: var(--down); }
 .orderbtn span { font-variant-numeric: tabular-nums; }
 .dealmsg { min-height: 16px; font-size: 11px; text-align: center; }
+
+/* ================= UI v2 (icons, coins, toggles, settings, tooltip) ======== */
+.ic svg { width: 17px; height: 17px; }
+.caret svg { width: 11px; height: 11px; }
+.star svg { width: 14px; height: 14px; }
+
+/* Coin list */
+.watch__head, .irow { grid-template-columns: 18px 1.55fr .82fr .85fr .85fr .7fr .85fr; }
+.watch__head span { color: var(--muted); }
+.sortable { cursor: pointer; user-select: none; display: inline-flex; align-items: center; gap: 3px; }
+.sortable:hover { color: var(--text); }
+.sortable.asc i { border-left: 3px solid transparent; border-right: 3px solid transparent; border-bottom: 4px solid var(--accent); }
+.sortable.desc i { border-left: 3px solid transparent; border-right: 3px solid transparent; border-top: 4px solid var(--accent); }
+.irow { font-variant-numeric: tabular-nums; }
+.irow .num { text-align: left; color: var(--text); }
+.irow .num.muted { color: var(--muted); }
+.irow .chg.up { color: var(--up); } .irow .chg.down { color: var(--down); }
+.irow .sell { color: var(--down); } .irow .buy { color: var(--up); }
+.sym { display: flex; align-items: center; gap: 7px; font-weight: 600; overflow: hidden; }
+.symtxt { white-space: nowrap; } .symtxt small { color: var(--muted); font-weight: 400; font-size: 10px; }
+.coinwrap { position: relative; width: 18px; height: 18px; flex: 0 0 18px; border-radius: 50%; overflow: hidden; }
+.coinbadge { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 9px; font-weight: 700; }
+.coin { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+/* Indicator toggles */
+.dd-toggle { padding: 6px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; color: var(--text); }
+.dd-toggle:hover { background: var(--panel3); }
+.dd-toggle.on { color: var(--accent); background: rgba(240,185,11,.09); }
+.osc-list { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
+
+/* Custom switch */
+.sw { appearance: none; -webkit-appearance: none; width: 34px; height: 18px; border-radius: 10px; background: #2a3444; position: relative; cursor: pointer; transition: .15s; flex: 0 0 34px; }
+.sw:checked { background: var(--accent); }
+.sw::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: .15s; }
+.sw:checked::after { left: 18px; }
+
+/* Settings menu */
+.setmenu { min-width: 252px; }
+.setrow { display: flex !important; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 8px; font-size: 12px; }
+.setrow__r { display: inline-flex; align-items: center; gap: 8px; }
+.setmenu input[type=number] { width: 54px; background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 4px 6px; }
+.setmenu input[type=color] { width: 30px; height: 22px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); padding: 1px; cursor: pointer; }
+.setmenu select { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 5px; }
+
+/* Tooltip */
+.tip { position: fixed; z-index: 100; transform: translateX(-50%); background: #1b2433; color: var(--text); border: 1px solid var(--border);
+  padding: 4px 8px; border-radius: 6px; font-size: 11px; white-space: nowrap; pointer-events: none; box-shadow: 0 6px 18px rgba(0,0,0,.5); }
+.tip.hidden { display: none; }
+
+/* Loading spinner */
+.loading { position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center; background: rgba(11,14,20,.4); }
+.loading.hidden { display: none; }
+.spinner { width: 30px; height: 30px; border: 3px solid #2a3444; border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.irow .symtxt small { display: inline; }
