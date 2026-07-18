@@ -52,6 +52,13 @@ impl UserRegistry {
 
 /// Кэш свечей: (инструмент, таймфрейм) → (время загрузки, свечи).
 type KlineCache = HashMap<(u32, u32), (Instant, Vec<feed::Kline>)>;
+/// Кэш стакана: инструмент → (время, глубина).
+type DepthCache = HashMap<u32, (Instant, feed::Depth)>;
+/// Кэш статистики: инструмент → (время, изменения по таймфреймам).
+type StatsCache = HashMap<u32, (Instant, Vec<StatDto>)>;
+
+/// Таймфреймы для статистики актива.
+const STAT_TFS: [u32; 8] = [60, 300, 900, 1800, 3600, 14400, 86400, 604800];
 
 #[derive(Clone)]
 pub struct AppState {
@@ -63,6 +70,8 @@ pub struct AppState {
     feed_instruments: Arc<Vec<feed::FeedInstrument>>,
     tickers: Arc<Mutex<HashMap<u32, feed::Ticker>>>,
     klines_cache: Arc<Mutex<KlineCache>>,
+    depth_cache: Arc<Mutex<DepthCache>>,
+    stats_cache: Arc<Mutex<StatsCache>>,
     // Бумажный брокер (ADR-014):
     broker: Arc<Mutex<Broker>>,
 }
@@ -77,6 +86,8 @@ pub fn build_state() -> AppState {
         feed_instruments: Arc::new(feed::instruments()),
         tickers: Arc::new(Mutex::new(HashMap::new())),
         klines_cache: Arc::new(Mutex::new(HashMap::new())),
+        depth_cache: Arc::new(Mutex::new(HashMap::new())),
+        stats_cache: Arc::new(Mutex::new(HashMap::new())),
         broker: Arc::new(Mutex::new(Broker::new(10_000_000, 1))), // старт $100k, leverage 1
     }
 }
@@ -103,6 +114,8 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/deposit", post(deposit))
         .route("/instruments", get(list_instruments))
         .route("/candles/:instrument", get(get_candles))
+        .route("/depth/:instrument", get(get_depth))
+        .route("/stats/:instrument", get(get_stats))
         .route("/orders", post(place_order))
         .route("/orders/:id", delete(cancel_order))
         .route("/book/:instrument", get(get_book))
@@ -276,6 +289,18 @@ struct InstrumentDto {
     high: Option<i64>,
     change: f64,
 }
+#[derive(Serialize)]
+struct DepthResp {
+    price_decimals: u8,
+    qty_decimals: u8,
+    bids: Vec<(i64, i64)>,
+    asks: Vec<(i64, i64)>,
+}
+#[derive(Serialize, Clone)]
+struct StatDto {
+    tf: u32,
+    change: f64,
+}
 
 #[derive(Serialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -404,6 +429,51 @@ fn tail_dto(v: &[feed::Kline], limit: usize) -> Vec<CandleDto> {
         .iter()
         .map(|k| CandleDto { time: k.time, open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume })
         .collect()
+}
+
+/// Стакан (order book) с Binance, кэш ~400мс.
+async fn get_depth(State(st): State<AppState>, Path(id): Path<u32>) -> Json<DepthResp> {
+    let Some(fi) = st.feed_instruments.iter().find(|f| f.id == id).cloned() else {
+        return Json(DepthResp { price_decimals: 2, qty_decimals: 3, bids: vec![], asks: vec![] });
+    };
+    {
+        let cache = st.depth_cache.lock().await;
+        if let Some((t, d)) = cache.get(&id) {
+            if t.elapsed() < Duration::from_millis(400) {
+                return Json(DepthResp { price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals, bids: d.bids.clone(), asks: d.asks.clone() });
+            }
+        }
+    }
+    match feed::fetch_depth(&fi.binance, 20, fi.price_decimals, fi.qty_decimals).await {
+        Ok(d) => {
+            let resp = DepthResp { price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals, bids: d.bids.clone(), asks: d.asks.clone() };
+            st.depth_cache.lock().await.insert(id, (Instant::now(), d));
+            Json(resp)
+        }
+        Err(_) => Json(DepthResp { price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals, bids: vec![], asks: vec![] }),
+    }
+}
+
+/// Статистика актива: изменение (%) по таймфреймам, кэш ~3с.
+async fn get_stats(State(st): State<AppState>, Path(id): Path<u32>) -> Json<Vec<StatDto>> {
+    let Some(fi) = st.feed_instruments.iter().find(|f| f.id == id).cloned() else {
+        return Json(vec![]);
+    };
+    {
+        let cache = st.stats_cache.lock().await;
+        if let Some((t, v)) = cache.get(&id) {
+            if t.elapsed() < Duration::from_secs(3) {
+                return Json(v.clone());
+            }
+        }
+    }
+    let futs = STAT_TFS.iter().map(|&tf| {
+        let sym = fi.binance.clone();
+        async move { StatDto { tf, change: feed::fetch_change(&sym, feed::interval(tf)).await.unwrap_or(0.0) } }
+    });
+    let out: Vec<StatDto> = futures_util::future::join_all(futs).await;
+    st.stats_cache.lock().await.insert(id, (Instant::now(), out.clone()));
+    Json(out)
 }
 
 async fn place_order(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<PlaceOrderReq>) -> Result<Json<PlaceResp>, ApiErr> {

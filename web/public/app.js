@@ -2,7 +2,7 @@
 
 // ============================ State ========================================
 let META = {}, selected = null, tf = 3600, orderMode = 'market';
-let chartType = 'candles', priceType = 'mid', showPips = false, showSLTP = true;
+let chartType = 'candles', priceType = 'mid', showPips = false, showSLTP = true, sizeUnit = 'lot';
 const overlays = { sma: 0, ema: 0, wma: 0, supertrend: 0, psar: 0, ichimoku: 0, alligator: 0, boll: 0, keltner: 0, donchian: 0, vwap: 0 };
 let oscillator = '';
 let rawCandles = [], currentDeals = [];
@@ -266,8 +266,29 @@ function updateDealPanel() {
   const pips = document.getElementById('pipsInfo');
   if (showPips && it.bid != null && it.ask != null) { pips.classList.remove('hidden'); pips.textContent = `Spread: ${it.ask - it.bid} pips`; } else pips.classList.add('hidden');
   if (orderMode === 'limit' && !document.getElementById('price').value && ref != null) document.getElementById('price').value = (ref / pscale(it.id)).toFixed(pdec(it.id));
+  updateSizeEq();
 }
-async function selectInstrument(id) { selected = id; Object.entries(rowEls).forEach(([k, el]) => el.classList.toggle('active', +k === id)); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); pollDeals(); }
+
+// ---- Order book + asset stats ---------------------------------------------
+async function pollDepth() {
+  const id = selected; if (id == null) return;
+  const r = await fetch(`/depth/${id}`); const d = await r.json().catch(() => null); if (!d) return;
+  const s = 10 ** d.price_decimals, v = 10 ** d.qty_decimals;
+  const asks = d.asks.slice(0, 10), bids = d.bids.slice(0, 10);
+  const maxQ = Math.max(1, ...asks.map((a) => a[1]), ...bids.map((b) => b[1]));
+  const row = (lvl, cls) => `<div class="brow ${cls}"><div class="bar" style="width:${lvl[1] / maxQ * 100}%"></div><span class="bp">${(lvl[0] / s).toFixed(d.price_decimals)}</span><span class="bq">${(lvl[1] / v).toFixed(3)}</span></div>`;
+  document.getElementById('bookAsks').innerHTML = asks.slice().reverse().map((a) => row(a, 'ask')).join('');
+  document.getElementById('bookBids').innerHTML = bids.map((b) => row(b, 'bid')).join('');
+  const bb = bids[0]?.[0], ba = asks[0]?.[0];
+  document.getElementById('bookMid').textContent = bb && ba ? ((bb + ba) / 2 / s).toFixed(d.price_decimals) : '—';
+  document.getElementById('bookSpread').textContent = bb && ba ? `spread ${((ba - bb) / s).toFixed(d.price_decimals)}` : '';
+}
+async function pollStats() {
+  const id = selected; if (id == null) return;
+  const r = await fetch(`/stats/${id}`); const list = await r.json().catch(() => []);
+  document.getElementById('statbar').innerHTML = list.map((st) => { const up = st.change >= 0; return `<div class="stat"><span class="stat__l">${TFN[st.tf]}</span><span class="stat__v ${up ? 'up' : 'down'}">${up ? '+' : ''}${st.change.toFixed(2)}%</span></div>`; }).join('');
+}
+async function selectInstrument(id) { selected = id; Object.entries(rowEls).forEach(([k, el]) => el.classList.toggle('active', +k === id)); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); pollDeals(); pollDepth(); pollStats(); }
 document.getElementById('tfs').addEventListener('click', (e) => { const btn = e.target.closest('button'); if (!btn) return; tf = +btn.dataset.tf; document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
 
 // ============================ Toolbar (dropdowns) ==========================
@@ -367,12 +388,20 @@ document.getElementById('tabLimit').addEventListener('click', () => setMode('lim
 function setMode(m) { orderMode = m; document.getElementById('tabDeal').classList.toggle('active', m === 'market'); document.getElementById('tabLimit').classList.toggle('active', m === 'limit'); document.getElementById('priceRow').classList.toggle('hidden', m !== 'limit'); updateDealPanel(); }
 document.getElementById('lotMinus').addEventListener('click', () => stepLot(-1));
 document.getElementById('lotPlus').addEventListener('click', () => stepLot(1));
-function stepLot(d) { const i = document.getElementById('lot'); i.value = Math.max(0.001, (parseFloat(i.value) || 0) + d * 0.01).toFixed(3); }
+function stepLot(d) { const i = document.getElementById('lot'); if (sizeUnit === 'usd') i.value = Math.max(1, (parseFloat(i.value) || 0) + d * 10).toFixed(0); else i.value = Math.max(0.001, (parseFloat(i.value) || 0) + d * 0.01).toFixed(3); updateSizeEq(); }
 function readSlTp(id) { const sl = parseFloat(document.getElementById('sl').value), tp = parseFloat(document.getElementById('tp').value); return { sl: sl > 0 ? Math.round(sl * pscale(id)) : null, tp: tp > 0 ? Math.round(tp * pscale(id)) : null }; }
+// Размер сделки в базовых единицах (учитывает выбор LOT/USD).
+function sizeBaseQty(id) { const v = parseFloat(document.getElementById('lot').value) || 0; if (v <= 0) return 0; if (sizeUnit === 'usd') { const p = refPrice(META[id]) / pscale(id); return p > 0 ? v / p : 0; } return v; }
+function updateSizeEq() { const it = META[selected]; const el = document.getElementById('sizeEq'); if (!it) { el.textContent = ''; return; } const p = refPrice(it) / pscale(it.id); const v = parseFloat(document.getElementById('lot').value) || 0; const base = it.symbol.split('-')[0]; el.textContent = sizeUnit === 'usd' ? `≈ ${(p > 0 ? v / p : 0).toFixed(qdec(it.id))} ${base}` : `≈ $${(v * p).toLocaleString('en-US', { maximumFractionDigits: 2 })}`; }
+function setUnit(u) { if (sizeUnit === u) return; const it = META[selected]; const inp = document.getElementById('lot'); const v = parseFloat(inp.value) || 0; const p = it ? refPrice(it) / pscale(it.id) : 0; if (u === 'usd') { inp.value = (p > 0 ? v * p : 0).toFixed(0); inp.step = '1'; } else { inp.value = (p > 0 ? v / p : 0).toFixed(3); inp.step = '0.001'; } sizeUnit = u; document.getElementById('unitLot').classList.toggle('active', u === 'lot'); document.getElementById('unitUsd').classList.toggle('active', u === 'usd'); updateSizeEq(); }
+document.getElementById('unitLot').addEventListener('click', () => setUnit('lot'));
+document.getElementById('unitUsd').addEventListener('click', () => setUnit('usd'));
+document.getElementById('lot').addEventListener('input', updateSizeEq);
 async function submit(side) {
-  const id = selected; if (id == null) return; const lot = parseFloat(document.getElementById('lot').value) || 0; const msg = document.getElementById('dealMsg');
-  if (lot <= 0) { msg.textContent = 'Enter volume'; msg.style.color = 'var(--down)'; return; }
-  const { sl, tp } = readSlTp(id); const qty = Math.round(lot * qscale(id)); let url, body;
+  const id = selected; if (id == null) return; const msg = document.getElementById('dealMsg');
+  const baseQty = sizeBaseQty(id);
+  if (!(baseQty > 0)) { msg.textContent = 'Enter size'; msg.style.color = 'var(--down)'; return; }
+  const { sl, tp } = readSlTp(id); const qty = Math.round(baseQty * qscale(id)); let url, body;
   if (orderMode === 'limit') { const price = parseFloat(document.getElementById('price').value); if (!(price > 0)) { msg.textContent = 'Enter price'; msg.style.color = 'var(--down)'; return; } url = '/pending'; body = { instrument: id, side, qty, price: Math.round(price * pscale(id)), sl, tp }; }
   else { url = '/deals'; body = { instrument: id, side, qty, sl, tp }; }
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token()}` }, body: JSON.stringify(body) });
@@ -420,5 +449,7 @@ setInterval(refreshInstruments, 1000);
 setInterval(syncLast, 2000);
 setInterval(() => { pollAccount(); pollDeals(); }, 1000);
 setInterval(() => { pollPending(); pollClosed(); }, 1500);
+setInterval(pollDepth, 700);
+setInterval(pollStats, 5000);
 connectWS();
 pollAccount(); pollDeals(); pollPending(); pollClosed();

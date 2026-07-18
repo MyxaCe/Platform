@@ -96,6 +96,51 @@ fn to_raw(s: &str, dec: u8) -> i64 {
     (s.parse::<f64>().unwrap_or(0.0) * 10f64.powi(dec as i32)).round() as i64
 }
 
+/// Стакан (bids/asks) в raw-единицах.
+#[derive(Clone, Default)]
+pub struct Depth {
+    pub bids: Vec<(i64, i64)>,
+    pub asks: Vec<(i64, i64)>,
+}
+
+/// Запросить стакан (order book) с Binance REST.
+pub async fn fetch_depth(binance: &str, limit: usize, pd: u8, qd: u8) -> Result<Depth, String> {
+    let url = format!("{REST}/api/v3/depth?symbol={binance}&limit={limit}");
+    let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("binance {}", resp.status()));
+    }
+    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let parse = |side: &Value| -> Vec<(i64, i64)> {
+        side.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|lvl| {
+                        let p = lvl.get(0)?.as_str()?;
+                        let q = lvl.get(1)?.as_str()?;
+                        Some((to_raw(p, pd), to_raw(q, qd)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    Ok(Depth { bids: parse(&v["bids"]), asks: parse(&v["asks"]) })
+}
+
+/// Изменение цены за текущую свечу таймфрейма (в процентах). Для статистики актива.
+pub async fn fetch_change(binance: &str, interval: &str) -> Result<f64, String> {
+    let url = format!("{REST}/api/v3/klines?symbol={binance}&interval={interval}&limit=1");
+    let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("binance {}", resp.status()));
+    }
+    let rows: Vec<Vec<Value>> = resp.json().await.map_err(|e| e.to_string())?;
+    let row = rows.first().ok_or("empty")?;
+    let open: f64 = row.get(1).and_then(|v| v.as_str()).unwrap_or("0").parse().unwrap_or(0.0);
+    let close: f64 = row.get(4).and_then(|v| v.as_str()).unwrap_or("0").parse().unwrap_or(0.0);
+    Ok(if open != 0.0 { (close - open) / open * 100.0 } else { 0.0 })
+}
+
 /// Запросить исторические свечи с Binance REST.
 pub async fn fetch_klines(binance: &str, interval: &str, limit: usize, pd: u8, qd: u8) -> Result<Vec<Kline>, String> {
     let url = format!("{REST}/api/v3/klines?symbol={binance}&interval={interval}&limit={limit}");
