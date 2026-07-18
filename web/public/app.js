@@ -151,6 +151,8 @@ const chart = LightweightCharts.createChart(chartEl, {
 });
 const volume = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: '', color: '#2b3648' });
 volume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+// Хуки для модуля рисования (drawings.js подключается после app.js).
+window.__lw = { chart, el: chartEl, series: () => mainSeries };
 
 let mainSeries = null, overlaySeries = [], oscSeriesList = [], priceLines = [];
 let lastBarTime = 0, formingRaw = null;
@@ -227,6 +229,7 @@ async function loadCandles(id, timeframe) {
     applyIndicators(); redrawPriceLines(); computeSignals();
     if (rawCandles.length) { const last = raw[raw.length - 1]; lastBarTime = last.time; formingRaw = { ...last }; const n = rawCandles.length; chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 }); } else { lastBarTime = 0; formingRaw = null; }
     refreshLegend();
+    window.dispatchEvent(new Event('chartReload')); // модуль рисования очищает объекты при смене данных
   } finally { load.classList.add('hidden'); }
 }
 function drawForming() { if (!formingRaw || !mainSeries || chartType === 'heikin') return; const s = pscale(selected); mainSeries.update(isLineType() ? { time: formingRaw.time, value: formingRaw.close / s } : { time: formingRaw.time, open: formingRaw.open / s, high: formingRaw.high / s, low: formingRaw.low / s, close: formingRaw.close / s }); refreshLegend(); }
@@ -276,7 +279,7 @@ async function pollDepth() {
   const s = 10 ** d.price_decimals, v = 10 ** d.qty_decimals;
   const asks = d.asks.slice(0, 10), bids = d.bids.slice(0, 10);
   const maxQ = Math.max(1, ...asks.map((a) => a[1]), ...bids.map((b) => b[1]));
-  const row = (lvl, cls) => `<div class="brow ${cls}"><div class="bar" style="width:${lvl[1] / maxQ * 100}%"></div><span class="bp">${(lvl[0] / s).toFixed(d.price_decimals)}</span><span class="bq">${(lvl[1] / v).toFixed(3)}</span></div>`;
+  const row = (lvl, cls) => `<div class="brow ${cls}" data-p="${(lvl[0] / s).toFixed(d.price_decimals)}"><div class="bar" style="width:${lvl[1] / maxQ * 100}%"></div><span class="bp">${(lvl[0] / s).toFixed(d.price_decimals)}</span><span class="bq">${(lvl[1] / v).toFixed(3)}</span></div>`;
   document.getElementById('bookAsks').innerHTML = asks.slice().reverse().map((a) => row(a, 'ask')).join('');
   document.getElementById('bookBids').innerHTML = bids.map((b) => row(b, 'bid')).join('');
   const bb = bids[0]?.[0], ba = asks[0]?.[0];
@@ -385,6 +388,12 @@ function connectWS() { const proto = location.protocol === 'https:' ? 'wss' : 'w
 // ============================ Order form ===================================
 document.getElementById('tabDeal').addEventListener('click', () => setMode('market'));
 document.getElementById('tabLimit').addEventListener('click', () => setMode('limit'));
+// Клик по уровню стакана → цена в лимитную заявку.
+['bookAsks', 'bookBids'].forEach((bid) => document.getElementById(bid).addEventListener('click', (e) => {
+  const row = e.target.closest('.brow'); if (!row || !row.dataset.p) return;
+  setMode('limit'); document.getElementById('price').value = row.dataset.p;
+  const inp = document.getElementById('price'); inp.classList.add('flash'); setTimeout(() => inp.classList.remove('flash'), 400);
+}));
 function setMode(m) { orderMode = m; document.getElementById('tabDeal').classList.toggle('active', m === 'market'); document.getElementById('tabLimit').classList.toggle('active', m === 'limit'); document.getElementById('priceRow').classList.toggle('hidden', m !== 'limit'); updateDealPanel(); }
 document.getElementById('lotMinus').addEventListener('click', () => stepLot(-1));
 document.getElementById('lotPlus').addEventListener('click', () => stepLot(1));
