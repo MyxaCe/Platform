@@ -221,16 +221,14 @@
         <button id="btnSell" class="orderbtn sell">SELL <span id="bidPx">—</span></button>
         <div id="dealMsg" class="dealmsg"></div>
       </div>
-      <div class="deal__book">
-        <div class="book__head">ORDER BOOK <span id="bookSpread" class="muted"></span></div>
-        <div id="bookAsks" class="book__side asks"></div>
-        <div id="bookMid" class="book__mid">—</div>
-        <div id="bookBids" class="book__side bids"></div>
-      </div>
+      <div id="book" class="deal__book"></div>
     </aside>
   </main>
 
   <div id="tip" class="tip hidden"></div>
+  <script src="/indicators.js"></script>
+  <script src="/orderbook.js"></script>
+  <script src="/stats.js"></script>
   <script src="/app.js"></script>
   <script src="/drawings.js"></script>
 </body>

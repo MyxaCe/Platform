@@ -67,51 +67,11 @@ function reorderRows() {
   }).forEach((id) => cont.appendChild(rowEls[id]));
 }
 
-// ============================ Indicators (math) ============================
-const HL2 = (c) => (c.high + c.low) / 2;
-const HLC3 = (c) => (c.high + c.low + c.close) / 3;
+// ===== Indicators — вынесены в модуль indicators.js (ADR-015), подключается до app.js =====
+// toSeries — чартовый глюкод (значения → {time,value} для Lightweight Charts), остаётся здесь.
+const { HL2, HLC3, sma, ema, wma, smma, stdev, trueRange, atr, rsi, highest, lowest, stoch, cci, momentum, roc, williams, ao, acOsc, obv, adLine, cmf, mfi, forceIndex, macdFull, adxDI, bollinger, keltner, donchian, superTrend, psar, ichimoku, vwap, alligator, heikin } = window.Indicators;
 const toSeries = (arr, t) => arr.map((v, i) => (v == null || !isFinite(v) ? null : { time: t[i], value: v })).filter(Boolean);
 
-function sma(v, p) { const o = []; let s = 0; for (let i = 0; i < v.length; i++) { s += v[i]; if (i >= p) s -= v[i - p]; o.push(i >= p - 1 ? s / p : null); } return o; }
-function ema(v, p) { const o = []; const k = 2 / (p + 1); let e; for (let i = 0; i < v.length; i++) { e = i === 0 ? v[0] : v[i] * k + e * (1 - k); o.push(i >= p - 1 ? e : null); } return o; }
-function wma(v, p) { const o = new Array(v.length).fill(null); const d = p * (p + 1) / 2; for (let i = p - 1; i < v.length; i++) { let s = 0; for (let j = 0; j < p; j++) s += v[i - j] * (p - j); o[i] = s / d; } return o; }
-function smma(v, p) { const o = new Array(v.length).fill(null); let a; for (let i = 0; i < v.length; i++) { if (i < p) { if (i === p - 1) { let s = 0; for (let j = 0; j < p; j++) s += v[j]; a = s / p; o[i] = a; } } else { a = (a * (p - 1) + v[i]) / p; o[i] = a; } } return o; }
-function stdev(v, p) { const o = new Array(v.length).fill(null); for (let i = p - 1; i < v.length; i++) { let m = 0; for (let j = i - p + 1; j <= i; j++) m += v[j]; m /= p; let s = 0; for (let j = i - p + 1; j <= i; j++) s += (v[j] - m) ** 2; o[i] = Math.sqrt(s / p); } return o; }
-function trueRange(cs) { const t = []; for (let i = 0; i < cs.length; i++) t.push(i === 0 ? cs[0].high - cs[0].low : Math.max(cs[i].high - cs[i].low, Math.abs(cs[i].high - cs[i - 1].close), Math.abs(cs[i].low - cs[i - 1].close))); return t; }
-function atr(cs, p) { const tr = trueRange(cs), o = new Array(cs.length).fill(null); let a; for (let i = 0; i < cs.length; i++) { if (i < p) { if (i === p - 1) { let s = 0; for (let j = 0; j < p; j++) s += tr[j]; a = s / p; o[i] = a; } } else { a = (a * (p - 1) + tr[i]) / p; o[i] = a; } } return o; }
-function rsi(v, p) { const o = new Array(v.length).fill(null); let ag = 0, al = 0; for (let i = 1; i < v.length; i++) { const c = v[i] - v[i - 1], g = Math.max(c, 0), l = Math.max(-c, 0); if (i <= p) { ag += g; al += l; if (i === p) { ag /= p; al /= p; o[i] = 100 - 100 / (1 + (al === 0 ? 100 : ag / al)); } } else { ag = (ag * (p - 1) + g) / p; al = (al * (p - 1) + l) / p; o[i] = 100 - 100 / (1 + (al === 0 ? 100 : ag / al)); } } return o; }
-function highest(cs, p, i) { let h = -Infinity; for (let j = i - p + 1; j <= i; j++) h = Math.max(h, cs[j].high); return h; }
-function lowest(cs, p, i) { let l = Infinity; for (let j = i - p + 1; j <= i; j++) l = Math.min(l, cs[j].low); return l; }
-function stoch(cs, kP, dP) { const k = new Array(cs.length).fill(null); for (let i = kP - 1; i < cs.length; i++) { const h = highest(cs, kP, i), l = lowest(cs, kP, i); k[i] = h === l ? 50 : 100 * (cs[i].close - l) / (h - l); } const d = new Array(cs.length).fill(null); for (let i = kP - 1 + dP - 1; i < cs.length; i++) { let s = 0; for (let j = 0; j < dP; j++) s += k[i - j]; d[i] = s / dP; } return [k, d]; }
-function cci(cs, p) { const tp = cs.map(HLC3), o = new Array(cs.length).fill(null); for (let i = p - 1; i < cs.length; i++) { let m = 0; for (let j = i - p + 1; j <= i; j++) m += tp[j]; m /= p; let md = 0; for (let j = i - p + 1; j <= i; j++) md += Math.abs(tp[j] - m); md /= p; o[i] = md === 0 ? 0 : (tp[i] - m) / (0.015 * md); } return o; }
-function momentum(v, p) { const o = new Array(v.length).fill(null); for (let i = p; i < v.length; i++) o[i] = v[i] - v[i - p]; return o; }
-function roc(v, p) { const o = new Array(v.length).fill(null); for (let i = p; i < v.length; i++) o[i] = v[i - p] ? 100 * (v[i] - v[i - p]) / v[i - p] : 0; return o; }
-function williams(cs, p) { const o = new Array(cs.length).fill(null); for (let i = p - 1; i < cs.length; i++) { const h = highest(cs, p, i), l = lowest(cs, p, i); o[i] = h === l ? -50 : -100 * (h - cs[i].close) / (h - l); } return o; }
-function ao(cs) { const m = cs.map(HL2); const f = sma(m, 5), s = sma(m, 34); return m.map((_, i) => (f[i] != null && s[i] != null ? f[i] - s[i] : null)); }
-function acOsc(cs) { const a = ao(cs); const s = sma(a.map((x) => x ?? 0), 5); return a.map((x, i) => (x != null && s[i] != null ? x - s[i] : null)); }
-function obv(cs) { const o = new Array(cs.length).fill(null); let v = 0; o[0] = 0; for (let i = 1; i < cs.length; i++) { v += Math.sign(cs[i].close - cs[i - 1].close) * cs[i].volume; o[i] = v; } return o; }
-function adLine(cs) { const o = new Array(cs.length).fill(null); let v = 0; for (let i = 0; i < cs.length; i++) { const r = cs[i].high - cs[i].low; v += r ? ((cs[i].close - cs[i].low) - (cs[i].high - cs[i].close)) / r * cs[i].volume : 0; o[i] = v; } return o; }
-function cmf(cs, p) { const o = new Array(cs.length).fill(null); for (let i = p - 1; i < cs.length; i++) { let mfv = 0, vol = 0; for (let j = i - p + 1; j <= i; j++) { const r = cs[j].high - cs[j].low; mfv += r ? ((cs[j].close - cs[j].low) - (cs[j].high - cs[j].close)) / r * cs[j].volume : 0; vol += cs[j].volume; } o[i] = vol ? mfv / vol : 0; } return o; }
-function mfi(cs, p) { const o = new Array(cs.length).fill(null); const tp = cs.map(HLC3); for (let i = p; i < cs.length; i++) { let pos = 0, neg = 0; for (let j = i - p + 1; j <= i; j++) { const rmf = tp[j] * cs[j].volume; if (tp[j] > tp[j - 1]) pos += rmf; else if (tp[j] < tp[j - 1]) neg += rmf; } o[i] = neg === 0 ? 100 : 100 - 100 / (1 + pos / neg); } return o; }
-function forceIndex(cs, p) { const f = new Array(cs.length).fill(null); for (let i = 1; i < cs.length; i++) f[i] = (cs[i].close - cs[i - 1].close) * cs[i].volume; const e = ema(f.map((x) => x ?? 0), p); return e.map((x, i) => (f[i] == null ? null : x)); }
-function macdFull(v) { const e12 = ema(v, 12), e26 = ema(v, 26); const line = v.map((_, i) => (e12[i] != null && e26[i] != null ? e12[i] - e26[i] : null)); const sig = ema(line.map((x) => x ?? 0), 9).map((x, i) => (line[i] == null ? null : x)); return [line, sig]; }
-function adxDI(cs, p) {
-  const n = cs.length, tr = [], pdm = [], ndm = [];
-  for (let i = 0; i < n; i++) { if (i === 0) { tr.push(0); pdm.push(0); ndm.push(0); continue; } const up = cs[i].high - cs[i - 1].high, dn = cs[i - 1].low - cs[i].low; pdm.push(up > dn && up > 0 ? up : 0); ndm.push(dn > up && dn > 0 ? dn : 0); tr.push(Math.max(cs[i].high - cs[i].low, Math.abs(cs[i].high - cs[i - 1].close), Math.abs(cs[i].low - cs[i - 1].close))); }
-  const pdi = new Array(n).fill(null), ndi = new Array(n).fill(null), adx = new Array(n).fill(null), dx = new Array(n).fill(null);
-  let atrS = 0, pS = 0, nS = 0;
-  for (let i = 1; i < n; i++) { if (i <= p) { atrS += tr[i]; pS += pdm[i]; nS += ndm[i]; if (i === p) { pdi[i] = 100 * pS / (atrS || 1); ndi[i] = 100 * nS / (atrS || 1); dx[i] = 100 * Math.abs(pdi[i] - ndi[i]) / (pdi[i] + ndi[i] || 1); } } else { atrS = atrS - atrS / p + tr[i]; pS = pS - pS / p + pdm[i]; nS = nS - nS / p + ndm[i]; pdi[i] = 100 * pS / (atrS || 1); ndi[i] = 100 * nS / (atrS || 1); dx[i] = 100 * Math.abs(pdi[i] - ndi[i]) / (pdi[i] + ndi[i] || 1); } }
-  let a, cnt = 0, sum = 0; for (let i = 1; i < n; i++) { if (dx[i] == null) continue; cnt++; if (cnt <= p) { sum += dx[i]; if (cnt === p) { a = sum / p; adx[i] = a; } } else { a = (a * (p - 1) + dx[i]) / p; adx[i] = a; } }
-  return [adx, pdi, ndi];
-}
-function bollinger(cs) { const c = cs.map((x) => x.close); const mid = sma(c, 20), sd = stdev(c, 20); return [{ color: 'rgba(120,144,156,.8)', values: mid.map((m, i) => (m != null && sd[i] != null ? m + 2 * sd[i] : null)) }, { color: 'rgba(120,144,156,.4)', values: mid }, { color: 'rgba(120,144,156,.8)', values: mid.map((m, i) => (m != null && sd[i] != null ? m - 2 * sd[i] : null)) }]; }
-function keltner(cs) { const c = cs.map((x) => x.close); const mid = ema(c, 20), a = atr(cs, 20); return [{ color: 'rgba(255,183,77,.8)', values: mid.map((m, i) => (m != null && a[i] != null ? m + 2 * a[i] : null)) }, { color: 'rgba(255,183,77,.4)', values: mid }, { color: 'rgba(255,183,77,.8)', values: mid.map((m, i) => (m != null && a[i] != null ? m - 2 * a[i] : null)) }]; }
-function donchian(cs) { const u = new Array(cs.length).fill(null), l = new Array(cs.length).fill(null), m = new Array(cs.length).fill(null); for (let i = 19; i < cs.length; i++) { u[i] = highest(cs, 20, i); l[i] = lowest(cs, 20, i); m[i] = (u[i] + l[i]) / 2; } return [{ color: 'rgba(79,195,247,.8)', values: u }, { color: 'rgba(79,195,247,.4)', values: m }, { color: 'rgba(79,195,247,.8)', values: l }]; }
-function superTrend(cs, p = 10, mult = 3) { const a = atr(cs, p), st = new Array(cs.length).fill(null); let trend = 1, fu = null, fd = null; for (let i = 1; i < cs.length; i++) { if (a[i] == null) continue; const hl = HL2(cs[i]); const bu = hl + mult * a[i], bl = hl - mult * a[i]; fu = (fu == null || bu < fu || cs[i - 1].close > fu) ? bu : fu; fd = (fd == null || bl > fd || cs[i - 1].close < fd) ? bl : fd; if (trend === 1) { if (cs[i].close < fd) trend = -1; } else { if (cs[i].close > fu) trend = 1; } st[i] = trend === 1 ? fd : fu; } return [{ color: '#26a69a', values: st }]; }
-function psar(cs, step = 0.02, max = 0.2) { const o = new Array(cs.length).fill(null); if (cs.length < 2) return [{ color: '#9aa7b5', values: o }]; let bull = true, af = step, ep = cs[0].high, sar = cs[0].low; for (let i = 1; i < cs.length; i++) { sar = sar + af * (ep - sar); if (bull) { if (cs[i].low < sar) { bull = false; sar = ep; ep = cs[i].low; af = step; } else if (cs[i].high > ep) { ep = cs[i].high; af = Math.min(af + step, max); } } else { if (cs[i].high > sar) { bull = true; sar = ep; ep = cs[i].high; af = step; } else if (cs[i].low < ep) { ep = cs[i].low; af = Math.min(af + step, max); } } o[i] = sar; } return [{ color: '#e0e0e0', values: o }]; }
-function ichimoku(cs) { const n = cs.length, ten = new Array(n).fill(null), kij = new Array(n).fill(null), sa = new Array(n).fill(null), sb = new Array(n).fill(null); for (let i = 0; i < n; i++) { if (i >= 8) ten[i] = (highest(cs, 9, i) + lowest(cs, 9, i)) / 2; if (i >= 25) kij[i] = (highest(cs, 26, i) + lowest(cs, 26, i)) / 2; if (ten[i] != null && kij[i] != null) sa[i] = (ten[i] + kij[i]) / 2; if (i >= 51) sb[i] = (highest(cs, 52, i) + lowest(cs, 52, i)) / 2; } return [{ color: '#42a5f5', values: ten }, { color: '#ef5350', values: kij }, { color: 'rgba(38,166,154,.6)', values: sa }, { color: 'rgba(239,83,80,.6)', values: sb }]; }
-function vwap(cs) { const o = []; let cpv = 0, cv = 0; for (let i = 0; i < cs.length; i++) { cpv += HLC3(cs[i]) * cs[i].volume; cv += cs[i].volume; o.push(cv > 0 ? cpv / cv : null); } return [{ color: '#f0b90b', values: o, width: 2 }]; }
-function alligator(cs) { const m = cs.map(HL2); return [{ color: '#2196f3', values: smma(m, 13) }, { color: '#ef5350', values: smma(m, 8) }, { color: '#26a69a', values: smma(m, 5) }]; }
 
 const OVERLAYS = {
   sma: (cs) => [{ color: '#4fc3f7', values: sma(cs.map((c) => c.close), 20) }],
@@ -159,7 +119,6 @@ let lastBarTime = 0, formingRaw = null;
 const volColor = (c) => (c.close >= c.open ? 'rgba(38,166,154,.4)' : 'rgba(239,83,80,.4)');
 const isLineType = () => (chartType === 'line' || chartType === 'area');
 
-function heikin(cs) { const o = []; let po, pc; for (let i = 0; i < cs.length; i++) { const c = cs[i]; const hc = (c.open + c.high + c.low + c.close) / 4; const ho = i === 0 ? (c.open + c.close) / 2 : (po + pc) / 2; o.push({ time: c.time, open: ho, high: Math.max(c.high, ho, hc), low: Math.min(c.low, ho, hc), close: hc }); po = ho; pc = hc; } return o; }
 function candleColors() {
   const wick = (def) => (settings.shadows ? (settings.shadowCustom ? settings.shadowColor : def) : 'rgba(0,0,0,0)');
   if (chartType === 'hollow') return { upColor: 'rgba(0,0,0,0)', downColor: 'rgba(0,0,0,0)', borderUpColor: settings.hollowColor, borderDownColor: '#ef5350', wickUpColor: wick(settings.hollowColor), wickDownColor: wick('#ef5350') };
@@ -273,25 +232,20 @@ function updateDealPanel() {
 }
 
 // ---- Order book + asset stats ---------------------------------------------
-async function pollDepth() {
-  const id = selected; if (id == null) return;
-  const r = await fetch(`/depth/${id}`); const d = await r.json().catch(() => null); if (!d) return;
-  const s = 10 ** d.price_decimals, v = 10 ** d.qty_decimals;
-  const asks = d.asks.slice(0, 10), bids = d.bids.slice(0, 10);
-  const maxQ = Math.max(1, ...asks.map((a) => a[1]), ...bids.map((b) => b[1]));
-  const row = (lvl, cls) => `<div class="brow ${cls}" data-p="${(lvl[0] / s).toFixed(d.price_decimals)}"><div class="bar" style="width:${lvl[1] / maxQ * 100}%"></div><span class="bp">${(lvl[0] / s).toFixed(d.price_decimals)}</span><span class="bq">${(lvl[1] / v).toFixed(3)}</span></div>`;
-  document.getElementById('bookAsks').innerHTML = asks.slice().reverse().map((a) => row(a, 'ask')).join('');
-  document.getElementById('bookBids').innerHTML = bids.map((b) => row(b, 'bid')).join('');
-  const bb = bids[0]?.[0], ba = asks[0]?.[0];
-  document.getElementById('bookMid').textContent = bb && ba ? ((bb + ba) / 2 / s).toFixed(d.price_decimals) : '—';
-  document.getElementById('bookSpread').textContent = bb && ba ? `spread ${((ba - bb) / s).toFixed(d.price_decimals)}` : '';
-}
-async function pollStats() {
-  const id = selected; if (id == null) return;
-  const r = await fetch(`/stats/${id}`); const list = await r.json().catch(() => []);
-  document.getElementById('statbar').innerHTML = list.map((st) => { const up = st.change >= 0; return `<div class="stat"><span class="stat__l">${TFN[st.tf]}</span><span class="stat__v ${up ? 'up' : 'down'}">${up ? '+' : ''}${st.change.toFixed(2)}%</span></div>`; }).join('');
-}
-async function selectInstrument(id) { selected = id; Object.entries(rowEls).forEach(([k, el]) => el.classList.toggle('active', +k === id)); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); pollDeals(); pollDepth(); pollStats(); }
+// Стакан и статистика — переиспользуемые виджеты (ADR-015), паттерн mount(root, ctx).
+const book = OrderBook.mount(document.getElementById('book'), {
+  instrument: () => selected,
+  fetch: (id) => fetch(`/depth/${id}`).then((r) => r.json()),
+  onPick: (price) => { setMode('limit'); const inp = document.getElementById('price'); inp.value = price; inp.classList.add('flash'); setTimeout(() => inp.classList.remove('flash'), 400); },
+  interval: 700,
+});
+const stats = AssetStats.mount(document.getElementById('statbar'), {
+  instrument: () => selected,
+  fetch: (id) => fetch(`/stats/${id}`).then((r) => r.json()),
+  labels: TFN,
+  interval: 5000,
+});
+async function selectInstrument(id) { selected = id; Object.entries(rowEls).forEach(([k, el]) => el.classList.toggle('active', +k === id)); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); pollDeals(); book.refresh(); stats.refresh(); }
 document.getElementById('tfs').addEventListener('click', (e) => { const btn = e.target.closest('button'); if (!btn) return; tf = +btn.dataset.tf; document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
 
 // ============================ Toolbar (dropdowns) ==========================
@@ -388,12 +342,6 @@ function connectWS() { const proto = location.protocol === 'https:' ? 'wss' : 'w
 // ============================ Order form ===================================
 document.getElementById('tabDeal').addEventListener('click', () => setMode('market'));
 document.getElementById('tabLimit').addEventListener('click', () => setMode('limit'));
-// Клик по уровню стакана → цена в лимитную заявку.
-['bookAsks', 'bookBids'].forEach((bid) => document.getElementById(bid).addEventListener('click', (e) => {
-  const row = e.target.closest('.brow'); if (!row || !row.dataset.p) return;
-  setMode('limit'); document.getElementById('price').value = row.dataset.p;
-  const inp = document.getElementById('price'); inp.classList.add('flash'); setTimeout(() => inp.classList.remove('flash'), 400);
-}));
 function setMode(m) { orderMode = m; document.getElementById('tabDeal').classList.toggle('active', m === 'market'); document.getElementById('tabLimit').classList.toggle('active', m === 'limit'); document.getElementById('priceRow').classList.toggle('hidden', m !== 'limit'); updateDealPanel(); }
 document.getElementById('lotMinus').addEventListener('click', () => stepLot(-1));
 document.getElementById('lotPlus').addEventListener('click', () => stepLot(1));
@@ -458,7 +406,5 @@ setInterval(refreshInstruments, 1000);
 setInterval(syncLast, 2000);
 setInterval(() => { pollAccount(); pollDeals(); }, 1000);
 setInterval(() => { pollPending(); pollClosed(); }, 1500);
-setInterval(pollDepth, 700);
-setInterval(pollStats, 5000);
 connectWS();
 pollAccount(); pollDeals(); pollPending(); pollClosed();

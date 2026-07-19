@@ -75,6 +75,20 @@ docker compose up --build   # gateway (внутренний) + web (nginx)
 - **Настройки** (⚙, в localStorage): Hollow candle color; Candle shadows вкл/выкл + свой цвет теней;
   Price line width (0 = выкл); Additional price line вкл/выкл + width; Minimal price change (Default / 1:1 / 1:10).
 
+## Модульная архитектура (ADR-015)
+
+Модули переиспользуемы: самодостаточны, зависимости инъектируются через контекст, глобалы и id
+страницы под запретом. Контракт виджета — `Widget.mount(rootEl, ctx) → { refresh, destroy }`.
+
+- `indicators.js` — `window.Indicators`, ~35 чистых функций (мат. индикаторов). Ноль DOM/глобалов.
+- `orderbook.js` — `OrderBook.mount(el, ctx)`: сам строит стакан, `ctx.instrument()/fetch(id)/onPick`.
+- `stats.js` — `AssetStats.mount(el, ctx)`: статистика по периодам, `ctx.instrument()/fetch(id)/labels`.
+- `drawings.js` — инструменты рисования (оверлей-canvas), через `window.__lw`.
+- `app.js` — тонкий композитор: связывает виджеты через `ctx`, держит общее состояние.
+
+Подключение по порядку: lightweight-charts → indicators → orderbook → stats → app → drawings.
+**Все новые модули — по этому паттерну; старые переносятся постепенно.** См. [[ADR-015-reusable-frontend-modules]].
+
 ## Ограничения / TODO
 
 - Индикаторы клиентские и базовые; **Ichimoku без сдвига облака, Alligator без сдвига** (упрощено).
