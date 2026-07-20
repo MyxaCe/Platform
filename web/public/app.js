@@ -204,7 +204,11 @@ const book = OrderBook.mount(document.getElementById('book'), {
   instrument: () => selected,
   fetch: (id) => api.depth(id),
   onPick: (price) => { setMode('limit'); const inp = document.getElementById('price'); inp.value = price; inp.classList.add('flash'); setTimeout(() => inp.classList.remove('flash'), 400); },
+  // Подписи колонок и марк-цена — из данных инструмента, которыми владеет хост.
+  symbols: (id) => { const [base, quote] = (META[id]?.symbol || '-').split('-'); return { base, quote }; },
+  markPrice: (id) => (META[id]?.last != null ? META[id].last / pscale(id) : null),
   interval: 700,
+  storagePrefix: 'ob',
 });
 const stats = AssetStats.mount(document.getElementById('statbar'), {
   instrument: () => selected,
@@ -239,7 +243,7 @@ const watchlist = Watchlist.mount(document.querySelector('.watch'), {
   onSelect: (id) => selectInstrument(id),
   interval: 1000,
 });
-async function selectInstrument(id) { selected = id; watchlist.setActive(id); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.refresh(); stats.refresh(); trades.clearTape(); trades.refreshMine(); }
+async function selectInstrument(id) { selected = id; watchlist.setActive(id); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.reset(); book.refresh(); stats.refresh(); trades.clearTape(); trades.refreshMine(); }
 document.getElementById('tfs').addEventListener('click', (e) => { const btn = e.target.closest('button'); if (!btn) return; tf = +btn.dataset.tf; document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
 
 // ============================ Toolbar (dropdowns) ==========================
