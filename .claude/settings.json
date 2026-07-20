@@ -21,7 +21,8 @@
       "Bash(node --check api.js)",
       "Bash(echo \"tests exit=$?\")",
       "Bash(curl -s \"http://localhost:8888/depth/1?limit=200\")",
-      "Bash(MSYS_NO_PATHCONV=1 timeout 170 docker run --rm --add-host=host.docker.internal:host-gateway mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && cat > t.mjs <<\"EOF\" *)"
+      "Bash(MSYS_NO_PATHCONV=1 timeout 170 docker run --rm --add-host=host.docker.internal:host-gateway mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && cat > t.mjs <<\"EOF\" *)",
+      "Bash(git commit -q -m 'docs: STATUS — раскладка, модули и стакан на 2026-07-20 *)"
     ]
   }
 }
