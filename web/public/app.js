@@ -172,7 +172,7 @@ async function loadCandles(id, timeframe) {
     makeMainSeries();
     mainSeries.setData(mainData());
     volume.setData(rawCandles.map((c) => ({ time: c.time, value: c.volume, color: volColor(c) })));
-    applyIndicators(); redrawPriceLines(); computeSignals();
+    applyIndicators(); redrawPriceLines(); panel.refreshSignals();
     if (rawCandles.length) { const last = raw[raw.length - 1]; lastBarTime = last.time; formingRaw = { ...last }; const n = rawCandles.length; chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 }); } else { lastBarTime = 0; formingRaw = null; }
     refreshLegend();
     draw.clear(); // logical-якоря объектов рисования после setData невалидны
@@ -212,8 +212,18 @@ const stats = AssetStats.mount(document.getElementById('statbar'), {
   labels: TFN,
   interval: 5000,
 });
+const panel = Positions.mount(document.getElementById('bottom'), {
+  api,
+  fmtUsd: usd,
+  pips: () => showPips,
+  // Позиции нужны графику для линий SL/TP — виджет отдаёт их хосту, а не лезет в график сам.
+  onDeals: (list) => { currentDeals = list.filter((d) => d.instrument === selected); redrawPriceLines(); },
+  onChange: () => pollAccount(),
+  signals: () => computeSignals(),
+  interval: 1500,
+});
 // Монтируется последним: его первый refresh выбирает инструмент, а selectInstrument
-// обращается к book/stats — они должны уже существовать.
+// обращается к book/stats/panel — они должны уже существовать.
 const watchlist = Watchlist.mount(document.querySelector('.watch'), {
   fetch: () => api.instruments(),
   instrument: () => selected,
@@ -221,7 +231,7 @@ const watchlist = Watchlist.mount(document.querySelector('.watch'), {
   onSelect: (id) => selectInstrument(id),
   interval: 1000,
 });
-async function selectInstrument(id) { selected = id; watchlist.setActive(id); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); pollDeals(); book.refresh(); stats.refresh(); }
+async function selectInstrument(id) { selected = id; watchlist.setActive(id); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.refresh(); stats.refresh(); }
 document.getElementById('tfs').addEventListener('click', (e) => { const btn = e.target.closest('button'); if (!btn) return; tf = +btn.dataset.tf; document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
 
 // ============================ Toolbar (dropdowns) ==========================
@@ -244,7 +254,7 @@ document.getElementById('ptBtn').addEventListener('click', () => toggleDD('ptMen
 document.getElementById('ptMenu').addEventListener('click', (e) => { const it = e.target.closest('[data-pt]'); if (!it) return; priceType = it.dataset.pt; document.querySelectorAll('#ptMenu .dd-item').forEach((x) => x.classList.toggle('active', x === it)); document.getElementById('ptLabel').textContent = it.textContent.trim().toUpperCase(); closeDD(); updateDealPanel(); });
 
 document.getElementById('sltpBtn').addEventListener('click', () => { showSLTP = !showSLTP; document.getElementById('sltpBtn').classList.toggle('on', showSLTP); redrawPriceLines(); });
-document.getElementById('pipsBtn').addEventListener('click', () => { showPips = !showPips; document.getElementById('pipsBtn').classList.toggle('on', showPips); updateDealPanel(); pollDeals(); });
+document.getElementById('pipsBtn').addEventListener('click', () => { showPips = !showPips; document.getElementById('pipsBtn').classList.toggle('on', showPips); updateDealPanel(); panel.refreshDeals(); });
 
 // Reset (full) / Fullscreen / Settings
 function resetChart() {
@@ -337,31 +347,30 @@ async function submit(side) {
   if (isLimit) { const price = parseFloat(document.getElementById('price').value); if (!(price > 0)) { msg.textContent = 'Enter price'; msg.style.color = 'var(--down)'; return; } body = { instrument: id, side, qty, price: Math.round(price * pscale(id)), sl, tp }; }
   else body = { instrument: id, side, qty, sl, tp };
   const { ok, status, data } = isLimit ? await api.placePending(body) : await api.openDeal(body);
-  if (ok) { msg.textContent = isLimit ? `Limit order #${data.id}` : `Opened #${data.id}: ${side.toUpperCase()} @ ${fmtP(id, data.entry)}`; msg.style.color = 'var(--up)'; switchBottom(isLimit ? 'pending' : 'deals'); pollAccount(); pollDeals(); pollPending(); }
+  if (ok) { msg.textContent = isLimit ? `Limit order #${data.id}` : `Opened #${data.id}: ${side.toUpperCase()} @ ${fmtP(id, data.entry)}`; msg.style.color = 'var(--up)'; panel.show(isLimit ? 'pending' : 'deals'); pollAccount(); panel.refresh(); }
   else { msg.textContent = `Rejected ${status}: ${data?.error || ''}`; msg.style.color = 'var(--down)'; }
 }
 document.getElementById('btnBuy').addEventListener('click', () => submit('buy'));
 document.getElementById('btnSell').addEventListener('click', () => submit('sell'));
-document.getElementById('userSel').addEventListener('change', () => { pollAccount(); pollDeals(); pollPending(); pollClosed(); });
+document.getElementById('userSel').addEventListener('change', () => { pollAccount(); panel.refresh(); });
 
 // ============================ Account / positions / history ================
 async function pollAccount() { try { const a = await api.account(); if (!a) return; document.getElementById('mBalance').textContent = usd(a.balance); document.getElementById('mEquity').textContent = usd(a.equity); document.getElementById('mMargin').textContent = usd(a.used_margin); document.getElementById('mFree').textContent = usd(a.free_margin); const p = document.getElementById('mPnl'); p.textContent = usd(a.open_pnl); p.style.color = a.open_pnl > 0 ? 'var(--up)' : a.open_pnl < 0 ? 'var(--down)' : ''; } catch (e) { /* */ } }
-async function pollDeals() {
-  try { const list = await api.deals(); if (!list) return; currentDeals = list.filter((d) => d.instrument === selected); redrawPriceLines();
-    document.getElementById('deals').innerHTML = list.map((d) => { const pos = d.pnl >= 0; const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals); const pips = showPips ? ` (${d.side === 'buy' ? d.mark - d.entry : d.entry - d.mark}p)` : ''; return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.entry)}</span><span>${f(d.mark)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${usd(d.pnl)}${pips}</span><button class="closebtn" data-id="${d.id}">Close</button></div>`; }).join('') || '<div class="deal-row muted"><span>No open positions</span></div>';
-    document.querySelectorAll('#deals .closebtn').forEach((b) => b.addEventListener('click', () => closeDeal(+b.dataset.id))); } catch (e) { /* */ }
+// Сигналы считаются из свечей графика (данные хоста); показывает их виджет positions.js.
+function computeSignals() {
+  const it = META[selected];
+  if (!it || rawCandles.length < 30) return [];
+  const close = rawCandles.map((c) => c.close); const out = [];
+  const r = rsi(close, 14), rv = r[r.length - 1];
+  if (rv != null && rv > 70) out.push(['RSI overbought', 'SELL']);
+  else if (rv != null && rv < 30) out.push(['RSI oversold', 'BUY']);
+  const f = sma(close, 9), sl = sma(close, 21), i = close.length - 1;
+  if (f[i] != null && sl[i] != null && f[i - 1] != null && sl[i - 1] != null) {
+    if (f[i - 1] <= sl[i - 1] && f[i] > sl[i]) out.push(['MA 9/21 cross up', 'BUY']);
+    else if (f[i - 1] >= sl[i - 1] && f[i] < sl[i]) out.push(['MA 9/21 cross down', 'SELL']);
+  }
+  return out.map(([name, dir]) => ({ symbol: it.symbol, name, tf: TFN[tf], dir }));
 }
-async function closeDeal(id) { const { ok } = await api.closeDeal(id); if (ok) { pollAccount(); pollDeals(); pollClosed(); } }
-async function pollPending() { try { const list = await api.pending(); if (!list) return; document.getElementById('pending').innerHTML = list.map((d) => { const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw == null ? '—' : (raw / 10 ** d.price_decimals).toFixed(d.price_decimals)); return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.price)}</span><span>${f(d.sl)}</span><span>${f(d.tp)}</span><button class="closebtn" data-id="${d.id}">Cancel</button></div>`; }).join('') || '<div class="deal-row muted"><span>No limit orders</span></div>'; document.querySelectorAll('#pending .closebtn').forEach((b) => b.addEventListener('click', () => cancelPending(+b.dataset.id))); } catch (e) { /* */ } }
-async function cancelPending(id) { const { ok } = await api.cancelPending(id); if (ok) pollPending(); }
-async function pollClosed() { try { const list = await api.closedDeals(); if (!list) return; document.getElementById('closed').innerHTML = list.map((d) => { const pos = d.pnl >= 0; const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals); return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.entry)}</span><span>${f(d.exit)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${usd(d.pnl)}</span><span></span></div>`; }).join('') || '<div class="deal-row muted"><span>No history</span></div>'; } catch (e) { /* */ } }
-
-// ============================ Signals ======================================
-function computeSignals() { const cont = document.getElementById('signals'); const it = META[selected]; if (!it || rawCandles.length < 30) { cont.innerHTML = ''; return; } const close = rawCandles.map((c) => c.close); const sig = []; const r = rsi(close, 14), rv = r[r.length - 1]; if (rv != null && rv > 70) sig.push(['RSI overbought', 'SELL']); else if (rv != null && rv < 30) sig.push(['RSI oversold', 'BUY']); const f = sma(close, 9), s = sma(close, 21), i = close.length - 1; if (f[i] != null && s[i] != null && f[i - 1] != null && s[i - 1] != null) { if (f[i - 1] <= s[i - 1] && f[i] > s[i]) sig.push(['MA 9/21 cross up', 'BUY']); else if (f[i - 1] >= s[i - 1] && f[i] < s[i]) sig.push(['MA 9/21 cross down', 'SELL']); } cont.innerHTML = sig.map(([n, dir]) => `<div class="deal-row"><span>${it.symbol}</span><span>${n}</span><span>${TFN[tf]}</span><span class="dir ${dir === 'BUY' ? 'buy' : 'sell'} ta-r">${dir}</span></div>`).join('') || '<div class="deal-row muted"><span>No signals on this TF</span></div>'; }
-
-// ============================ Bottom tabs + search + sort ==================
-function switchBottom(w) { ['deals', 'pending', 'closed', 'signals'].forEach((n) => { document.getElementById(`tab-${n}`).classList.toggle('active', n === w); document.getElementById(`pane-${n}`).classList.toggle('hidden', n !== w); }); }
-document.querySelectorAll('.bottom__tabs span').forEach((t) => t.addEventListener('click', () => switchBottom(t.dataset.pane)));
 // Поиск, сортировка, избранное и клик по строке — внутри watchlist.js (ADR-015).
 
 // ============================ Start ========================================
@@ -369,7 +378,6 @@ renderIcons();
 applyLayout();
 initResizers();
 setInterval(syncLast, 2000);
-setInterval(() => { pollAccount(); pollDeals(); }, 1000);
-setInterval(() => { pollPending(); pollClosed(); }, 1500);
+setInterval(pollAccount, 1000);
 connectWS();
-pollAccount(); pollDeals(); pollPending(); pollClosed();
+pollAccount();

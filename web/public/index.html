@@ -147,31 +147,8 @@
       <div id="statbar" class="statbar"></div>
 
       <div class="rsz rsz-h" data-rsz="bottom"></div>
-      <div class="bottom">
-        <div class="bottom__tabs">
-          <span id="tab-deals" class="active" data-pane="deals">OPEN DEALS</span>
-          <span id="tab-pending" data-pane="pending">LIMIT ORDERS</span>
-          <span id="tab-closed" data-pane="closed">CLOSED DEALS</span>
-          <span id="tab-signals" data-pane="signals">SIGNALS</span>
-        </div>
-        <div id="pane-deals" class="pane">
-          <div class="deals__head"><span>INSTR.</span><span>SIDE</span><span class="ta-r">QTY</span><span class="ta-r">ENTRY</span><span class="ta-r">PRICE</span><span class="ta-r">P&amp;L</span><span></span></div>
-          <div id="deals" class="rows"></div>
-        </div>
-        <div id="pane-pending" class="pane hidden">
-          <div class="deals__head"><span>INSTR.</span><span>SIDE</span><span class="ta-r">QTY</span><span class="ta-r">PRICE</span><span class="ta-r">SL</span><span class="ta-r">TP</span><span></span></div>
-          <div id="pending" class="rows"></div>
-        </div>
-        <div id="pane-closed" class="pane hidden">
-          <div class="deals__head"><span>INSTR.</span><span>SIDE</span><span class="ta-r">QTY</span><span class="ta-r">ENTRY</span><span class="ta-r">EXIT</span><span class="ta-r">P&amp;L</span><span></span></div>
-          <div id="closed" class="rows"></div>
-        </div>
-        <div id="pane-signals" class="pane hidden">
-          <div class="deals__head"><span>INSTR.</span><span>SIGNAL</span><span>TF</span><span class="ta-r">DIRECTION</span></div>
-          <div id="signals" class="rows"></div>
-          <div class="signals-note muted">Our simple indicator-based signals (RSI, MA cross). Not Autochartist.</div>
-        </div>
-      </div>
+      <!-- Нижняя панель целиком строит виджет positions.js (ADR-015) -->
+      <div class="bottom" id="bottom"></div>
     </section>
 
     <div class="rsz rsz-v" data-rsz="right"></div>
@@ -218,6 +195,7 @@
   <script src="/orderbook.js"></script>
   <script src="/stats.js"></script>
   <script src="/watchlist.js"></script>
+  <script src="/positions.js"></script>
   <script src="/drawings.js"></script>
   <script src="/app.js"></script>
 </body>
