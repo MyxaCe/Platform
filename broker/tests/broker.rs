@@ -114,3 +114,61 @@ fn take_profit_closes_position() {
     assert!(b.positions(ALICE).is_empty());
     assert_eq!(b.closed_deals(ALICE)[0].pnl, 1000);
 }
+
+// ---- Персистентность (ADR-016) --------------------------------------------
+
+#[test]
+fn check_reports_only_changed_accounts() {
+    let mut b = Broker::new(1_000_000, 1);
+    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, Some(5_950_000), None).unwrap();
+
+    // Цена движется, но ничего не сработало — сохранять нечего.
+    assert!(b.check(&marks(1, 5_990_000)).is_empty());
+
+    // Достигли SL — счёт изменился и попал в список на сохранение.
+    assert_eq!(b.check(&marks(1, 5_950_000)), vec![ALICE]);
+
+    // Позиций больше нет — следующий тик снова пустой.
+    assert!(b.check(&marks(1, 5_900_000)).is_empty());
+}
+
+#[test]
+fn check_reports_account_on_pending_fill() {
+    let mut b = Broker::new(1_000_000, 1);
+    b.place_pending(ALICE, 1, PosSide::Long, 1000, 5_900_000, PD, QD, None, None);
+    assert!(b.check(&marks(1, 6_000_000)).is_empty()); // выше лимита — не сработал
+    assert_eq!(b.check(&marks(1, 5_900_000)), vec![ALICE]); // сработал
+    assert_eq!(b.positions(ALICE).len(), 1);
+}
+
+#[test]
+fn snapshot_restore_roundtrip() {
+    let mut b = Broker::new(1_000_000, 1);
+    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, Some(5_950_000), None).unwrap();
+    b.place_pending(ALICE, 2, PosSide::Short, 500, 7_000_000, PD, QD, None, None);
+    b.check(&marks(1, 5_950_000)); // закрыли по SL → появилась история
+    let snap = b.snapshot(ALICE);
+    assert_eq!(snap.pendings.len(), 1);
+    assert_eq!(snap.closed.len(), 1);
+
+    // Новый брокер (как после перезапуска) восстанавливает счёт из слепка.
+    let mut fresh = Broker::new(1_000_000, 1);
+    fresh.restore(ALICE, snap);
+    assert_eq!(fresh.balance(ALICE), b.balance(ALICE));
+    assert_eq!(fresh.pendings(ALICE).len(), 1);
+    assert_eq!(fresh.closed_deals(ALICE).len(), 1);
+    assert_eq!(fresh.users(), vec![ALICE]);
+
+    // next_id восстановлен: новый ордер не должен переиспользовать занятый id.
+    let used: Vec<u64> = fresh.pendings(ALICE).iter().map(|p| p.id).collect();
+    let new_id = fresh.place_pending(ALICE, 3, PosSide::Long, 100, 1_000_000, PD, QD, None, None);
+    assert!(!used.contains(&new_id));
+}
+
+#[test]
+fn snapshot_of_unknown_user_is_start_balance() {
+    let b = Broker::new(1_000_000, 1);
+    let snap = b.snapshot(ALICE);
+    assert_eq!(snap.balance, 1_000_000);
+    assert!(snap.positions.is_empty() && snap.closed.is_empty());
+}

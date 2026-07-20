@@ -117,7 +117,9 @@ impl Account {
         Some(pnl)
     }
 
-    fn run_triggers(&mut self, lev: i128, marks: &HashMap<u32, i64>) {
+    /// Прогнать триггеры. Возвращает `true`, если состояние счёта изменилось —
+    /// по этому признаку gateway понимает, какие счета надо сохранить (ADR-016).
+    fn run_triggers(&mut self, lev: i128, marks: &HashMap<u32, i64>) -> bool {
         // Сработавшие лимитные ордера → открыть позицию.
         let mut fire: Vec<PendingOrder> = Vec::new();
         self.pendings.retain(|_, p| match marks.get(&p.instrument) {
@@ -135,6 +137,7 @@ impl Account {
             }
             None => true,
         });
+        let fired_any = !fire.is_empty();
         for p in fire {
             let _ = self.try_open(lev, p.instrument, p.side, p.qty, p.price, p.pd, p.qd, p.sl, p.tp);
         }
@@ -158,9 +161,11 @@ impl Account {
                 }
             }
         }
+        let closed_any = !to_close.is_empty();
         for (id, mark) in to_close {
             self.close_pos(id, mark);
         }
+        fired_any || closed_any
     }
 }
 
@@ -243,10 +248,66 @@ impl Broker {
     }
 
     /// Прогнать триггеры лимитных ордеров и SL/TP по всем счетам при текущих марк-ценах.
-    pub fn check(&mut self, marks: &HashMap<u32, i64>) {
+    ///
+    /// Возвращает **id счетов, состояние которых изменилось**. Обычный случай — цена
+    /// движется, но ничего не сработало → пустой вектор, сохранять нечего. Без этого
+    /// пришлось бы писать в БД все счета на каждом тике монитора (ADR-016).
+    pub fn check(&mut self, marks: &HashMap<u32, i64>) -> Vec<UserId> {
         let lev = self.leverage;
-        for a in self.accounts.values_mut() {
-            a.run_triggers(lev, marks);
+        let mut changed = Vec::new();
+        for (user, a) in self.accounts.iter_mut() {
+            if a.run_triggers(lev, marks) {
+                changed.push(*user);
+            }
+        }
+        changed
+    }
+
+    // ---- Персистентность (ADR-016) ----------------------------------------
+    //
+    // Брокер остаётся in-memory и синхронным: он не знает ни про БД, ни про I/O
+    // (принцип №6). Наружу отдаётся слепок счёта, а сохраняет и загружает его
+    // адаптер в gateway через крейт `persistence`.
+
+    /// Слепок счёта для сохранения. Позиции и ордера переписываются целиком —
+    /// их единицы-десятки; история закрытых сделок только дописывается.
+    pub fn snapshot(&self, user: UserId) -> AccountSnapshot {
+        match self.accounts.get(&user) {
+            Some(a) => AccountSnapshot {
+                balance: a.balance,
+                next_id: a.next_id,
+                positions: a.positions.values().cloned().collect(),
+                pendings: a.pendings.values().cloned().collect(),
+                closed: a.closed.clone(),
+            },
+            None => AccountSnapshot { balance: self.start_balance, next_id: 0, positions: vec![], pendings: vec![], closed: vec![] },
         }
     }
+
+    /// Восстановить счёт из хранилища на старте. Полностью заменяет состояние счёта.
+    pub fn restore(&mut self, user: UserId, snap: AccountSnapshot) {
+        let a = Account {
+            balance: snap.balance,
+            next_id: snap.next_id,
+            positions: snap.positions.into_iter().map(|p| (p.id, p)).collect(),
+            pendings: snap.pendings.into_iter().map(|p| (p.id, p)).collect(),
+            closed: snap.closed,
+        };
+        self.accounts.insert(user, a);
+    }
+
+    /// Все счета, о которых знает брокер (для сохранения/обхода).
+    pub fn users(&self) -> Vec<UserId> {
+        self.accounts.keys().copied().collect()
+    }
+}
+
+/// Слепок состояния одного счёта — единица обмена с хранилищем (ADR-016).
+#[derive(Debug, Clone, Default)]
+pub struct AccountSnapshot {
+    pub balance: Cents,
+    pub next_id: u64,
+    pub positions: Vec<Position>,
+    pub pendings: Vec<PendingOrder>,
+    pub closed: Vec<ClosedDeal>,
 }
