@@ -1,20 +1,60 @@
 /* ============================================================================
  * drawings.js — инструменты рисования на графике (оверлей-canvas над Lightweight
- * Charts). Отдельный модуль: подключается ПОСЛЕ app.js, читает window.__lw.
+ * Charts). Переиспользуемый модуль по ADR-015:
+ *
+ *   const draw = Drawings.mount(chartWrapEl, {
+ *     chart,                    // экземпляр Lightweight Charts
+ *     series: () => mainSeries, // текущая основная серия (пересоздаётся при смене типа графика)
+ *   });
+ *   draw.clear();               // сбросить объекты (вызывать при перезагрузке данных)
+ *   draw.destroy();
+ *
+ * Модуль сам создаёт свой canvas и панель инструментов внутри `root` и сам возит свои
+ * стили — странице не нужно ни размечать элементы, ни знать их id.
  *
  * Якоря объектов хранятся в координатах данных (logical-индекс бара + цена), поэтому
- * рисунки двигаются/масштабируются вместе с графиком. При перезагрузке данных
- * (смена инструмента/ТФ — событие 'chartReload') объекты очищаются: logical-индексы
- * становятся невалидными после setData.
+ * рисунки двигаются/масштабируются вместе с графиком. При перезагрузке данных (смена
+ * инструмента/ТФ) хост зовёт `clear()`: logical-индексы после setData невалидны.
+ *
+ * Примечание по имени: зависимости названы `cfg`, а не `ctx`, потому что `ctx` внутри
+ * занято под 2D-контекст канвы.
  * ========================================================================== */
 (function () {
-  const LW = window.__lw;
-  if (!LW) { console.warn('[drawings] window.__lw не найден'); return; }
-  const chart = LW.chart;
-  const cvs = document.getElementById('drawLayer');
-  const bar = document.getElementById('drawTools');
-  if (!cvs || !bar) { console.warn('[drawings] нет #drawLayer/#drawTools'); return; }
-  const host = cvs.parentElement; // .chartwrap
+  const CSS = `
+.drawlayer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+/* Прижата к верху области графика, а не отцентрована: при центрировании (top:50% +
+   translateY(-50%)) панель, будучи выше своего контейнера, вылезала ВВЕРХ за него и накрывала
+   тулбар — кнопка price type становилась некликабельной (BUG-010). max-height удерживает её
+   внутри графика, лишние кнопки уходят в прокрутку. */
+.drawtools { position: absolute; left: 7px; top: 8px; max-height: calc(100% - 16px); overflow-y: auto; z-index: 6;
+  display: flex; flex-direction: column; gap: 2px; padding: 4px; background: rgba(17,23,34,.92);
+  border: 1px solid var(--border,#1f2735); border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.4);
+  scrollbar-width: thin; }
+.drawbtn { width: 27px; height: 27px; display: flex; align-items: center; justify-content: center;
+  background: transparent; border: none; border-radius: 6px; color: var(--muted,#6b7688); cursor: pointer; position: relative; }
+.drawbtn:hover { background: var(--panel2,#151a25); color: var(--text,#d7dce5); }
+.drawbtn.active { background: var(--accent,#f0b90b); color: #000; }
+.drawsep { height: 1px; background: var(--border,#1f2735); margin: 3px 2px; }
+.drawbtn::after { content: attr(data-tip); position: absolute; left: 34px; top: 50%; transform: translateY(-50%);
+  white-space: nowrap; background: #0b0f17; color: var(--text,#d7dce5); border: 1px solid var(--border,#1f2735);
+  padding: 3px 7px; border-radius: 5px; font-size: 11px; opacity: 0; pointer-events: none; transition: opacity .12s; z-index: 9; }
+.drawbtn:hover::after { opacity: 1; }
+`;
+  if (!document.getElementById('drawings-css')) {
+    const st = document.createElement('style'); st.id = 'drawings-css'; st.textContent = CSS;
+    document.head.appendChild(st);
+  }
+
+  window.Drawings = { mount };
+
+  function mount(root, cfg) {
+  const chart = cfg.chart;
+  const host = root;
+  const cvs = document.createElement('canvas');
+  cvs.className = 'drawlayer';
+  const bar = document.createElement('div');
+  bar.className = 'drawtools';
+  host.appendChild(cvs); host.appendChild(bar);
   const ctx = cvs.getContext('2d');
   const ACCENT = '#f0b90b';
 
@@ -90,13 +130,13 @@
   const ts = () => chart.timeScale();
   function toPx(a) {
     const x = ts().logicalToCoordinate(a.logical);
-    const s = LW.series();
+    const s = cfg.series();
     const y = s ? s.priceToCoordinate(a.price) : null;
     return (x == null || y == null) ? null : { x, y };
   }
   function fromMouse(mx, my) {
     const logical = ts().coordinateToLogical(mx);
-    const s = LW.series();
+    const s = cfg.series();
     const price = s ? s.coordinateToPrice(my) : null;
     return (logical == null || price == null) ? null : { logical, price };
   }
@@ -204,12 +244,25 @@
   });
   // ПКМ / Esc — отмена текущего объекта или возврат к курсору.
   cvs.addEventListener('contextmenu', (e) => { if (active) { e.preventDefault(); setActive(null); } });
-  window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && active) setActive(null); });
+  const onKey = (e) => { if (e.key === 'Escape' && active) setActive(null); };
+  window.addEventListener('keydown', onKey);
 
   // --- Перерисовка при изменениях графика ------------------------------------
   ts().subscribeVisibleLogicalRangeChange(() => redraw());
-  new ResizeObserver(() => redraw()).observe(host);
-  window.addEventListener('chartReload', () => { drawings.length = 0; pending = []; redraw(); });
+  const ro = new ResizeObserver(() => redraw());
+  ro.observe(host);
 
   redraw();
+
+  return {
+    /** Сбросить все объекты. Хост зовёт при перезагрузке данных графика (смена инструмента/ТФ). */
+    clear() { drawings.length = 0; pending = []; setActive(null); },
+    /** Снять слушатели и убрать свой DOM. */
+    destroy() {
+      ro.disconnect();
+      window.removeEventListener('keydown', onKey);
+      cvs.remove(); bar.remove();
+    },
+  };
+  }
 })();

@@ -99,7 +99,8 @@ const chart = LightweightCharts.createChart(chartEl, {
 const volume = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: '', color: '#2b3648' });
 volume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 // Хуки для модуля рисования (drawings.js подключается после app.js).
-window.__lw = { chart, el: chartEl, series: () => mainSeries };
+// Инструменты рисования — виджет по ADR-015: сам создаёт canvas и панель внутри .chartwrap.
+const draw = Drawings.mount(chartEl.parentElement, { chart, series: () => mainSeries });
 
 let mainSeries = null, overlaySeries = [], oscSeriesList = [], priceLines = [];
 let lastBarTime = 0, formingRaw = null;
@@ -174,7 +175,7 @@ async function loadCandles(id, timeframe) {
     applyIndicators(); redrawPriceLines(); computeSignals();
     if (rawCandles.length) { const last = raw[raw.length - 1]; lastBarTime = last.time; formingRaw = { ...last }; const n = rawCandles.length; chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 }); } else { lastBarTime = 0; formingRaw = null; }
     refreshLegend();
-    window.dispatchEvent(new Event('chartReload')); // модуль рисования очищает объекты при смене данных
+    draw.clear(); // logical-якоря объектов рисования после setData невалидны
   } finally { load.classList.add('hidden'); }
 }
 function drawForming() { if (!formingRaw || !mainSeries || chartType === 'heikin') return; const s = pscale(selected); mainSeries.update(isLineType() ? { time: formingRaw.time, value: formingRaw.close / s } : { time: formingRaw.time, open: formingRaw.open / s, high: formingRaw.high / s, low: formingRaw.low / s, close: formingRaw.close / s }); refreshLegend(); }

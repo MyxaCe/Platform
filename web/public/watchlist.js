@@ -21,6 +21,61 @@
 //   wl.refresh(); wl.columns(); wl.setColumns({ spread: 0 }); wl.destroy();
 // ============================================================================
 (function () {
+  // Стили компонента едут вместе с модулем (ADR-015): страница-хост может не иметь своей CSS.
+  // Токены темы (--panel/--border/--up/--down/--accent/...) — контракт хоста, у каждого фолбэк.
+  // Порядок правил сохранён как в исходном style.css: поздние намеренно переопределяют ранние
+  // (ширины колонок задаются трижды, последнее слово за `--watch-cols`).
+  const CSS = `
+.watch { background: var(--panel,#10141d); border-right: 1px solid var(--border,#1f2735); display: flex; flex-direction: column; overflow: hidden; }
+.watch__search { padding: 8px; }
+.watch__search input { width: 100%; background: var(--panel2,#151a25); border: 1px solid var(--border,#1f2735); color: var(--text,#d7dce5);
+  border-radius: 6px; padding: 7px 10px; }
+.watch__title { padding: 6px 12px; color: var(--accent,#f0b90b); font-weight: 700; font-size: 11px; letter-spacing: .5px; }
+.watch__head, .irow { display: grid; grid-template-columns: 20px 1.25fr .78fr .82fr .82fr .62fr .82fr; gap: 4px; padding: 5px 10px; align-items: center; }
+.star { color: #384253; cursor: pointer; display: inline-flex; }
+.star svg { width: 13px; height: 13px; }
+.star:hover { color: #7d8aa0; }
+.star.on { color: var(--accent,#f0b90b); }
+.star.on svg { fill: currentColor; }
+.irow .high { text-align: right; color: var(--muted,#6b7688); }
+.watch__head { color: var(--muted,#6b7688); font-size: 10px; border-bottom: 1px solid var(--border,#1f2735); background: var(--panel2,#151a25); }
+.watch__rows { overflow-y: auto; }
+.irow { border-bottom: 1px solid rgba(31,39,53,.5); cursor: pointer; font-variant-numeric: tabular-nums; }
+.irow:hover { background: var(--panel2,#151a25); }
+.irow.active { background: var(--panel3,#1a2130); box-shadow: inset 3px 0 0 var(--accent,#f0b90b); }
+.irow .sym { font-weight: 600; } .irow .sym small { color: var(--muted,#6b7688); font-weight: 400; display: block; font-size: 10px; }
+.irow .chg.up { color: var(--up,#26a69a); } .irow .chg.down { color: var(--down,#ef5350); }
+.irow .sell { color: var(--down,#ef5350); } .irow .buy { color: var(--up,#26a69a); }
+.star svg { width: 14px; height: 14px; }
+.watch__head, .irow { grid-template-columns: 18px 1.55fr .82fr .85fr .85fr .7fr .85fr; }
+.watch__head span { color: var(--muted,#6b7688); }
+.sortable { cursor: pointer; user-select: none; display: inline-flex; align-items: center; gap: 3px; }
+.sortable:hover { color: var(--text,#d7dce5); }
+.sortable.asc i { border-left: 3px solid transparent; border-right: 3px solid transparent; border-bottom: 4px solid var(--accent,#f0b90b); }
+.sortable.desc i { border-left: 3px solid transparent; border-right: 3px solid transparent; border-top: 4px solid var(--accent,#f0b90b); }
+.irow { font-variant-numeric: tabular-nums; }
+/* Ячейки не должны налезать на соседние колонки: при узкой панели длинные цены
+   выходили за свой трек и сливались с соседями в кашу (BUG-009). */
+.watch__head span, .irow .num, .irow .sym { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.irow .num { text-align: left; color: var(--text,#d7dce5); }
+.irow .num.muted { color: var(--muted,#6b7688); }
+.irow .chg.up { color: var(--up,#26a69a); } .irow .chg.down { color: var(--down,#ef5350); }
+.irow .sell { color: var(--down,#ef5350); } .irow .buy { color: var(--up,#26a69a); }
+.sym { display: flex; align-items: center; gap: 7px; font-weight: 600; overflow: hidden; }
+.symtxt { white-space: nowrap; } .symtxt small { color: var(--muted,#6b7688); font-weight: 400; font-size: 10px; }
+.coinwrap { position: relative; width: 18px; height: 18px; flex: 0 0 18px; border-radius: 50%; overflow: hidden; }
+.coinbadge { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 9px; font-weight: 700; }
+.coin { position: absolute; inset: 0; width: 100%; height: 100%; }
+.irow .symtxt small { display: inline; }
+.watch__head, .irow { grid-template-columns: var(--watch-cols, 18px 1.55fr .82fr .85fr .85fr .7fr .85fr); }
+.watch.hide-change .c-change, .watch.hide-sell .c-sell, .watch.hide-buy .c-buy,
+.watch.hide-spread .c-spread, .watch.hide-high .c-high { display: none; }
+`;
+  if (!document.getElementById('watchlist-css')) {
+    const s = document.createElement('style'); s.id = 'watchlist-css'; s.textContent = CSS;
+    document.head.appendChild(s);
+  }
+
   const STAR = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 2l1.8 3.9 4.2.4-3.2 2.9.9 4.1L8 11.3 4.3 13.2l.9-4.1L2 6.3l4.2-.4z" stroke-linejoin="round"/></svg>';
 
   /** Колонки: ключ → ширина трека в CSS-гриде. Порядок задаёт порядок в строке. */
