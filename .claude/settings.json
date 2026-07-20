@@ -11,7 +11,9 @@
       "Bash(curl -s http://localhost:8888/pending -H \"Authorization: Bearer alice-token\")",
       "Bash(curl -s http://localhost:8888/account -H 'Authorization: Bearer alice-token')",
       "Bash(echo \"ДО: $\\(curl -s http://localhost:8888/account -H 'Authorization: Bearer alice-token'\\)\")",
-      "Bash(git commit -q -m 'docs: персистентность выполнена — актуализированы STATUS и приоритеты *)"
+      "Bash(git commit -q -m 'docs: персистентность выполнена — актуализированы STATUS и приоритеты *)",
+      "Bash(node --check trades.js)",
+      "Bash(MSYS_NO_PATHCONV=1 timeout 150 docker run --rm --add-host=host.docker.internal:host-gateway mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && cat > t.mjs <<\"EOF\" *)"
     ]
   }
 }

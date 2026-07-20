@@ -222,8 +222,16 @@ const panel = Positions.mount(document.getElementById('bottom'), {
   signals: () => computeSignals(),
   interval: 1500,
 });
+const trades = Trades.mount(document.getElementById('trades'), {
+  instrument: () => selected,
+  decimals: (id) => ({ pd: pdec(id), qd: qdec(id) }),
+  // «Мои сделки» — по выбранному инструменту; общая история живёт в нижней панели.
+  myTrades: async (id) => ((await api.closedDeals()) || []).filter((d) => d.instrument === id),
+  fmtUsd: usd,
+  interval: 2500,
+});
 // Монтируется последним: его первый refresh выбирает инструмент, а selectInstrument
-// обращается к book/stats/panel — они должны уже существовать.
+// обращается к book/stats/panel/trades — они должны уже существовать.
 const watchlist = Watchlist.mount(document.querySelector('.watch'), {
   fetch: () => api.instruments(),
   instrument: () => selected,
@@ -231,7 +239,7 @@ const watchlist = Watchlist.mount(document.querySelector('.watch'), {
   onSelect: (id) => selectInstrument(id),
   interval: 1000,
 });
-async function selectInstrument(id) { selected = id; watchlist.setActive(id); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.refresh(); stats.refresh(); }
+async function selectInstrument(id) { selected = id; watchlist.setActive(id); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.refresh(); stats.refresh(); trades.clearTape(); trades.refreshMine(); }
 document.getElementById('tfs').addEventListener('click', (e) => { const btn = e.target.closest('button'); if (!btn) return; tf = +btn.dataset.tf; document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
 
 // ============================ Toolbar (dropdowns) ==========================
@@ -290,10 +298,12 @@ bindCol('cChange', 'change'); bindCol('cSell', 'sell'); bindCol('cBuy', 'buy'); 
 // Замер по всем 30 строкам: 360px → 30 обрезанных ячеек, 400 → 6, 440 → 3, полный ноль только
 // при 520px. 520 отдаёт списку 40% экрана и душит график, поэтому берём 440 как баланс.
 // Сохранённый пользователем размер (localStorage) имеет приоритет над этим дефолтом.
-const layout = Object.assign({ leftW: 440, rightW: 300, bottomH: 190, toolbarH: 42 }, JSON.parse(localStorage.getItem('layout') || '{}'));
+const layout = Object.assign({ leftW: 300, rightW: 340, bottomH: 190, toolbarH: 42, dealH: 150, tradesH: 240 }, JSON.parse(localStorage.getItem('layout') || '{}'));
 function applyLayout() {
   document.querySelector('.grid').style.gridTemplateColumns = `${layout.leftW}px 6px 1fr 6px ${layout.rightW}px`;
   document.querySelector('.bottom').style.height = layout.bottomH + 'px';
+  document.querySelector('.deal').style.height = layout.dealH + 'px';
+  document.getElementById('trades').style.height = layout.tradesH + 'px';
   // minHeight, а не height: тулбар должен иметь право вырасти, когда кнопки не влезли
   // в одну строку. Жёсткая высота выталкивала их поверх панели метрик (BUG-010).
   document.querySelector('.toolbar').style.minHeight = layout.toolbarH + 'px';
@@ -301,11 +311,13 @@ function applyLayout() {
 function initResizers() {
   document.querySelectorAll('[data-rsz]').forEach((h) => h.addEventListener('mousedown', (e) => {
     e.preventDefault(); h.classList.add('drag');
-    const type = h.dataset.rsz, sx = e.clientX, sy = e.clientY, sl = layout.leftW, sr = layout.rightW, sb = layout.bottomH, stH = layout.toolbarH;
+    const type = h.dataset.rsz, sx = e.clientX, sy = e.clientY, sl = layout.leftW, sr = layout.rightW, sb = layout.bottomH, stH = layout.toolbarH, sd = layout.dealH, str = layout.tradesH;
     const mv = (ev) => {
       if (type === 'left') layout.leftW = Math.min(520, Math.max(180, sl + (ev.clientX - sx)));
       else if (type === 'right') layout.rightW = Math.min(560, Math.max(220, sr - (ev.clientX - sx)));
-      else if (type === 'bottom') layout.bottomH = Math.min(window.innerHeight - 220, Math.max(80, sb - (ev.clientY - sy)));
+      else if (type === 'bottom') layout.bottomH = Math.min(window.innerHeight - 320, Math.max(80, sb - (ev.clientY - sy)));
+      else if (type === 'deal') layout.dealH = Math.min(340, Math.max(90, sd - (ev.clientY - sy)));
+      else if (type === 'trades') layout.tradesH = Math.min(window.innerHeight - 260, Math.max(90, str - (ev.clientY - sy)));
       else layout.toolbarH = Math.min(140, Math.max(40, stH + (ev.clientY - sy)));
       applyLayout();
     };
@@ -321,7 +333,7 @@ document.addEventListener('mouseover', (e) => { const t = e.target.closest('[dat
 document.addEventListener('mouseout', (e) => { if (e.target.closest('[data-tip]')) tip.classList.add('hidden'); });
 
 // ============================ WebSocket ====================================
-function connectWS() { const proto = location.protocol === 'https:' ? 'wss' : 'ws'; const ws = new WebSocket(`${proto}://${location.host}/stream`); const st = document.getElementById('status'); ws.onopen = () => { st.className = 'status status--on'; }; ws.onclose = () => { st.className = 'status status--off'; setTimeout(connectWS, 1500); }; ws.onmessage = (ev) => { let e; try { e = JSON.parse(ev.data); } catch { return; } for (const x of e) if (x.type === 'trade') onLiveTrade(x.instrument, x.price, x.qty); }; }
+function connectWS() { const proto = location.protocol === 'https:' ? 'wss' : 'ws'; const ws = new WebSocket(`${proto}://${location.host}/stream`); const st = document.getElementById('status'); ws.onopen = () => { st.className = 'status status--on'; }; ws.onclose = () => { st.className = 'status status--off'; setTimeout(connectWS, 1500); }; ws.onmessage = (ev) => { let e; try { e = JSON.parse(ev.data); } catch { return; } for (const x of e) if (x.type === 'trade') { onLiveTrade(x.instrument, x.price, x.qty); trades.pushMarket(x); } }; }
 
 // ============================ Order form ===================================
 document.getElementById('tabDeal').addEventListener('click', () => setMode('market'));

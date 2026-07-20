@@ -38,7 +38,15 @@ button { font-family: inherit; }
 .status--on { color: var(--up); }
 
 /* Сетка (с ресайзерами) */
-.grid { display: grid; grid-template-columns: 280px 6px 1fr 6px 300px; height: calc(100vh - 52px); }
+/* Раскладка: слева стакан, по центру график + форма сделки под ним,
+   справа монеты и сделки по инструменту, во всю ширину снизу — ордера/история. */
+.app { display: flex; flex-direction: column; height: calc(100vh - 52px); }
+.grid { display: grid; grid-template-columns: 280px 6px 1fr 6px 320px; flex: 1; min-height: 0; }
+.col-book { background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.col-right { background: var(--panel); border-left: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+/* Список монет теперь справа — его собственная разделительная линия слева не нужна. */
+.col-right .watch { flex: 1; min-height: 0; border-right: none; }
+#trades { flex: 0 0 auto; min-height: 0; }
 .rsz-v { cursor: col-resize; background: transparent; transition: background .12s; }
 .rsz-v:hover, .rsz-v.drag { background: var(--accent); }
 .rsz-h { cursor: row-resize; height: 6px; background: transparent; transition: background .12s; flex: 0 0 6px; }
@@ -115,7 +123,7 @@ button { font-family: inherit; }
 .tape .t .tm { color: var(--muted); }
 
 /* Панель сделки */
-.deal { background: var(--panel); border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+.deal { background: var(--panel); border-top: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
 .deal__tabs { display: flex; }
 .deal__tabs button { flex: 1; background: var(--panel2); border: none; border-bottom: 2px solid transparent; color: var(--muted);
   padding: 12px; cursor: pointer; font-weight: 700; font-size: 11px; letter-spacing: .5px; }
@@ -138,8 +146,18 @@ button { font-family: inherit; }
 .dealmsg { min-height: 16px; font-size: 11px; text-align: center; }
 /* Размещение виджета стакана в правой панели — зона страницы-хоста; внутренний вид
    стакана живёт в самом orderbook.js (ADR-015). */
-.deal { overflow: hidden; }
-.deal__book { display: flex; flex-direction: column; border-top: 1px solid var(--border); flex: 1; min-height: 120px; }
+/* Форма сделки под графиком — раскладываем в строку, чтобы не съедать высоту графика. */
+.deal { overflow: hidden; flex: 0 0 auto; }
+.deal__body { flex-direction: row; align-items: flex-end; flex-wrap: wrap; padding: 10px 12px; gap: 10px; overflow-x: auto; }
+.deal__body > * { flex: 0 0 auto; }
+.deal__body .lotrow { width: 150px; }
+.deal__body .pricerow, .deal__body .sltp { min-width: 150px; }
+.deal__body .sltp { width: 220px; }
+.deal__body .orderbtn { min-width: 150px; margin: 0; }
+.deal__body #sizeEq { min-width: 90px; }
+.deal__body .dealmsg { flex: 1 0 100%; text-align: left; }
+.deal__tabs { flex: 0 0 auto; }
+.deal__sym { padding: 8px 12px; }
 
 /* ================= UI v2 (icons, coins, toggles, settings, tooltip) ======== */
 .ic svg { width: 17px; height: 17px; }
