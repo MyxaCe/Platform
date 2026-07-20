@@ -60,7 +60,7 @@
       // ---- Публичные данные (без авторизации) ----------------------------
       instruments: () => read('/instruments'),
       candles: (id, tf, limit) => read(`/candles/${id}?tf=${tf}&limit=${limit}`),
-      depth: (id) => read(`/depth/${id}`),
+      depth: (id, limit) => read(`/depth/${id}${limit ? `?limit=${limit}` : ''}`),
       stats: (id) => read(`/stats/${id}`),
 
       // ---- Счёт пользователя ---------------------------------------------

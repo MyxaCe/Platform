@@ -202,7 +202,7 @@ function updateDealPanel() {
 // ---- Виджеты (ADR-015): страница даёт контейнер, зависимости идут через ctx --
 const book = OrderBook.mount(document.getElementById('book'), {
   instrument: () => selected,
-  fetch: (id) => api.depth(id),
+  fetch: (id, limit) => api.depth(id, limit),
   onPick: (price) => { setMode('limit'); const inp = document.getElementById('price'); inp.value = price; inp.classList.add('flash'); setTimeout(() => inp.classList.remove('flash'), 400); },
   // Подписи колонок и марк-цена — из данных инструмента, которыми владеет хост.
   symbols: (id) => { const [base, quote] = (META[id]?.symbol || '-').split('-'); return { base, quote }; },

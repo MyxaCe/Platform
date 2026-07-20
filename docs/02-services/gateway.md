@@ -32,7 +32,7 @@ docker compose down              # остановить
 | POST | `/admin/deposit` | — (dev) | пополнить счёт `{user_id, asset, amount}` |
 | GET | `/instruments` | — | список пар с `last/change/bid/ask/high/decimals` |
 | GET | `/candles/{instrument}?tf=SEC&limit=N` | — | свечи OHLCV таймфрейма |
-| GET | `/depth/{instrument}` | — | стакан (order book) с Binance, кэш ~400мс |
+| GET | `/depth/{instrument}?limit=N` | — | стакан с Binance, кэш ~400мс по (инструмент, глубина); N округляется вверх до набора Binance (20/50/100/500/1000) |
 | GET | `/stats/{instrument}` | — | изменение (%) по таймфреймам 1m…1w, кэш ~3с |
 | POST | `/orders` | Bearer | разместить `{instrument, side, type, price?, qty, tif?}` → `{order_id, events}` |
 | DELETE | `/orders/{id}?instrument=N` | Bearer | отменить |

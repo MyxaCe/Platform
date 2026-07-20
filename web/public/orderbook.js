@@ -61,6 +61,9 @@
 
 .ob__side { flex: 1 1 0; overflow: hidden; display: flex; flex-direction: column; min-height: 0; position: relative; }
 .ob__side.asks { justify-content: flex-end; }
+/* В одностороннем режиме вторая сторона убирается совсем, иначе она держала бы
+   половину высоты пустой, и книга занимала бы только половину области. */
+.ob__side.off { display: none; }
 .brow { position: relative; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; padding: 2px 10px;
   font-variant-numeric: tabular-nums; font-size: 11px; cursor: pointer; }
 .brow:hover { background: rgba(255,255,255,.04); }
@@ -155,17 +158,19 @@
       const t = e.target;
       if (t.dataset.k) cfg[t.dataset.k] = t.checked;
       if (t.dataset.d && t.checked) cfg.depth = t.dataset.d;
-      save(); applyCfg(); render();
+      save(); reload();
     });
     root.querySelectorAll('.ob__mode').forEach((b) => b.addEventListener('click', () => {
-      cfg.mode = b.dataset.m; save(); applyCfg(); render();
+      cfg.mode = b.dataset.m; save(); reload();
     }));
-    elGroup.addEventListener('change', () => { cfg.groupMul = +elGroup.value; save(); render(); });
+    elGroup.addEventListener('change', () => { cfg.groupMul = +elGroup.value; save(); reload(); });
 
     function applyCfg() {
       elMenu.querySelectorAll('[data-k]').forEach((i) => { i.checked = !!cfg[i.dataset.k]; });
       elMenu.querySelectorAll('[data-d]').forEach((i) => { i.checked = cfg.depth === i.dataset.d; });
       root.querySelectorAll('.ob__mode').forEach((b) => b.classList.toggle('active', b.dataset.m === cfg.mode));
+      elAsks.classList.toggle('off', cfg.mode === 'bids');
+      elBids.classList.toggle('off', cfg.mode === 'asks');
       root.classList.toggle('ob--anim', !!cfg.anim);
       elRatio.classList.toggle('hidden', !cfg.ratio);
       elGroup.style.display = cfg.rounding ? '' : 'none';
@@ -173,7 +178,10 @@
 
     // ---- Данные -------------------------------------------------------------
     let last = null;        // последний ответ /depth
-    let prevMid = null;     // для стрелки направления
+    let prevMid = null;     // предыдущая середина
+    // Направление «липкое»: цвет держится до следующего изменения цены. Иначе между
+    // опросами цена часто совпадает, класс снимался и строка была белой почти всегда.
+    let dir = null;
 
     /** Свести уровни к шагу `step` (в raw-единицах цены). */
     function group(list, step, isBid) {
@@ -197,7 +205,7 @@
 
       const asksAll = group(d.asks, step, false);
       const bidsAll = group(d.bids, step, true);
-      const n = cfg.mode === 'both' ? levels : levels * 2;
+      const n = cfg.mode === 'both' ? levels : levels * 2; // одна сторона — вдвое больше строк
       const asks = cfg.mode === 'bids' ? [] : asksAll.slice(0, n);
       const bids = cfg.mode === 'asks' ? [] : bidsAll.slice(0, n);
 
@@ -235,10 +243,11 @@
       const bb = bidsAll[0]?.[0], ba = asksAll[0]?.[0];
       if (bb && ba) {
         const mid = (bb + ba) / 2 / ps;
+        if (prevMid != null && mid !== prevMid) dir = mid > prevMid ? 'up' : 'down';
+        if (mid !== prevMid) prevMid = mid;
         elLast.textContent = mid.toFixed(pd);
-        elLast.classList.toggle('up', prevMid != null && mid > prevMid);
-        elLast.classList.toggle('down', prevMid != null && mid < prevMid);
-        prevMid = mid;
+        elLast.classList.toggle('up', dir === 'up');
+        elLast.classList.toggle('down', dir === 'down');
         elSpread.textContent = `spread ${((ba - bb) / ps).toFixed(pd)}`;
       } else {
         elLast.textContent = '—'; elSpread.textContent = '';
@@ -274,13 +283,24 @@
       if (r && r.dataset.p && ctx.onPick) ctx.onPick(r.dataset.p);
     });
 
+    /** Сколько уровней просить у сервера: грубый шаг группировки съедает их пачками,
+     *  а односторонний режим показывает вдвое больше строк. */
+    function needLevels() {
+      const rows = cfg.mode === 'both' ? levels : levels * 2;
+      const mul = cfg.rounding ? cfg.groupMul : 1;
+      return Math.min(1000, Math.max(20, rows * mul));
+    }
+
     async function refresh() {
       const id = ctx.instrument(); if (id == null) return;
-      let d; try { d = await ctx.fetch(id); } catch { return; }
+      let d; try { d = await ctx.fetch(id, needLevels()); } catch { return; }
       if (!d || !d.asks) return;
       last = d;
       render();
     }
+
+    /** Настройка изменилась — перечитать с нужной глубиной, а не ждать тика. */
+    function reload() { applyCfg(); refresh(); }
 
     applyCfg();
     refresh();
@@ -288,7 +308,7 @@
     return {
       refresh,
       /** Смена инструмента: стрелка направления от чужой цены смысла не имеет. */
-      reset() { prevMid = null; last = null; },
+      reset() { prevMid = null; dir = null; last = null; },
       destroy() { if (timer) clearInterval(timer); root.innerHTML = ''; },
     };
   }

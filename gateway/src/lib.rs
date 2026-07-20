@@ -73,8 +73,8 @@ impl UserRegistry {
 
 /// Кэш свечей: (инструмент, таймфрейм) → (время загрузки, свечи).
 type KlineCache = HashMap<(u32, u32), (Instant, Vec<feed::Kline>)>;
-/// Кэш стакана: инструмент → (время, глубина).
-type DepthCache = HashMap<u32, (Instant, feed::Depth)>;
+/// Кэш стакана: (инструмент, запрошенная глубина) → (время, стакан).
+type DepthCache = HashMap<(u32, usize), (Instant, feed::Depth)>;
 /// Кэш статистики: инструмент → (время, изменения по таймфреймам).
 type StatsCache = HashMap<u32, (Instant, Vec<StatDto>)>;
 
@@ -396,6 +396,12 @@ struct DepthResp {
     bids: Vec<(i64, i64)>,
     asks: Vec<(i64, i64)>,
 }
+/// Глубина стакана, запрошенная клиентом (зависит от его шага группировки).
+#[derive(Deserialize)]
+struct DepthQuery {
+    limit: Option<usize>,
+}
+
 #[derive(Serialize, Clone)]
 struct StatDto {
     tf: u32,
@@ -537,22 +543,32 @@ fn tail_dto(v: &[feed::Kline], limit: usize) -> Vec<CandleDto> {
 }
 
 /// Стакан (order book) с Binance, кэш ~400мс.
-async fn get_depth(State(st): State<AppState>, Path(id): Path<u32>) -> Json<DepthResp> {
+async fn get_depth(State(st): State<AppState>, Path(id): Path<u32>, Query(q): Query<DepthQuery>) -> Json<DepthResp> {
     let Some(fi) = st.feed_instruments.iter().find(|f| f.id == id).cloned() else {
         return Json(DepthResp { price_decimals: 2, qty_decimals: 3, bids: vec![], asks: vec![] });
     };
+    // Клиент просит глубину под свой шаг группировки: при грубом шаге 20 уровней
+    // схлопываются в 2-3 строки и стакан выглядит полупустым. Binance принимает
+    // только фиксированный набор значений — округляем вверх до ближайшего.
+    let limit = match q.limit.unwrap_or(20) {
+        0..=20 => 20,
+        21..=50 => 50,
+        51..=100 => 100,
+        101..=500 => 500,
+        _ => 1000,
+    };
     {
         let cache = st.depth_cache.lock().await;
-        if let Some((t, d)) = cache.get(&id) {
+        if let Some((t, d)) = cache.get(&(id, limit)) {
             if t.elapsed() < Duration::from_millis(400) {
                 return Json(DepthResp { price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals, bids: d.bids.clone(), asks: d.asks.clone() });
             }
         }
     }
-    match feed::fetch_depth(&fi.binance, 20, fi.price_decimals, fi.qty_decimals).await {
+    match feed::fetch_depth(&fi.binance, limit, fi.price_decimals, fi.qty_decimals).await {
         Ok(d) => {
             let resp = DepthResp { price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals, bids: d.bids.clone(), asks: d.asks.clone() };
-            st.depth_cache.lock().await.insert(id, (Instant::now(), d));
+            st.depth_cache.lock().await.insert((id, limit), (Instant::now(), d));
             Json(resp)
         }
         Err(_) => Json(DepthResp { price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals, bids: vec![], asks: vec![] }),
