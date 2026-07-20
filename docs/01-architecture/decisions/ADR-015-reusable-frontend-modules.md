@@ -59,15 +59,13 @@ const handle = Widget.mount(rootEl, ctx);   // rootEl — точка монти�
   `index.html` отдаёт пустой `<aside class="watch">`. Цены форматирует сам по `price_decimals` из
   данных, поэтому внешний форматтер в `ctx` не понадобился.
 
-Порядок подключения: `lightweight-charts` → `api.js` → `indicators.js` → `orderbook.js` →
-`stats.js` → `watchlist.js` → `app.js` → `drawings.js`.
+Порядок подключения (актуальный): `lightweight-charts` → `api.js` → `indicators.js` → `orderbook.js`
+→ `stats.js` → `watchlist.js` → `positions.js` → `drawings.js` → `app.js`. Все модули загружаются до
+`app.js`: он композитор и монтирует их.
 
 Замечание по порядку монтирования: виджет, чей `ctx.onSelect` дёргает соседей, монтируется
 последним. `watchlist` при первом обновлении выбирает инструмент, а обработчик выбора обращается к
-`book`/`stats` — они должны быть созданы раньше.
-
-Осталось вынести: панель сделки, нижние вкладки, клиент-фид (WS + интервалы), лейаут/настройки,
-график и `drawings.js` (он контракту пока не соответствует).
+`book`/`stats`/`panel` — они должны быть созданы раньше.
 
 ## Стили едут вместе с модулем (2026-07-20)
 
