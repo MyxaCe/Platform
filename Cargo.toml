@@ -3,4 +3,4 @@
 # orchestrator — путь ордера; marketdata — свечи; broker — бумажный брокер; gateway — сетевой шлюз.
 [workspace]
 resolver = "2"
-members = ["domain", "core", "ledger", "orchestrator", "marketdata", "broker", "gateway"]
+members = ["domain", "core", "ledger", "orchestrator", "marketdata", "broker", "persistence", "gateway"]

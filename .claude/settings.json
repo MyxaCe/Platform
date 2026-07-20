@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git commit -q -m ' *)"
+      "Bash(git commit -q -m ' *)",
+      "Bash(curl -s -X POST http://localhost:8888/deals -H \"Authorization: Bearer alice-token\" -H \"content-type: application/json\" -d '{\"instrument\":1,\"side\":\"buy\",\"qty\":1000}')",
+      "Bash(curl -s http://localhost:8888/account -H \"Authorization: Bearer alice-token\")",
+      "Bash(curl -s -X POST \"http://localhost:8888/deals/1/close\" -H \"Authorization: Bearer alice-token\")"
     ]
   }
 }

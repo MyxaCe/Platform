@@ -27,6 +27,10 @@ use domain::money::{Amount, Price, Qty};
 use domain::order::{OrderId, Side, TimeInForce};
 
 use broker::{Broker, PosSide};
+use persistence::{NoopStore, Persistence};
+
+/// Реэкспорт: тестам и бинарю нужен трейт хранилища, чтобы подставить свою реализацию.
+pub use persistence;
 use exchange_core::Event;
 use orchestrator::{OrderReject, Orchestrator};
 
@@ -47,6 +51,12 @@ impl UserRegistry {
     }
     pub fn resolve(&self, token: &str) -> Option<UserId> {
         self.by_token.get(token).copied()
+    }
+    /// Восстановить пользователя из хранилища на старте (ADR-016). `next` держим выше
+    /// максимального загруженного id, иначе новый пользователь получил бы занятый id.
+    pub fn restore(&mut self, token: String, id: UserId) {
+        self.next = self.next.max(id.0);
+        self.by_token.insert(token, id);
     }
 }
 
@@ -74,9 +84,18 @@ pub struct AppState {
     stats_cache: Arc<Mutex<StatsCache>>,
     // Бумажный брокер (ADR-014):
     broker: Arc<Mutex<Broker>>,
+    // Durable-хранилище (ADR-016). Память — рабочее состояние, хранилище — источник
+    // восстановления; сам брокер о БД не знает.
+    store: Arc<dyn Persistence>,
 }
 
 pub fn build_state() -> AppState {
+    build_state_with(Arc::new(NoopStore))
+}
+
+/// Собрать состояние с конкретным хранилищем. `NoopStore` = поведение до ADR-016
+/// (всё в памяти) — на нём работают существующие тесты и запуск без БД.
+pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
     let (events_tx, _rx) = broadcast::channel(4096);
     AppState {
         orch: Arc::new(Mutex::new(Orchestrator::new())),
@@ -89,7 +108,52 @@ pub fn build_state() -> AppState {
         depth_cache: Arc::new(Mutex::new(HashMap::new())),
         stats_cache: Arc::new(Mutex::new(HashMap::new())),
         broker: Arc::new(Mutex::new(Broker::new(10_000_000, 1))), // старт $100k, leverage 1
+        store,
     }
+}
+
+/// Поднять состояние из хранилища. Вызывается один раз на старте, до приёма запросов.
+pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError> {
+    st.store.init().await?;
+    let loaded = st.store.load_all().await?;
+    let (users_n, accounts_n) = (loaded.users.len(), loaded.accounts.len());
+    {
+        let mut reg = st.users.lock().await;
+        for (id, token) in loaded.users {
+            reg.restore(token, id);
+        }
+    }
+    {
+        let mut b = st.broker.lock().await;
+        for (id, snap) in loaded.accounts {
+            b.restore(id, snap);
+        }
+    }
+    // Красная линия №5: инварианты денег проверяются в рантайме, нарушение = стоп.
+    let broken = st.store.check_invariants().await?;
+    if !broken.is_empty() {
+        return Err(persistence::StoreError(format!("нарушены инварианты: {}", broken.join("; "))));
+    }
+    if users_n + accounts_n > 0 {
+        println!("[gateway] восстановлено из хранилища: пользователей {users_n}, счетов {accounts_n}");
+    }
+    Ok(())
+}
+
+/// Сохранить счёт после мутации (ADR-016).
+///
+/// Дисциплина: мутация уже сделана и **лок отпущен** — `fsync`/сеть под локом
+/// заблокировали бы торговлю всех пользователей. Если запись не прошла, счёт
+/// возвращается к слепку `before` и наверх идёт `503`: клиент не увидит `200`
+/// по операции, которой нет на диске.
+async fn persist_account(st: &AppState, user: UserId, before: broker::AccountSnapshot) -> Result<(), ApiErr> {
+    let snap = { st.broker.lock().await.snapshot(user) };
+    if let Err(e) = st.store.save_account(user, &snap).await {
+        st.broker.lock().await.restore(user, before);
+        eprintln!("[gateway] запись состояния не удалась, счёт откачен: {e}");
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable"));
+    }
+    Ok(())
 }
 
 /// Текущие марк-цены (инструмент → last) из фида — для P&L/equity брокера.
@@ -366,8 +430,13 @@ async fn authed(st: &AppState, headers: &HeaderMap) -> Result<UserId, ApiErr> {
 }
 
 async fn create_user(State(st): State<AppState>, Json(req): Json<CreateUserReq>) -> Result<Json<CreateUserResp>, ApiErr> {
-    let mut users = st.users.lock().await;
-    Ok(Json(CreateUserResp { user_id: users.create(req.token).0 }))
+    let token = req.token.clone();
+    let id = { st.users.lock().await.create(req.token) };
+    if let Err(e) = st.store.save_user(id, &token).await {
+        eprintln!("[gateway] не удалось сохранить пользователя: {e}");
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable"));
+    }
+    Ok(Json(CreateUserResp { user_id: id.0 }))
 }
 
 async fn deposit(State(st): State<AppState>, Json(req): Json<DepositReq>) -> Result<Json<BalanceResp>, ApiErr> {
@@ -570,11 +639,15 @@ async fn open_deal(State(st): State<AppState>, headers: HeaderMap, Json(req): Js
         let t = tickers.get(&req.instrument).ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "no price yet"))?;
         (if matches!(side, PosSide::Long) { t.ask } else { t.bid }, t.last)
     };
-    let id = {
+    let (id, before) = {
         let mut b = st.broker.lock().await;
-        b.open(user, req.instrument, side, req.qty, entry, fi.price_decimals, fi.qty_decimals, req.sl, req.tp)
-            .map_err(|_| err(StatusCode::PAYMENT_REQUIRED, "insufficient_margin"))?
+        let before = b.snapshot(user);
+        let id = b.open(user, req.instrument, side, req.qty, entry, fi.price_decimals, fi.qty_decimals, req.sl, req.tp)
+            .map_err(|_| err(StatusCode::PAYMENT_REQUIRED, "insufficient_margin"))?;
+        (id, before)
     };
+    // Ответ уходит только после успешной записи: клиент увидел 200 → данные на диске.
+    persist_account(&st, user, before).await?;
     Ok(Json(DealDto {
         id, instrument: req.instrument, symbol: fi.symbol, side: req.side, qty: req.qty, entry, mark, pnl: 0,
         sl: req.sl, tp: req.tp, price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals,
@@ -593,7 +666,13 @@ async fn place_pending(State(st): State<AppState>, headers: HeaderMap, Json(req)
         return Err(err(StatusCode::BAD_REQUEST, "qty and price must be > 0"));
     }
     let fi = feed_by_id(&st, req.instrument).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
-    let id = st.broker.lock().await.place_pending(user, req.instrument, side, req.qty, req.price, fi.price_decimals, fi.qty_decimals, req.sl, req.tp);
+    let (id, before) = {
+        let mut b = st.broker.lock().await;
+        let before = b.snapshot(user);
+        let id = b.place_pending(user, req.instrument, side, req.qty, req.price, fi.price_decimals, fi.qty_decimals, req.sl, req.tp);
+        (id, before)
+    };
+    persist_account(&st, user, before).await?;
     Ok(Json(PendingDto {
         id, instrument: req.instrument, symbol: fi.symbol, side: req.side, qty: req.qty, price: req.price,
         sl: req.sl, tp: req.tp, price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals,
@@ -617,7 +696,13 @@ async fn list_pending(State(st): State<AppState>, headers: HeaderMap) -> Result<
 
 async fn cancel_pending(State(st): State<AppState>, headers: HeaderMap, Path(id): Path<u64>) -> Result<StatusCode, ApiErr> {
     let user = authed(&st, &headers).await?;
-    st.broker.lock().await.cancel_pending(user, id).map_err(|_| err(StatusCode::NOT_FOUND, "unknown pending"))?;
+    let before = {
+        let mut b = st.broker.lock().await;
+        let before = b.snapshot(user);
+        b.cancel_pending(user, id).map_err(|_| err(StatusCode::NOT_FOUND, "unknown pending"))?;
+        before
+    };
+    persist_account(&st, user, before).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -644,8 +729,23 @@ pub fn spawn_monitor(st: AppState) {
         loop {
             tick.tick().await;
             let m = marks(&st).await;
-            if !m.is_empty() {
-                st.broker.lock().await.check(&m);
+            if m.is_empty() {
+                continue;
+            }
+            // Сохраняем только счета, которые реально изменились: обычный тик ничего
+            // не триггерит и записи не делает (ADR-016). Слепки снимаем под тем же
+            // локом, пишем — уже без него.
+            let snaps = {
+                let mut b = st.broker.lock().await;
+                b.check(&m).into_iter().map(|u| (u, b.snapshot(u))).collect::<Vec<_>>()
+            };
+            for (user, snap) in snaps {
+                if let Err(e) = st.store.save_account(user, &snap).await {
+                    // Откатывать нечего: триггер уже применён к рабочему состоянию.
+                    // Потеря ограничена последним тиком — после перезапуска несработавшие
+                    // триггеры сработают снова по актуальным ценам (ADR-016).
+                    eprintln!("[monitor] не удалось сохранить счёт {}: {e}", user.0);
+                }
             }
         }
     });
@@ -677,13 +777,18 @@ async fn list_deals(State(st): State<AppState>, headers: HeaderMap) -> Result<Js
 async fn close_deal(State(st): State<AppState>, headers: HeaderMap, Path(id): Path<u64>) -> Result<Json<serde_json::Value>, ApiErr> {
     let user = authed(&st, &headers).await?;
     let m = marks(&st).await;
-    let mut b = st.broker.lock().await;
-    let inst = b.positions(user).into_iter().find(|p| p.id == id).map(|p| p.instrument);
-    let Some(inst) = inst else {
-        return Err(err(StatusCode::NOT_FOUND, "unknown position"));
+    let (pnl, mark, before) = {
+        let mut b = st.broker.lock().await;
+        let inst = b.positions(user).into_iter().find(|p| p.id == id).map(|p| p.instrument);
+        let Some(inst) = inst else {
+            return Err(err(StatusCode::NOT_FOUND, "unknown position"));
+        };
+        let mark = *m.get(&inst).unwrap_or(&0);
+        let before = b.snapshot(user);
+        let pnl = b.close(user, id, mark).map_err(|_| err(StatusCode::NOT_FOUND, "unknown position"))?;
+        (pnl, mark, before)
     };
-    let mark = *m.get(&inst).unwrap_or(&0);
-    let pnl = b.close(user, id, mark).map_err(|_| err(StatusCode::NOT_FOUND, "unknown position"))?;
+    persist_account(&st, user, before).await?;
     Ok(Json(serde_json::json!({ "pnl": pnl, "mark": mark })))
 }
 

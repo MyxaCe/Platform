@@ -109,3 +109,52 @@ async fn market_buy_via_api() {
     assert_eq!(status, StatusCode::OK);
     assert!(has_trade(&body["events"]));
 }
+
+// ---- Персистентность (ADR-016) --------------------------------------------
+
+/// Хранилище, которое всегда падает на записи — проверяем дисциплину отката.
+struct FailingStore;
+
+#[async_trait::async_trait]
+impl gateway::persistence::Persistence for FailingStore {
+    async fn init(&self) -> Result<(), gateway::persistence::StoreError> {
+        Ok(())
+    }
+    async fn load_all(&self) -> Result<gateway::persistence::LoadedState, gateway::persistence::StoreError> {
+        Ok(gateway::persistence::LoadedState::default())
+    }
+    async fn save_account(&self, _u: domain::account::UserId, _s: &broker::AccountSnapshot) -> Result<(), gateway::persistence::StoreError> {
+        Err(gateway::persistence::StoreError("disk on fire".into()))
+    }
+    async fn save_user(&self, _u: domain::account::UserId, _t: &str) -> Result<(), gateway::persistence::StoreError> {
+        Ok(())
+    }
+}
+
+/// Если запись в хранилище не прошла — клиент получает 503, а состояние счёта
+/// откатывается: ордера, которого нет на диске, не должно быть и в памяти.
+#[tokio::test]
+async fn storage_failure_rolls_back_and_returns_503() {
+    let st = gateway::build_state_with(std::sync::Arc::new(FailingStore));
+    gateway::seed_demo(&st).await;
+    let app = gateway::router(st);
+
+    let body = json!({ "instrument": 1, "side": "buy", "qty": 1000, "price": 5_000_000 });
+    let (status, _) = send(&app, "POST", "/pending", Some("alice-token"), Some(body)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "запись не прошла → 503");
+
+    let (status, list) = send(&app, "GET", "/pending", Some("alice-token"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 0, "ордер откачен, в памяти его нет");
+}
+
+/// С NoopStore поведение прежнее: ордер размещается и виден.
+#[tokio::test]
+async fn noop_store_keeps_previous_behaviour() {
+    let app = app().await;
+    let body = json!({ "instrument": 1, "side": "buy", "qty": 1000, "price": 5_000_000 });
+    let (status, _) = send(&app, "POST", "/pending", Some("alice-token"), Some(body)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, list) = send(&app, "GET", "/pending", Some("alice-token"), None).await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+}
