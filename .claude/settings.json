@@ -10,7 +10,8 @@
       "Bash(curl -s http://localhost:8888/deals -H \"Authorization: Bearer alice-token\")",
       "Bash(curl -s http://localhost:8888/pending -H \"Authorization: Bearer alice-token\")",
       "Bash(curl -s http://localhost:8888/account -H 'Authorization: Bearer alice-token')",
-      "Bash(echo \"ДО: $\\(curl -s http://localhost:8888/account -H 'Authorization: Bearer alice-token'\\)\")"
+      "Bash(echo \"ДО: $\\(curl -s http://localhost:8888/account -H 'Authorization: Bearer alice-token'\\)\")",
+      "Bash(git commit -q -m 'docs: персистентность выполнена — актуализированы STATUS и приоритеты *)"
     ]
   }
 }
