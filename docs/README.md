@@ -1,6 +1,6 @@
 ---
 tags: [moc, home]
-updated: 2026-07-17
+updated: 2026-07-19
 ---
 
 # 🏛️ Platform — База знаний проекта
@@ -18,7 +18,7 @@ updated: 2026-07-17
 > Начни с [[STATUS]] — где мы сейчас и что дальше по приоритетам.
 
 ### Основы
-- [[development-principles]] — **принципы разработки** (красные линии, архитектура, код, тесты, процесс)
+- [[development-principles]] — **принципы разработки** · `accepted` (красные линии, архитектура, код, тесты, процесс)
 - [[how-to-use-these-docs]] — как ведём и структурируем документацию
 
 ### Архитектура
@@ -39,6 +39,8 @@ updated: 2026-07-17
   - [[ADR-012-market-data-and-terminal-ui]] — свечи, несколько пар, терминальный UI · `accepted`
   - [[ADR-013-real-market-data-broker-pivot]] — реальные данные Binance, разворот к брокер-терминалу · `accepted`
   - [[ADR-014-paper-broker]] — бумажный брокер: позиции, маржа, P&L · `accepted`
+  - [[ADR-015-reusable-frontend-modules]] — переиспользуемые фронтенд-модули · `accepted`
+  - [[ADR-016-persistence-postgres]] — персистентность состояния: PostgreSQL · `proposed`
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc

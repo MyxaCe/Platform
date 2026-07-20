@@ -68,8 +68,13 @@ button { font-family: inherit; }
 
 /* Центр */
 .center { display: flex; flex-direction: column; min-width: 0; }
-.toolbar { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--panel); overflow: visible; }
-.tfs button { background: transparent; border: none; color: var(--muted); padding: 6px 8px; cursor: pointer; border-radius: 4px; font-weight: 600; }
+/* Тулбар переносит группы кнопок и РАСТЁТ ВНИЗ. Раньше высота была фиксированной, поэтому
+   не поместившиеся кнопки уезжали вверх, поверх панели метрик (BUG-010). На экране 1280px
+   тулбар не помещается в одну строку в принципе: одни таймфреймы занимают 289px. */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; align-content: center; gap: 8px 8px; min-height: 40px; padding: 4px 12px; border-bottom: 1px solid var(--border); background: var(--panel); overflow: visible; }
+/* Группа таймфреймов не рвётся посередине: переносится целиком на следующую строку тулбара. */
+.tfs { display: flex; flex-wrap: nowrap; flex: 0 0 auto; }
+.tfs button { flex: 0 0 auto; background: transparent; border: none; color: var(--muted); padding: 6px 8px; cursor: pointer; border-radius: 4px; font-weight: 600; }
 .tfs button:hover { color: var(--text); }
 .tfs button.active { background: var(--panel3); color: var(--accent); }
 .tb-sep { width: 1px; height: 20px; background: var(--border); margin: 0 2px; }
@@ -182,6 +187,9 @@ button { font-family: inherit; }
 .sortable.asc i { border-left: 3px solid transparent; border-right: 3px solid transparent; border-bottom: 4px solid var(--accent); }
 .sortable.desc i { border-left: 3px solid transparent; border-right: 3px solid transparent; border-top: 4px solid var(--accent); }
 .irow { font-variant-numeric: tabular-nums; }
+/* Ячейки не должны налезать на соседние колонки: при узкой панели длинные цены
+   выходили за свой трек и сливались с соседями в кашу (BUG-009). */
+.watch__head span, .irow .num, .irow .sym { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .irow .num { text-align: left; color: var(--text); }
 .irow .num.muted { color: var(--muted); }
 .irow .chg.up { color: var(--up); } .irow .chg.down { color: var(--down); }
@@ -260,9 +268,14 @@ button { font-family: inherit; }
 
 /* ================= Drawing tools (chart overlay) ================= */
 .drawlayer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
-.drawtools { position: absolute; left: 7px; top: 50%; transform: translateY(-50%); z-index: 6;
+/* Прижата к верху области графика, а не отцентрована: при центрировании (top:50% +
+   translateY(-50%)) панель, будучи выше своего контейнера, вылезала ВВЕРХ за него и накрывала
+   тулбар — кнопка price type становилась некликабельной (BUG-010). max-height удерживает её
+   внутри графика, лишние кнопки уходят в прокрутку. */
+.drawtools { position: absolute; left: 7px; top: 8px; max-height: calc(100% - 16px); overflow-y: auto; z-index: 6;
   display: flex; flex-direction: column; gap: 2px; padding: 4px; background: rgba(17,23,34,.92);
-  border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.4); }
+  border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.4);
+  scrollbar-width: thin; }
 .drawbtn { width: 27px; height: 27px; display: flex; align-items: center; justify-content: center;
   background: transparent; border: none; border-radius: 6px; color: var(--muted); cursor: pointer; position: relative; }
 .drawbtn:hover { background: var(--panel2); color: var(--text); }

@@ -26,19 +26,8 @@
   </header>
 
   <main class="grid">
-    <aside class="watch">
-      <div class="watch__search"><input id="search" placeholder="Search…" /></div>
-      <div class="watch__title">⭐ POPULAR</div>
-      <div class="watch__head">
-        <span></span><span>INSTR.</span>
-        <span class="sortable c-change" data-sort="change">CHANGE<i></i></span>
-        <span class="sortable c-sell" data-sort="sell">SELL<i></i></span>
-        <span class="sortable c-buy" data-sort="buy">BUY<i></i></span>
-        <span class="sortable c-spread" data-sort="spread">SPREAD<i></i></span>
-        <span class="sortable c-high" data-sort="high">HIGH<i></i></span>
-      </div>
-      <div id="instruments" class="watch__rows"></div>
-    </aside>
+    <!-- Список инструментов строит watchlist.js (ADR-015): страница даёт пустой контейнер. -->
+    <aside class="watch"></aside>
 
     <div class="rsz rsz-v" data-rsz="left"></div>
 
@@ -226,9 +215,11 @@
   </main>
 
   <div id="tip" class="tip hidden"></div>
+  <script src="/api.js"></script>
   <script src="/indicators.js"></script>
   <script src="/orderbook.js"></script>
   <script src="/stats.js"></script>
+  <script src="/watchlist.js"></script>
   <script src="/app.js"></script>
   <script src="/drawings.js"></script>
 </body>

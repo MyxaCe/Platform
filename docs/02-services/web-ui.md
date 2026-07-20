@@ -1,7 +1,7 @@
 ---
 tags: [service, web]
 status: active
-updated: 2026-07-17
+updated: 2026-07-19
 ---
 
 # Web UI (терминал)
@@ -70,6 +70,9 @@ docker compose up --build   # gateway (внутренний) + web (nginx)
 - **Инфо-окно на графике** (legend): символ, ТФ, дата/время, O/H/L/C (обновляется по курсору и вживую).
 - **Список монет:** звёздочка-**избранное** (в localStorage, избранные наверх) + колонки CHANGE/SELL/BUY/SPREAD/**HIGH**.
 - **Метрики и тулбар** растянуты на всю ширину (`space-between`; правая группа тулбара — `margin-left:auto`).
+  Тулбар **переносит группы кнопок и растёт вниз** (`flex-wrap` + `min-height`): на экране 1280px он
+  не помещается в одну строку — одни таймфреймы занимают 289px. Ресайзер задаёт минимальную высоту,
+  а не жёсткую (BUG-010).
 - **Ресайз панелей** перетаскиванием (левая/правая/нижняя; размеры в localStorage).
 - **Кнопки тулбара справа:** Reset (сброс зума на ~90 баров), Fullscreen (Fullscreen API на графике), Settings (⚙).
 - **Настройки** (⚙, в localStorage): Hollow candle color; Candle shadows вкл/выкл + свой цвет теней;
@@ -80,14 +83,28 @@ docker compose up --build   # gateway (внутренний) + web (nginx)
 Модули переиспользуемы: самодостаточны, зависимости инъектируются через контекст, глобалы и id
 страницы под запретом. Контракт виджета — `Widget.mount(rootEl, ctx) → { refresh, destroy }`.
 
+- `api.js` — `Api.create({ token })`: единственная точка доступа к REST. Заголовок авторизации и
+  разбор ответов собраны здесь, а не продублированы по виджетам. Соглашение: чтение → данные или
+  `null` при ошибке (вызывающий оставляет прежние данные на экране); мутация → `{ ok, status, data }`.
+  Ноль DOM. Готовит переход на настоящий auth — правка будет в одном месте.
 - `indicators.js` — `window.Indicators`, ~35 чистых функций (мат. индикаторов). Ноль DOM/глобалов.
 - `orderbook.js` — `OrderBook.mount(el, ctx)`: сам строит стакан, `ctx.instrument()/fetch(id)/onPick`.
 - `stats.js` — `AssetStats.mount(el, ctx)`: статистика по периодам, `ctx.instrument()/fetch(id)/labels`.
-- `drawings.js` — инструменты рисования (оверлей-canvas), через `window.__lw`.
+- `watchlist.js` — `Watchlist.mount(el, ctx)`: список инструментов целиком — поиск, шапка с
+  сортировкой, строки, избранное, видимость колонок. Строит свой DOM (страница даёт пустой
+  `<aside class="watch">`), цены форматирует сам по `price_decimals` из данных. Наружу:
+  `refresh() / setActive(id) / columns() / setColumns(next) / destroy()`; внутрь через ctx —
+  `fetch() / instrument() / onSelect(id) / onData(list) / interval / storagePrefix`.
+- `drawings.js` — инструменты рисования (оверлей-canvas), через `window.__lw`. **Контракту ADR-015
+  пока не соответствует** (тянет глобал, хардкодит id) — в очереди на перенос.
 - `app.js` — тонкий композитор: связывает виджеты через `ctx`, держит общее состояние.
 
-Подключение по порядку: lightweight-charts → indicators → orderbook → stats → app → drawings.
+Подключение по порядку: lightweight-charts → api → indicators → orderbook → stats → watchlist →
+app → drawings.
 **Все новые модули — по этому паттерну; старые переносятся постепенно.** См. [[ADR-015-reusable-frontend-modules]].
+
+Осталось вынести: панель сделки, нижние вкладки (deals/pending/closed/signals), клиент-фид (WS +
+интервалы), лейаут/настройки, график, `drawings.js`.
 
 ## Ограничения / TODO
 

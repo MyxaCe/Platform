@@ -6,11 +6,10 @@ let chartType = 'candles', priceType = 'mid', showPips = false, showSLTP = true,
 const overlays = { sma: 0, ema: 0, wma: 0, supertrend: 0, psar: 0, ichimoku: 0, alligator: 0, boll: 0, keltner: 0, donchian: 0, vwap: 0 };
 let oscillator = '';
 let rawCandles = [], currentDeals = [];
-const rowEls = {};
-let sortKey = null, sortDir = -1;
-const favs = new Set(JSON.parse(localStorage.getItem('favs') || '[]'));
 
 const token = () => document.getElementById('userSel').value;
+// Единственная точка доступа к REST (ADR-015): заголовки и разбор ответов — в api.js.
+const api = Api.create({ token });
 const pdec = (id) => (META[id]?.price_decimals ?? 2);
 const qdec = (id) => (META[id]?.qty_decimals ?? 3);
 const pscale = (id) => 10 ** pdec(id);
@@ -34,15 +33,12 @@ const ICONS = {
   area: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 12 6 7 9 10 14 3V14H2Z" fill="currentColor" fill-opacity=".3" stroke="none"/><polyline points="2 12 6 7 9 10 14 3" stroke-width="1.5"/></svg>',
   indicators: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 10c2-4 4-4 6 0s4 4 6-1"/><path d="M2 6c2-3 4 3 6-1s4-2 6 1" opacity=".5"/></svg>',
   wallet: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2" y="4" width="11.5" height="8.5" rx="1.6"/><path d="M9.6 7.6H13v2.4H9.6a1.2 1.2 0 0 1 0-2.4Z" fill="currentColor" stroke="none"/></svg>',
-  star: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 2l1.8 3.9 4.2.4-3.2 2.9.9 4.1L8 11.3 4.3 13.2l.9-4.1L2 6.3l4.2-.4z" stroke-linejoin="round"/></svg>',
   caret: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6l4 4 4-4"/></svg>',
   reset: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M12.5 8a4.5 4.5 0 1 1-1.3-3.2"/><path d="M12.5 2.5V5H10"/></svg>',
   fullscreen: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>',
   settings: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.6v1.8M8 12.6v1.8M1.6 8h1.8M12.6 8h1.8M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>',
 };
 function renderIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { const n = el.dataset.icon; if (ICONS[n]) el.innerHTML = ICONS[n]; }); }
-function hue(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return h; }
-function coinHtml(b) { return `<span class="coinwrap"><span class="coinbadge" style="background:hsl(${hue(b)} 52% 40%)">${b[0]}</span><img class="coin" src="/vendor/coins/${b.toLowerCase()}.svg" onerror="this.remove()" alt=""></span>`; }
 
 // ---- Legend (chart info card) ---------------------------------------------
 function fmtDT(t) { return new Date(t * 1000).toLocaleString('en-GB', { timeZone: 'UTC', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) + ' UTC'; }
@@ -54,18 +50,6 @@ function updateLegend(id, t, c) {
   document.getElementById('lgOhlc').innerHTML = `O <b>${rf(c.open)}</b>  H <b>${rf(c.high)}</b>  L <b>${rf(c.low)}</b>  C <b class="${c.close >= c.open ? 'up' : 'down'}">${rf(c.close)}</b>`;
 }
 function refreshLegend() { if (selected == null) return; let c; if (formingRaw) { const s = pscale(selected); c = { time: formingRaw.time, open: formingRaw.open / s, high: formingRaw.high / s, low: formingRaw.low / s, close: formingRaw.close / s }; } else if (rawCandles.length) c = rawCandles[rawCandles.length - 1]; if (c) updateLegend(selected, c.time, c); }
-
-// ---- Favorites / sorting --------------------------------------------------
-function toggleFav(id) { if (favs.has(id)) favs.delete(id); else favs.add(id); localStorage.setItem('favs', JSON.stringify([...favs])); rowEls[id]?.querySelector('.star')?.classList.toggle('on', favs.has(id)); reorderRows(); }
-const SORT_METRIC = { change: (it) => it.change, sell: (it) => it.bid ?? -Infinity, buy: (it) => it.ask ?? -Infinity, spread: (it) => (it.ask != null && it.bid != null ? it.ask - it.bid : -Infinity), high: (it) => it.high ?? -Infinity };
-function reorderRows() {
-  const cont = document.getElementById('instruments');
-  Object.keys(rowEls).map(Number).sort((a, b) => {
-    const fa = favs.has(a), fb = favs.has(b); if (fa !== fb) return fb - fa;
-    if (sortKey && META[a] && META[b]) { const m = SORT_METRIC[sortKey]; const d = (m(META[a]) - m(META[b])) * sortDir; if (d) return d; }
-    return a - b;
-  }).forEach((id) => cont.appendChild(rowEls[id]));
-}
 
 // ===== Indicators — вынесены в модуль indicators.js (ADR-015), подключается до app.js =====
 // toSeries — чартовый глюкод (значения → {time,value} для Lightweight Charts), остаётся здесь.
@@ -104,6 +88,9 @@ const OSC = {
 const chartEl = document.getElementById('chart');
 const chart = LightweightCharts.createChart(chartEl, {
   layout: { background: { color: '#0b0e14' }, textColor: '#6b7688', attributionLogo: false },
+  // Локаль задаём явно: иначе библиотека берёт navigator.language, и подписи оси времени
+  // зависят от настроек ОС клиента (а в окружении без локали — падают с RangeError). BUG-008.
+  localization: { locale: 'en-US' },
   grid: { vertLines: { color: 'rgba(31,39,53,.4)' }, horzLines: { color: 'rgba(31,39,53,.4)' } },
   rightPriceScale: { borderColor: '#1f2735' },
   timeScale: { borderColor: '#1f2735', timeVisible: true, secondsVisible: false },
@@ -178,8 +165,7 @@ chart.subscribeCrosshairMove((p) => { const id = selected; if (id == null) retur
 async function loadCandles(id, timeframe) {
   const load = document.getElementById('loading'); load.classList.remove('hidden');
   try {
-    const r = await fetch(`/candles/${id}?tf=${timeframe}&limit=300`);
-    const raw = await r.json().catch(() => []);
+    const raw = (await api.candles(id, timeframe, 300)) || [];
     const s = pscale(id), v = qscale(id);
     rawCandles = raw.map((c) => ({ time: c.time, open: c.open / s, high: c.high / s, low: c.low / s, close: c.close / s, volume: c.volume / v }));
     makeMainSeries();
@@ -193,28 +179,9 @@ async function loadCandles(id, timeframe) {
 }
 function drawForming() { if (!formingRaw || !mainSeries || chartType === 'heikin') return; const s = pscale(selected); mainSeries.update(isLineType() ? { time: formingRaw.time, value: formingRaw.close / s } : { time: formingRaw.time, open: formingRaw.open / s, high: formingRaw.high / s, low: formingRaw.low / s, close: formingRaw.close / s }); refreshLegend(); }
 function onLiveTrade(id, price, qty) { if (id !== selected) return; const now = Math.floor(Date.now() / 1000); const b = now - (now % tf); if (!formingRaw || b > formingRaw.time) formingRaw = { time: b, open: price, high: price, low: price, close: price, volume: qty }; else { formingRaw.high = Math.max(formingRaw.high, price); formingRaw.low = Math.min(formingRaw.low, price); formingRaw.close = price; } if (formingRaw.time >= lastBarTime) { lastBarTime = formingRaw.time; drawForming(); } }
-async function syncLast() { const id = selected; if (id == null) return; const r = await fetch(`/candles/${id}?tf=${tf}&limit=2`); const raw = await r.json().catch(() => []); if (!raw.length) return; const last = raw[raw.length - 1]; if (last.time >= lastBarTime) { lastBarTime = last.time; formingRaw = { ...last }; drawForming(); } }
+async function syncLast() { const id = selected; if (id == null) return; const raw = (await api.candles(id, tf, 2)) || []; if (!raw.length) return; const last = raw[raw.length - 1]; if (last.time >= lastBarTime) { lastBarTime = last.time; formingRaw = { ...last }; drawForming(); } }
 
 // ============================ Instruments ==================================
-async function refreshInstruments() {
-  const r = await fetch('/instruments'); const list = await r.json().catch(() => []);
-  const cont = document.getElementById('instruments');
-  for (const it of list) {
-    META[it.id] = it; let el = rowEls[it.id]; const isNew = !el;
-    if (isNew) { el = document.createElement('div'); el.className = 'irow'; el.dataset.id = it.id; cont.appendChild(el); rowEls[it.id] = el; }
-    const up = it.change >= 0; const [b, q] = it.symbol.split('-');
-    el.innerHTML = `<span class="star ${favs.has(it.id) ? 'on' : ''}" data-icon="star"></span>` +
-      `<div class="sym">${coinHtml(b)}<span class="symtxt">${b}<small>/${q || 'USDT'}</small></span></div>` +
-      `<div class="num chg c-change ${up ? 'up' : 'down'}">${up ? '+' : ''}${it.change.toFixed(2)}%</div>` +
-      `<div class="num sell c-sell">${it.bid != null ? fmtP(it.id, it.bid) : '—'}</div>` +
-      `<div class="num buy c-buy">${it.ask != null ? fmtP(it.id, it.ask) : '—'}</div>` +
-      `<div class="num muted c-spread">${it.bid != null && it.ask != null ? it.ask - it.bid : '—'}</div>` +
-      `<div class="num c-high">${it.high != null ? fmtP(it.id, it.high) : '—'}</div>`;
-    el.classList.toggle('active', it.id === selected);
-    if (isNew && selected === null) selectInstrument(it.id);
-  }
-  renderIcons(cont); reorderRows(); updateDealPanel();
-}
 function refPrice(it) { if (!it || it.bid == null || it.ask == null) return it?.last; if (priceType === 'ask') return it.ask; if (priceType === 'bid') return it.bid; return Math.round((it.bid + it.ask) / 2); }
 function updateDealPanel() {
   const it = META[selected]; if (!it) return;
@@ -231,21 +198,29 @@ function updateDealPanel() {
   updateSizeEq();
 }
 
-// ---- Order book + asset stats ---------------------------------------------
-// Стакан и статистика — переиспользуемые виджеты (ADR-015), паттерн mount(root, ctx).
+// ---- Виджеты (ADR-015): страница даёт контейнер, зависимости идут через ctx --
 const book = OrderBook.mount(document.getElementById('book'), {
   instrument: () => selected,
-  fetch: (id) => fetch(`/depth/${id}`).then((r) => r.json()),
+  fetch: (id) => api.depth(id),
   onPick: (price) => { setMode('limit'); const inp = document.getElementById('price'); inp.value = price; inp.classList.add('flash'); setTimeout(() => inp.classList.remove('flash'), 400); },
   interval: 700,
 });
 const stats = AssetStats.mount(document.getElementById('statbar'), {
   instrument: () => selected,
-  fetch: (id) => fetch(`/stats/${id}`).then((r) => r.json()),
+  fetch: (id) => api.stats(id),
   labels: TFN,
   interval: 5000,
 });
-async function selectInstrument(id) { selected = id; Object.entries(rowEls).forEach(([k, el]) => el.classList.toggle('active', +k === id)); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); pollDeals(); book.refresh(); stats.refresh(); }
+// Монтируется последним: его первый refresh выбирает инструмент, а selectInstrument
+// обращается к book/stats — они должны уже существовать.
+const watchlist = Watchlist.mount(document.querySelector('.watch'), {
+  fetch: () => api.instruments(),
+  instrument: () => selected,
+  onData: (list) => { list.forEach((it) => (META[it.id] = it)); updateDealPanel(); },
+  onSelect: (id) => selectInstrument(id),
+  interval: 1000,
+});
+async function selectInstrument(id) { selected = id; watchlist.setActive(id); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); pollDeals(); book.refresh(); stats.refresh(); }
 document.getElementById('tfs').addEventListener('click', (e) => { const btn = e.target.closest('button'); if (!btn) return; tf = +btn.dataset.tf; document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
 
 // ============================ Toolbar (dropdowns) ==========================
@@ -294,25 +269,23 @@ function bindSetting(id, key, kind) {
 bindSetting('sHollow', 'hollowColor', 'str'); bindSetting('sShadows', 'shadows', 'bool'); bindSetting('sShadowCustom', 'shadowCustom', 'bool'); bindSetting('sShadowColor', 'shadowColor', 'str');
 bindSetting('sPlw', 'priceLineWidth', 'num'); bindSetting('sAddLine', 'addLine', 'bool'); bindSetting('sAlw', 'addLineWidth', 'num'); bindSetting('sMinChange', 'minChange', 'str');
 
-// Watchlist column visibility
-const cols = Object.assign({ change: 1, sell: 1, buy: 1, spread: 1, high: 1 }, JSON.parse(localStorage.getItem('cols') || '{}'));
-const COLW = { change: '.82fr', sell: '.85fr', buy: '.85fr', spread: '.7fr', high: '.85fr' };
-function applyCols() {
-  const order = ['change', 'sell', 'buy', 'spread', 'high'];
-  const tracks = ['18px', '1.55fr', ...order.filter((k) => cols[k]).map((k) => COLW[k])];
-  const watch = document.querySelector('.watch');
-  watch.style.setProperty('--watch-cols', tracks.join(' '));
-  order.forEach((k) => watch.classList.toggle('hide-' + k, !cols[k]));
-}
-function bindCol(id, key) { const el = document.getElementById(id); if (!el) return; el.checked = !!cols[key]; el.addEventListener('change', () => { cols[key] = el.checked ? 1 : 0; localStorage.setItem('cols', JSON.stringify(cols)); applyCols(); }); }
+// Видимость колонок списка: состояние и отрисовка — внутри виджета, страница лишь
+// связывает свои чекбоксы с его публичным API.
+function bindCol(id, key) { const el = document.getElementById(id); if (!el) return; el.checked = !!watchlist.columns()[key]; el.addEventListener('change', () => watchlist.setColumns({ [key]: el.checked ? 1 : 0 })); }
 bindCol('cChange', 'change'); bindCol('cSell', 'sell'); bindCol('cBuy', 'buy'); bindCol('cSpread', 'spread'); bindCol('cHigh', 'high');
 
 // Panel/toolbar resizing
-const layout = Object.assign({ leftW: 280, rightW: 300, bottomH: 190, toolbarH: 42 }, JSON.parse(localStorage.getItem('layout') || '{}'));
+// leftW=440: при 280px шесть колонок списка не помещались и цены резались многоточием (BUG-009).
+// Замер по всем 30 строкам: 360px → 30 обрезанных ячеек, 400 → 6, 440 → 3, полный ноль только
+// при 520px. 520 отдаёт списку 40% экрана и душит график, поэтому берём 440 как баланс.
+// Сохранённый пользователем размер (localStorage) имеет приоритет над этим дефолтом.
+const layout = Object.assign({ leftW: 440, rightW: 300, bottomH: 190, toolbarH: 42 }, JSON.parse(localStorage.getItem('layout') || '{}'));
 function applyLayout() {
   document.querySelector('.grid').style.gridTemplateColumns = `${layout.leftW}px 6px 1fr 6px ${layout.rightW}px`;
   document.querySelector('.bottom').style.height = layout.bottomH + 'px';
-  document.querySelector('.toolbar').style.height = layout.toolbarH + 'px';
+  // minHeight, а не height: тулбар должен иметь право вырасти, когда кнопки не влезли
+  // в одну строку. Жёсткая высота выталкивала их поверх панели метрик (BUG-010).
+  document.querySelector('.toolbar').style.minHeight = layout.toolbarH + 'px';
 }
 function initResizers() {
   document.querySelectorAll('[data-rsz]').forEach((h) => h.addEventListener('mousedown', (e) => {
@@ -358,29 +331,29 @@ async function submit(side) {
   const id = selected; if (id == null) return; const msg = document.getElementById('dealMsg');
   const baseQty = sizeBaseQty(id);
   if (!(baseQty > 0)) { msg.textContent = 'Enter size'; msg.style.color = 'var(--down)'; return; }
-  const { sl, tp } = readSlTp(id); const qty = Math.round(baseQty * qscale(id)); let url, body;
-  if (orderMode === 'limit') { const price = parseFloat(document.getElementById('price').value); if (!(price > 0)) { msg.textContent = 'Enter price'; msg.style.color = 'var(--down)'; return; } url = '/pending'; body = { instrument: id, side, qty, price: Math.round(price * pscale(id)), sl, tp }; }
-  else { url = '/deals'; body = { instrument: id, side, qty, sl, tp }; }
-  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token()}` }, body: JSON.stringify(body) });
-  const data = await r.json().catch(() => null);
-  if (r.ok) { msg.textContent = orderMode === 'limit' ? `Limit order #${data.id}` : `Opened #${data.id}: ${side.toUpperCase()} @ ${fmtP(id, data.entry)}`; msg.style.color = 'var(--up)'; switchBottom(orderMode === 'limit' ? 'pending' : 'deals'); pollAccount(); pollDeals(); pollPending(); }
-  else { msg.textContent = `Rejected ${r.status}: ${data?.error || ''}`; msg.style.color = 'var(--down)'; }
+  const { sl, tp } = readSlTp(id); const qty = Math.round(baseQty * qscale(id)); let body;
+  const isLimit = orderMode === 'limit';
+  if (isLimit) { const price = parseFloat(document.getElementById('price').value); if (!(price > 0)) { msg.textContent = 'Enter price'; msg.style.color = 'var(--down)'; return; } body = { instrument: id, side, qty, price: Math.round(price * pscale(id)), sl, tp }; }
+  else body = { instrument: id, side, qty, sl, tp };
+  const { ok, status, data } = isLimit ? await api.placePending(body) : await api.openDeal(body);
+  if (ok) { msg.textContent = isLimit ? `Limit order #${data.id}` : `Opened #${data.id}: ${side.toUpperCase()} @ ${fmtP(id, data.entry)}`; msg.style.color = 'var(--up)'; switchBottom(isLimit ? 'pending' : 'deals'); pollAccount(); pollDeals(); pollPending(); }
+  else { msg.textContent = `Rejected ${status}: ${data?.error || ''}`; msg.style.color = 'var(--down)'; }
 }
 document.getElementById('btnBuy').addEventListener('click', () => submit('buy'));
 document.getElementById('btnSell').addEventListener('click', () => submit('sell'));
 document.getElementById('userSel').addEventListener('change', () => { pollAccount(); pollDeals(); pollPending(); pollClosed(); });
 
 // ============================ Account / positions / history ================
-async function pollAccount() { try { const r = await fetch('/account', { headers: { Authorization: `Bearer ${token()}` } }); if (!r.ok) return; const a = await r.json(); document.getElementById('mBalance').textContent = usd(a.balance); document.getElementById('mEquity').textContent = usd(a.equity); document.getElementById('mMargin').textContent = usd(a.used_margin); document.getElementById('mFree').textContent = usd(a.free_margin); const p = document.getElementById('mPnl'); p.textContent = usd(a.open_pnl); p.style.color = a.open_pnl > 0 ? 'var(--up)' : a.open_pnl < 0 ? 'var(--down)' : ''; } catch (e) { /* */ } }
+async function pollAccount() { try { const a = await api.account(); if (!a) return; document.getElementById('mBalance').textContent = usd(a.balance); document.getElementById('mEquity').textContent = usd(a.equity); document.getElementById('mMargin').textContent = usd(a.used_margin); document.getElementById('mFree').textContent = usd(a.free_margin); const p = document.getElementById('mPnl'); p.textContent = usd(a.open_pnl); p.style.color = a.open_pnl > 0 ? 'var(--up)' : a.open_pnl < 0 ? 'var(--down)' : ''; } catch (e) { /* */ } }
 async function pollDeals() {
-  try { const r = await fetch('/deals', { headers: { Authorization: `Bearer ${token()}` } }); if (!r.ok) return; const list = await r.json(); currentDeals = list.filter((d) => d.instrument === selected); redrawPriceLines();
+  try { const list = await api.deals(); if (!list) return; currentDeals = list.filter((d) => d.instrument === selected); redrawPriceLines();
     document.getElementById('deals').innerHTML = list.map((d) => { const pos = d.pnl >= 0; const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals); const pips = showPips ? ` (${d.side === 'buy' ? d.mark - d.entry : d.entry - d.mark}p)` : ''; return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.entry)}</span><span>${f(d.mark)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${usd(d.pnl)}${pips}</span><button class="closebtn" data-id="${d.id}">Close</button></div>`; }).join('') || '<div class="deal-row muted"><span>No open positions</span></div>';
     document.querySelectorAll('#deals .closebtn').forEach((b) => b.addEventListener('click', () => closeDeal(+b.dataset.id))); } catch (e) { /* */ }
 }
-async function closeDeal(id) { const r = await fetch(`/deals/${id}/close`, { method: 'POST', headers: { Authorization: `Bearer ${token()}` } }); if (r.ok) { pollAccount(); pollDeals(); pollClosed(); } }
-async function pollPending() { try { const r = await fetch('/pending', { headers: { Authorization: `Bearer ${token()}` } }); if (!r.ok) return; const list = await r.json(); document.getElementById('pending').innerHTML = list.map((d) => { const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw == null ? '—' : (raw / 10 ** d.price_decimals).toFixed(d.price_decimals)); return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.price)}</span><span>${f(d.sl)}</span><span>${f(d.tp)}</span><button class="closebtn" data-id="${d.id}">Cancel</button></div>`; }).join('') || '<div class="deal-row muted"><span>No limit orders</span></div>'; document.querySelectorAll('#pending .closebtn').forEach((b) => b.addEventListener('click', () => cancelPending(+b.dataset.id))); } catch (e) { /* */ } }
-async function cancelPending(id) { const r = await fetch(`/pending/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token()}` } }); if (r.ok) pollPending(); }
-async function pollClosed() { try { const r = await fetch('/deals/closed', { headers: { Authorization: `Bearer ${token()}` } }); if (!r.ok) return; const list = await r.json(); document.getElementById('closed').innerHTML = list.map((d) => { const pos = d.pnl >= 0; const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals); return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.entry)}</span><span>${f(d.exit)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${usd(d.pnl)}</span><span></span></div>`; }).join('') || '<div class="deal-row muted"><span>No history</span></div>'; } catch (e) { /* */ } }
+async function closeDeal(id) { const { ok } = await api.closeDeal(id); if (ok) { pollAccount(); pollDeals(); pollClosed(); } }
+async function pollPending() { try { const list = await api.pending(); if (!list) return; document.getElementById('pending').innerHTML = list.map((d) => { const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw == null ? '—' : (raw / 10 ** d.price_decimals).toFixed(d.price_decimals)); return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.price)}</span><span>${f(d.sl)}</span><span>${f(d.tp)}</span><button class="closebtn" data-id="${d.id}">Cancel</button></div>`; }).join('') || '<div class="deal-row muted"><span>No limit orders</span></div>'; document.querySelectorAll('#pending .closebtn').forEach((b) => b.addEventListener('click', () => cancelPending(+b.dataset.id))); } catch (e) { /* */ } }
+async function cancelPending(id) { const { ok } = await api.cancelPending(id); if (ok) pollPending(); }
+async function pollClosed() { try { const list = await api.closedDeals(); if (!list) return; document.getElementById('closed').innerHTML = list.map((d) => { const pos = d.pnl >= 0; const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals); const f = (raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals); return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lot}</span><span>${f(d.entry)}</span><span>${f(d.exit)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${usd(d.pnl)}</span><span></span></div>`; }).join('') || '<div class="deal-row muted"><span>No history</span></div>'; } catch (e) { /* */ } }
 
 // ============================ Signals ======================================
 function computeSignals() { const cont = document.getElementById('signals'); const it = META[selected]; if (!it || rawCandles.length < 30) { cont.innerHTML = ''; return; } const close = rawCandles.map((c) => c.close); const sig = []; const r = rsi(close, 14), rv = r[r.length - 1]; if (rv != null && rv > 70) sig.push(['RSI overbought', 'SELL']); else if (rv != null && rv < 30) sig.push(['RSI oversold', 'BUY']); const f = sma(close, 9), s = sma(close, 21), i = close.length - 1; if (f[i] != null && s[i] != null && f[i - 1] != null && s[i - 1] != null) { if (f[i - 1] <= s[i - 1] && f[i] > s[i]) sig.push(['MA 9/21 cross up', 'BUY']); else if (f[i - 1] >= s[i - 1] && f[i] < s[i]) sig.push(['MA 9/21 cross down', 'SELL']); } cont.innerHTML = sig.map(([n, dir]) => `<div class="deal-row"><span>${it.symbol}</span><span>${n}</span><span>${TFN[tf]}</span><span class="dir ${dir === 'BUY' ? 'buy' : 'sell'} ta-r">${dir}</span></div>`).join('') || '<div class="deal-row muted"><span>No signals on this TF</span></div>'; }
@@ -388,21 +361,12 @@ function computeSignals() { const cont = document.getElementById('signals'); con
 // ============================ Bottom tabs + search + sort ==================
 function switchBottom(w) { ['deals', 'pending', 'closed', 'signals'].forEach((n) => { document.getElementById(`tab-${n}`).classList.toggle('active', n === w); document.getElementById(`pane-${n}`).classList.toggle('hidden', n !== w); }); }
 document.querySelectorAll('.bottom__tabs span').forEach((t) => t.addEventListener('click', () => switchBottom(t.dataset.pane)));
-document.getElementById('search').addEventListener('input', (e) => { const q = e.target.value.toLowerCase(); Object.entries(rowEls).forEach(([id, el]) => { el.style.display = (META[id]?.symbol || '').toLowerCase().includes(q) ? '' : 'none'; }); });
-document.getElementById('instruments').addEventListener('click', (e) => { const row = e.target.closest('.irow'); if (!row) return; const id = +row.dataset.id; if (e.target.closest('.star')) { toggleFav(id); return; } selectInstrument(id); });
-document.querySelectorAll('.watch__head .sortable').forEach((h) => h.addEventListener('click', () => {
-  const k = h.dataset.sort; if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = -1; }
-  document.querySelectorAll('.watch__head .sortable').forEach((x) => x.classList.remove('asc', 'desc'));
-  h.classList.add(sortDir === 1 ? 'asc' : 'desc'); reorderRows();
-}));
+// Поиск, сортировка, избранное и клик по строке — внутри watchlist.js (ADR-015).
 
 // ============================ Start ========================================
 renderIcons();
 applyLayout();
-applyCols();
 initResizers();
-refreshInstruments();
-setInterval(refreshInstruments, 1000);
 setInterval(syncLast, 2000);
 setInterval(() => { pollAccount(); pollDeals(); }, 1000);
 setInterval(() => { pollPending(); pollClosed(); }, 1500);
