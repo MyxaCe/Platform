@@ -28,6 +28,11 @@
 //! 3. `save_account(...)` — запись одной транзакцией;
 //! 4. не прошло — вернуть счёт к предыдущему слепку (под локом) и ответить `503`.
 
+pub mod money;
+mod pg;
+
+pub use pg::PgStore;
+
 use async_trait::async_trait;
 
 use broker::AccountSnapshot;

@@ -12,3 +12,9 @@ path = "src/lib.rs"
 domain = { path = "../domain" }
 broker = { path = "../broker" }
 async-trait = "0.1"
+# Запросы runtime-проверяемые (query/query_as), БЕЗ макросов query! — они требуют
+# живую БД на этапе компиляции, что сломало бы сборку образа в Docker (ADR-016).
+# TLS не включаем: БД ходит по внутренней сети compose.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "bigdecimal"] }
+# Деньги — i128, в БД NUMERIC(38,0); sqlx отдаёт NUMERIC как BigDecimal.
+bigdecimal = "0.4"

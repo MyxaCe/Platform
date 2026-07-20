@@ -1,11 +1,35 @@
-# Живая биржа: gateway (REST+WS, внутренний) + web (UI на nginx, проксирует к gateway).
+# Живая биржа: postgres (состояние) + gateway (REST+WS, внутренний) + web (UI на nginx).
 # Наружу порт 8888 (диапазон 8080–8282 зарезервирован WinNAT на dev-машине).
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: exchange-postgres
+    environment:
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+      POSTGRES_DB: platform
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # gateway стартует только когда БД реально принимает подключения: иначе он
+      # упадёт на restore_state (работать на неизвестном состоянии счетов нельзя).
+      test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
   gateway:
     build:
       context: .
       dockerfile: gateway/Dockerfile
     container_name: exchange-gateway
+    environment:
+      # Задан → PgStore (ADR-016). Убрать переменную → всё в памяти, как раньше.
+      DATABASE_URL: postgres://platform:platform@postgres:5432/platform
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   web:
@@ -18,3 +42,6 @@ services:
     depends_on:
       - gateway
     restart: unless-stopped
+
+volumes:
+  pgdata:

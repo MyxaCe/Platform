@@ -2,7 +2,21 @@
 
 #[tokio::main]
 async fn main() {
-    let state = gateway::build_state();
+    // Хранилище выбирается переменной окружения (ADR-016). Без неё — NoopStore:
+    // всё в памяти, как до ADR-016, чтобы локальный запуск и тесты не требовали БД.
+    let state = match std::env::var("DATABASE_URL") {
+        Ok(url) if !url.is_empty() => {
+            let store = gateway::persistence::PgStore::connect(&url)
+                .await
+                .unwrap_or_else(|e| panic!("[gateway] нет связи с БД: {e}"));
+            println!("[gateway] хранилище: PostgreSQL");
+            gateway::build_state_with(std::sync::Arc::new(store))
+        }
+        _ => {
+            println!("[gateway] хранилище: нет (DATABASE_URL не задан) — состояние живёт только в памяти");
+            gateway::build_state()
+        }
+    };
     // Поднять состояние из хранилища до приёма запросов (ADR-016). С NoopStore —
     // пусто, как и раньше. Ошибка здесь фатальна: работать на неизвестном состоянии
     // счетов нельзя (красная линия №5).
