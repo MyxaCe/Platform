@@ -6,6 +6,7 @@
   const $ = (s) => document.querySelector(s);
 
   I18n.apply();
+  const nav = $('#nav');
 
   // ---- Рынки: один источник данных на таблицу и ленту в первом экране -------
   const loadInstruments = () => fetch('/instruments').then((r) => (r.ok ? r.json() : [])).catch(() => []);
@@ -65,11 +66,25 @@
     I18n.setLang(b.dataset.lang); langMenu.classList.remove('open');
   }));
   document.addEventListener('click', () => langMenu.classList.remove('open'));
-  I18n.onChange(() => { paintLang(); markets.relabel(); });
+  I18n.onChange(() => { paintLang(); markets.relabel(); auth.relabel(); });
   paintLang();
 
   // ---- Тема ----------------------------------------------------------------
   $('#themeBtn').addEventListener('click', () => Theme.toggle());
+
+  // ---- Окна входа и регистрации --------------------------------------------
+  const auth = Auth.mount(document.body, {
+    t: I18n.t,
+    // Настоящей системы аккаунтов ещё нет. Вешать публичную форму на dev-эндпоинт
+    // /admin/users нельзя: он без пароля и без защиты — это открытая регистрация
+    // кому угодно. Появится auth — правка только здесь.
+    submit: async () => ({ ok: false, message: I18n.t('auth.soon') }),
+  });
+  // Кнопки шапки, дубль «Входа» в бургер-меню и призывы на странице.
+  document.querySelectorAll('[data-i18n="cta.login"]').forEach((b) =>
+    b.addEventListener('click', (e) => { e.preventDefault(); nav.classList.remove('open'); auth.open('login'); }));
+  document.querySelectorAll('[data-i18n="cta.register"], [data-i18n="cta.start"]').forEach((b) =>
+    b.addEventListener('click', (e) => { e.preventDefault(); auth.open('register'); }));
 
   // ---- Ссылки на терминал --------------------------------------------------
   // Терминал — отдельный продукт на своём порту (ADR-017). Хост берём текущий,
@@ -80,7 +95,6 @@
   });
 
   // ---- Мобильное меню ------------------------------------------------------
-  const nav = $('#nav');
   $('#burger').addEventListener('click', (e) => { e.stopPropagation(); nav.classList.toggle('open'); });
   nav.addEventListener('click', (e) => { if (e.target.tagName === 'A') nav.classList.remove('open'); });
 })();
