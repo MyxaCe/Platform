@@ -58,7 +58,16 @@
       "Bash(git config *)",
       "Bash(git count-objects *)",
       "Bash(sed -i 's/          node_version: 20/          node-version: 20/' .github/workflows/ci.yml)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(curl -s -o /dev/null -w '%{http_code}' -H 'Host: lvh.me' http://localhost:8888/)",
+      "Bash(curl -s -o /dev/null -w '%{http_code}' -H 'Host: accounts.lvh.me' http://localhost:8888/)",
+      "Bash(echo \"сайт: $\\(curl -s -o /dev/null -w '%{http_code}' -H 'Host: lvh.me' http://localhost:8888/\\) · вход: $\\(curl -s -o /dev/null -w '%{http_code}' -H 'Host: accounts.lvh.me' http://localhost:8888/\\)\")",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(grep -E \"^\\\\.env$|\\\\.env\\\\.\")",
+      "Bash(git ls-tree *)",
+      "Bash(xargs -I{} echo \"  файлов target: {} ✓\")",
+      "Bash(git commit -q -m 'chore: обновлён список разрешений инструментария *)"
     ]
   }
 }
