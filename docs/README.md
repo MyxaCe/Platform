@@ -1,6 +1,6 @@
 ---
 tags: [moc, home]
-updated: 2026-07-19
+updated: 2026-07-21
 ---
 
 # 🏛️ Platform — База знаний проекта
@@ -40,7 +40,8 @@ updated: 2026-07-19
   - [[ADR-013-real-market-data-broker-pivot]] — реальные данные Binance, разворот к брокер-терминалу · `accepted`
   - [[ADR-014-paper-broker]] — бумажный брокер: позиции, маржа, P&L · `accepted`
   - [[ADR-015-reusable-frontend-modules]] — переиспользуемые фронтенд-модули · `accepted`
-  - [[ADR-016-persistence-postgres]] — персистентность состояния: PostgreSQL · `proposed`
+  - [[ADR-016-persistence-postgres]] — персистентность состояния: PostgreSQL · `accepted` (реализовано)
+  - [[ADR-017-repo-layout-products]] — структура репозитория: продукты в `apps/`, ядро в `backend/` · `accepted`
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc
@@ -53,15 +54,17 @@ updated: 2026-07-19
 
 | | |
 |---|---|
-| Фаза | **2g — терминал** ✅ лимитные ордера, SL/TP, история, индикаторы, типы графика, 1W; 76 тестов + clippy |
-| Стек | Rust: `domain`+`core`+`ledger`+`orchestrator`+`broker`+`gateway` (→Binance) · web: nginx + JS |
-| Запуск | `docker compose up --build` → **http://localhost:8888** (реальные цены; бумажный брокер) |
-| Следующий шаг | Плечо/ликвидация · не-крипто рынки (платный провайдер) · настоящий auth · персистентность |
-| Дата | 2026-07-17 |
+| Фаза | **2h — продукты** · терминал готов, состояние durable (PostgreSQL); 86 тестов + clippy |
+| Структура | `backend/` — ядро и шлюз · `apps/terminal/` — терминал · `apps/site/` — сайт брокера (ADR-017) |
+| Стек | Rust: `domain`+`core`+`ledger`+`orchestrator`+`broker`+`persistence`+`gateway` (→Binance) · web: nginx + JS |
+| Запуск | `docker compose up --build` → терминал **:8888**, сайт **:8889** |
+| Следующий шаг | **Сайт брокера** → личный кабинет → плечо/ликвидация. Подробности — [[STATUS]] |
+| Дата | 2026-07-21 |
 
 ## 🗺️ Дорожная карта (фазы)
 
 1. **Фаза 1** ✅ — Matching Engine + Order Book + инструменты + снапшот
 2. **Фаза 2** ✅ — Ledger + оркестратор (путь ордера) + Gateway REST/WS (живой сервис в Docker)
-3. **Фаза 3** — Журнал событий (Kafka/NATS) + распил на сервисы; настоящий auth
-4. **Фаза 4** — Реальное custody (безопасность + юр. проработка)
+3. **Фаза 2h** — продуктовый контур: сайт брокера, личный кабинет, интеграция с CRM (MICA)
+4. **Фаза 3** — Журнал событий (Kafka/NATS) + распил на сервисы; настоящий auth
+5. **Фаза 4** — Реальное custody (безопасность + юр. проработка)
