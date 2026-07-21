@@ -74,7 +74,7 @@ web/                        — терминальный UI (nginx + JS)     →
 - `backend/` — Rust-workspace: [[domain]], [[matching-engine]], [[ledger]], [[orchestrator]],
   [[marketdata]], [[broker]], `persistence`, [[gateway]].
 - `apps/terminal/` — [[web-ui]], торговый терминал (:8888).
-- `apps/site/` — сайт брокера (:8889), заготовка.
+- `apps/site/` — [[site]], сайт брокера (:8889).
 - `apps/cabinet/` — личный кабинет клиента, появится позже.
 
 CRM — своя система владельца (**MICA**), подключается позже через API, в репозитории не живёт.

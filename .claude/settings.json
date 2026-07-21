@@ -25,7 +25,9 @@
       "Bash(git commit -q -m 'docs: STATUS — раскладка, модули и стакан на 2026-07-20 *)",
       "Bash(echo \"тесты exit=$?\")",
       "Bash(grep -rln \"web/public\\\\|web/nginx\\\\|web/Dockerfile\\\\|каталог \\\\`web/\\\\`\\\\|\\\\`web/\\\\`\" docs/)",
-      "Bash(git commit -q -m 'docs: README — актуальный статус, ADR-016 accepted, ADR-017 в карте *)"
+      "Bash(git commit -q -m 'docs: README — актуальный статус, ADR-016 accepted, ADR-017 в карте *)",
+      "Bash(MSYS_NO_PATHCONV=1 timeout 160 docker run --rm --add-host=host.docker.internal:host-gateway -v C:/Users/user/AppData/Local/Temp/claude/c--Users-user-Desktop-Platform/3c0b010d-eb27-4472-a18e-d6fa45c1d01c/scratchpad:/out mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && cat > s.mjs <<\"EOF\" *)",
+      "Bash(MSYS_NO_PATHCONV=1 timeout 120 docker run --rm --add-host=host.docker.internal:host-gateway mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && cat > t.mjs <<\"EOF\" *)"
     ]
   }
 }
