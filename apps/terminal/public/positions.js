@@ -48,7 +48,7 @@
     { key: 'closed', title: 'CLOSED DEALS', head: ['INSTR.', 'SIDE', 'QTY', 'ENTRY', 'EXIT', 'P&L', ''] },
     { key: 'signals', title: 'SIGNALS', head: ['INSTR.', 'SIGNAL', 'TF', 'DIRECTION'] },
   ];
-  const defUsd = (c) => `$${(c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const defUsd = (c) => `${c < 0 ? '-' : ''}$${(Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const empty = (text) => `<div class="deal-row muted"><span>${text}</span></div>`;
 
   function mount(root, ctx) {

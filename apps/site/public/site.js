@@ -5,7 +5,6 @@
 (function () {
   const $ = (s) => document.querySelector(s);
 
-  I18n.apply();
   const nav = $('#nav');
 
   // ---- Рынки: один источник данных на таблицу и ленту в первом экране -------

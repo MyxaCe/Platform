@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ExchangePro — Client Area</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <!-- Пока не знаем, вошёл ли клиент, содержимое не показываем: иначе на секунду
+       мелькнёт кабинет с пустыми полями. -->
+  <div id="boot" class="boot"><span class="spinner"></span></div>
+
+  <!-- Экран для неаутентифицированных: вход живёт на сайте, здесь только приглашение -->
+  <div id="gate" class="gate hidden">
+    <div class="gate__card">
+      <a class="brand" href="/"><span class="brand__mark">E</span><span>Exchange<b>Pro</b></span></a>
+      <h1 data-i18n="gate.title">Sign in to continue</h1>
+      <p class="muted" data-i18n="gate.sub">Your client area is available after you sign in.</p>
+      <a class="btn btn--accent btn--lg" id="gateLogin" href="#" data-i18n="gate.login">Go to sign in</a>
+    </div>
+  </div>
+
+  <div id="app" class="hidden">
+    <header class="hdr">
+      <div class="hdr__in">
+        <a class="brand" href="/"><span class="brand__mark">E</span><span>Exchange<b>Pro</b></span></a>
+        <nav class="tabs" id="tabs">
+          <button data-tab="overview" class="active" data-i18n="tab.overview">Overview</button>
+          <button data-tab="positions" data-i18n="tab.positions">Positions</button>
+          <button data-tab="history" data-i18n="tab.history">History</button>
+          <button data-tab="profile" data-i18n="tab.profile">Profile</button>
+        </nav>
+        <div class="hdr__right">
+          <a class="btn btn--ghost" id="toTerminal" href="#" data-i18n="cta.terminal">Terminal</a>
+          <span class="hdr__who" id="who"></span>
+          <div class="menu" id="langMenu">
+            <button class="iconbtn iconbtn--wide" id="langBtn"><span id="langLabel">EN</span></button>
+            <div class="menu__pop">
+              <button class="menu__item" data-lang="en">English</button>
+              <button class="menu__item" data-lang="ru">Русский</button>
+            </div>
+          </div>
+          <button class="iconbtn" id="themeBtn" aria-label="Theme">
+            <svg class="ic-moon" viewBox="0 0 20 20"><path d="M16 11.5A6.5 6.5 0 0 1 8.5 4a6.5 6.5 0 1 0 7.5 7.5Z"/></svg>
+            <svg class="ic-sun" viewBox="0 0 20 20"><circle cx="10" cy="10" r="3.6"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4"/></svg>
+          </button>
+          <button class="btn btn--ghost" id="logout" data-i18n="cta.logout">Log out</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <!-- ---------------------------------------------------------- Обзор -- -->
+      <section class="pane" data-pane="overview">
+        <h1 data-i18n="ov.title">Account overview</h1>
+        <div class="stats" id="stats"></div>
+        <div class="grid2">
+          <div class="panel">
+            <h2 data-i18n="ov.open">Open positions</h2>
+            <div id="ovDeals" class="rows"></div>
+          </div>
+          <div class="panel">
+            <h2 data-i18n="ov.actions">Funding</h2>
+            <p class="muted small" data-i18n="ov.fundNote">Deposits and withdrawals are not connected yet — this is a demo environment with paper money.</p>
+            <div class="btnrow">
+              <button class="btn btn--accent" disabled data-i18n="ov.deposit">Deposit</button>
+              <button class="btn btn--ghost" disabled data-i18n="ov.withdraw">Withdraw</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------------- Позиции -- -->
+      <section class="pane hidden" data-pane="positions">
+        <h1 data-i18n="pos.title">Positions and orders</h1>
+        <div class="panel">
+          <h2 data-i18n="pos.open">Open positions</h2>
+          <div id="posDeals" class="rows"></div>
+        </div>
+        <div class="panel">
+          <h2 data-i18n="pos.pending">Limit orders</h2>
+          <div id="posPending" class="rows"></div>
+        </div>
+      </section>
+
+      <!-- -------------------------------------------------------- История -- -->
+      <section class="pane hidden" data-pane="history">
+        <h1 data-i18n="hist.title">Trade history</h1>
+        <div class="panel">
+          <div id="histRows" class="rows"></div>
+        </div>
+      </section>
+
+      <!-- --------------------------------------------------------- Профиль -- -->
+      <section class="pane hidden" data-pane="profile">
+        <h1 data-i18n="prof.title">Profile</h1>
+        <div class="grid2">
+          <div class="panel">
+            <h2 data-i18n="prof.account">Account</h2>
+            <dl class="kv">
+              <dt data-i18n="prof.email">Email</dt><dd id="pfEmail">—</dd>
+              <dt data-i18n="prof.id">Client ID</dt><dd id="pfId">—</dd>
+            </dl>
+          </div>
+          <div class="panel">
+            <h2 data-i18n="prof.security">Security</h2>
+            <p class="muted small" data-i18n="prof.secNote">Password change, two-factor authentication and login history are not available yet.</p>
+            <div class="btnrow">
+              <button class="btn btn--ghost" disabled data-i18n="prof.changePass">Change password</button>
+              <button class="btn btn--ghost" disabled data-i18n="prof.twofa">Two-factor</button>
+            </div>
+          </div>
+          <div class="panel">
+            <h2 data-i18n="prof.kyc">Verification</h2>
+            <p class="muted small" data-i18n="prof.kycNote">Identity verification will be required before real funds can be deposited.</p>
+            <span class="badge" data-i18n="prof.kycState">Not started</span>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>window.__themeKey = 'cabinet';</script>
+  <script src="/shared/i18n.js"></script>
+  <script src="/shared/theme.js"></script>
+  <script src="/dict.js"></script>
+  <script src="/cabinet.js"></script>
+</body>
+</html>

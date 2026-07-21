@@ -1,14 +1,8 @@
 /* ============================================================================
- * i18n.js — переключение языка сайта. Тексты в разметке помечены data-i18n;
- * словарь один на страницу, добавление языка = добавление объекта сюда.
- *
- *   I18n.setLang('ru');  I18n.t('nav.markets');  I18n.lang();
- *
- * По умолчанию английский — как и в терминале; русский доступен переключателем.
+ * dict.js — словарь сайта. Машинерия переключения — в общем /shared/i18n.js
+ * (ADR-017): продукты делят механизм, но не тексты.
  * ========================================================================== */
 (function () {
-  const KEY = 'site.lang';
-
   const DICT = {
     en: {
       'nav.buy': 'Buy Crypto', 'nav.markets': 'Markets', 'nav.trade': 'Trade', 'nav.futures': 'Futures',
@@ -122,26 +116,5 @@
     },
   };
 
-  let lang = localStorage.getItem(KEY) || 'en';
-  if (!DICT[lang]) lang = 'en';
-
-  const t = (key) => (DICT[lang] && DICT[lang][key]) || (DICT.en[key] ?? key);
-
-  /** Проставить переводы в разметке. Вызывается после смены языка. */
-  function apply(root = document) {
-    root.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
-    root.querySelectorAll('[data-i18n-ph]').forEach((el) => { el.placeholder = t(el.dataset.i18nPh); });
-    document.documentElement.lang = lang;
-  }
-
-  const listeners = [];
-  function setLang(next) {
-    if (!DICT[next] || next === lang) return;
-    lang = next;
-    localStorage.setItem(KEY, lang);
-    apply();
-    listeners.forEach((fn) => fn(lang));
-  }
-
-  window.I18n = { t, apply, setLang, lang: () => lang, onChange: (fn) => listeners.push(fn) };
+  I18n.init(DICT, { key: 'site.lang', fallback: 'en' });
 })();

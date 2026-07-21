@@ -1,0 +1,56 @@
+/* ============================================================================
+ * dict.js — словарь личного кабинета. Машинерия — в общем /shared/i18n.js.
+ * ========================================================================== */
+(function () {
+  const DICT = {
+    en: {
+      'gate.title': 'Sign in to continue',
+      'gate.sub': 'Your client area is available after you sign in.',
+      'gate.login': 'Go to sign in',
+      'tab.overview': 'Overview', 'tab.positions': 'Positions', 'tab.history': 'History', 'tab.profile': 'Profile',
+      'cta.terminal': 'Terminal', 'cta.logout': 'Log out',
+      'ov.title': 'Account overview', 'ov.open': 'Open positions', 'ov.actions': 'Funding',
+      'ov.fundNote': 'Deposits and withdrawals are not connected yet — this is a demo environment with paper money.',
+      'ov.deposit': 'Deposit', 'ov.withdraw': 'Withdraw',
+      'st.balance': 'Balance', 'st.equity': 'Equity', 'st.margin': 'Used margin',
+      'st.free': 'Free margin', 'st.pnl': 'Open P&L',
+      'pos.title': 'Positions and orders', 'pos.open': 'Open positions', 'pos.pending': 'Limit orders',
+      'hist.title': 'Trade history',
+      'prof.title': 'Profile', 'prof.account': 'Account', 'prof.email': 'Email', 'prof.id': 'Client ID',
+      'prof.security': 'Security',
+      'prof.secNote': 'Password change, two-factor authentication and login history are not available yet.',
+      'prof.changePass': 'Change password', 'prof.twofa': 'Two-factor',
+      'prof.kyc': 'Verification',
+      'prof.kycNote': 'Identity verification will be required before real funds can be deposited.',
+      'prof.kycState': 'Not started',
+      'col.instr': 'Instrument', 'col.side': 'Side', 'col.qty': 'Qty', 'col.entry': 'Entry',
+      'col.price': 'Price', 'col.exit': 'Exit', 'col.pnl': 'P&L', 'col.sl': 'SL', 'col.tp': 'TP',
+      'empty.deals': 'No open positions', 'empty.pending': 'No limit orders', 'empty.history': 'No closed trades yet',
+    },
+    ru: {
+      'gate.title': 'Войдите, чтобы продолжить',
+      'gate.sub': 'Личный кабинет доступен после входа.',
+      'gate.login': 'Перейти ко входу',
+      'tab.overview': 'Обзор', 'tab.positions': 'Позиции', 'tab.history': 'История', 'tab.profile': 'Профиль',
+      'cta.terminal': 'Терминал', 'cta.logout': 'Выход',
+      'ov.title': 'Обзор счёта', 'ov.open': 'Открытые позиции', 'ov.actions': 'Пополнение и вывод',
+      'ov.fundNote': 'Пополнение и вывод пока не подключены — это демо-среда с бумажными деньгами.',
+      'ov.deposit': 'Пополнить', 'ov.withdraw': 'Вывести',
+      'st.balance': 'Баланс', 'st.equity': 'Средства', 'st.margin': 'Занято под маржу',
+      'st.free': 'Свободно', 'st.pnl': 'Текущий P&L',
+      'pos.title': 'Позиции и ордера', 'pos.open': 'Открытые позиции', 'pos.pending': 'Лимитные ордера',
+      'hist.title': 'История сделок',
+      'prof.title': 'Профиль', 'prof.account': 'Учётная запись', 'prof.email': 'Электронная почта', 'prof.id': 'Номер клиента',
+      'prof.security': 'Безопасность',
+      'prof.secNote': 'Смена пароля, двухфакторная аутентификация и журнал входов пока недоступны.',
+      'prof.changePass': 'Сменить пароль', 'prof.twofa': 'Двухфакторная',
+      'prof.kyc': 'Верификация',
+      'prof.kycNote': 'Подтверждение личности потребуется до пополнения реальными средствами.',
+      'prof.kycState': 'Не начата',
+      'col.instr': 'Инструмент', 'col.side': 'Сторона', 'col.qty': 'Объём', 'col.entry': 'Вход',
+      'col.price': 'Цена', 'col.exit': 'Выход', 'col.pnl': 'P&L', 'col.sl': 'SL', 'col.tp': 'TP',
+      'empty.deals': 'Открытых позиций нет', 'empty.pending': 'Лимитных ордеров нет', 'empty.history': 'Закрытых сделок пока нет',
+    },
+  };
+  I18n.init(DICT, { key: 'cabinet.lang', fallback: 'en' });
+})();

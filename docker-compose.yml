@@ -1,6 +1,7 @@
 # Платформа целиком: postgres (состояние) + gateway (REST+WS, внутренний) +
 # terminal (торговый терминал) + site (сайт брокера).
-# Наружу: терминал 8888, сайт 8889 (диапазон 8080–8282 занят WinNAT на dev-машине).
+# Наружу: терминал 8888, сайт 8889, личный кабинет 8890
+# (диапазон 8080–8282 занят WinNAT на dev-машине).
 services:
   postgres:
     image: postgres:16-alpine
@@ -46,13 +47,24 @@ services:
 
   site:
     build:
-      context: ./apps/site
-      dockerfile: Dockerfile
+      context: ./apps
+      dockerfile: site/Dockerfile
     container_name: exchange-site
     ports:
       - "8889:80"
     depends_on:
       - gateway          # лендинг берёт живые котировки через прокси на шлюз
+    restart: unless-stopped
+
+  cabinet:
+    build:
+      context: ./apps
+      dockerfile: cabinet/Dockerfile
+    container_name: exchange-cabinet
+    ports:
+      - "8890:80"
+    depends_on:
+      - gateway          # кабинет показывает счёт и сделки через прокси на шлюз
     restart: unless-stopped
 
 volumes:

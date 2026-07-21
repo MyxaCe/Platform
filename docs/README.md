@@ -56,10 +56,10 @@ updated: 2026-07-21
 | | |
 |---|---|
 | Фаза | **2h — продукты** · терминал готов, состояние durable (PostgreSQL); 86 тестов + clippy |
-| Структура | `backend/` — ядро и шлюз · `apps/terminal/` — терминал · `apps/site/` — сайт брокера (ADR-017) |
+| Структура | `backend/` — ядро · `apps/terminal/` · `apps/site/` · `apps/cabinet/` · `apps/shared/` (ADR-017) |
 | Стек | Rust: `domain`+`core`+`ledger`+`orchestrator`+`broker`+`persistence`+`gateway` (→Binance) · web: nginx + JS |
-| Запуск | `docker compose up --build` → терминал **:8888**, сайт **:8889** |
-| Следующий шаг | Лендинг готов ([[site]]) → личный кабинет → плечо/ликвидация. Подробности — [[STATUS]] |
+| Запуск | `docker compose up --build` → терминал **:8888**, сайт **:8889**, кабинет **:8890** |
+| Следующий шаг | Пополнение/вывод и KYC в [[cabinet]] · плечо/ликвидация · техдолг в [[backlog]] |
 | Дата | 2026-07-21 |
 
 ## 🗺️ Дорожная карта (фазы)
