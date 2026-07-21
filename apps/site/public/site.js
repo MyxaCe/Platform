@@ -66,20 +66,69 @@
     I18n.setLang(b.dataset.lang); langMenu.classList.remove('open');
   }));
   document.addEventListener('click', () => langMenu.classList.remove('open'));
-  I18n.onChange(() => { paintLang(); markets.relabel(); auth.relabel(); });
+  I18n.onChange(() => { paintLang(); markets.relabel(); auth.relabel(); refreshMe(); });
   paintLang();
 
   // ---- Тема ----------------------------------------------------------------
   $('#themeBtn').addEventListener('click', () => Theme.toggle());
 
   // ---- Окна входа и регистрации --------------------------------------------
+  // Сессия живёт в HttpOnly-cookie (ADR-018): JavaScript её не видит и не может
+  // потерять при XSS. Отсюда и «кто я» спрашиваем у сервера, а не у localStorage.
   const auth = Auth.mount(document.body, {
     t: I18n.t,
-    // Настоящей системы аккаунтов ещё нет. Вешать публичную форму на dev-эндпоинт
-    // /admin/users нельзя: он без пароля и без защиты — это открытая регистрация
-    // кому угодно. Появится auth — правка только здесь.
-    submit: async () => ({ ok: false, message: I18n.t('auth.soon') }),
+    submit: async (mode, data) => {
+      const url = mode === 'register' ? '/auth/register' : '/auth/login';
+      let r;
+      try {
+        r = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+      } catch {
+        return { ok: false, message: I18n.t('auth.err.net') };
+      }
+      if (r.ok) return { ok: true, message: I18n.t(mode === 'register' ? 'auth.ok.register' : 'auth.ok.login') };
+      // Текст ошибки берём свой, по коду ответа: сервер отвечает по-английски,
+      // а сообщение пользователю должно быть на языке страницы.
+      const key = r.status === 409 ? 'auth.err.taken'
+        : r.status === 429 ? 'auth.err.rate'
+        : r.status === 401 ? 'auth.err.creds'
+        : r.status === 400 ? 'auth.err.pass'
+        : 'auth.err.net';
+      return { ok: false, message: I18n.t(key) };
+    },
+    onSuccess: () => { setTimeout(() => { auth.close(); refreshMe(); }, 700); },
   });
+
+  // ---- Состояние сессии в шапке -------------------------------------------
+  const hdrRight = document.querySelector('.hdr__right');
+  const btnLogin = document.querySelector('.hdr__login');
+  const btnReg = document.querySelector('.hdr__right .btn--accent');
+  const who = document.createElement('span');
+  who.className = 'hdr__who hidden';
+  const btnOut = document.createElement('button');
+  btnOut.className = 'btn btn--ghost hidden';
+  hdrRight.insertBefore(who, btnLogin);
+  hdrRight.insertBefore(btnOut, btnLogin);
+
+  async function refreshMe() {
+    let me = null;
+    try { const r = await fetch('/auth/me'); if (r.ok) me = await r.json(); } catch { /* не вошли */ }
+    const on = !!(me && me.email);
+    who.textContent = on ? me.email : '';
+    who.classList.toggle('hidden', !on);
+    btnOut.textContent = I18n.t('cta.logout');
+    btnOut.classList.toggle('hidden', !on);
+    btnLogin.classList.toggle('hidden', on);
+    btnReg.classList.toggle('hidden', on);
+  }
+  btnOut.addEventListener('click', async () => {
+    try { await fetch('/auth/logout', { method: 'POST' }); } catch { /* всё равно перерисуем */ }
+    refreshMe();
+  });
+  refreshMe();
   // Кнопки шапки, дубль «Входа» в бургер-меню и призывы на странице.
   document.querySelectorAll('[data-i18n="cta.login"]').forEach((b) =>
     b.addEventListener('click', (e) => { e.preventDefault(); nav.classList.remove('open'); auth.open('login'); }));

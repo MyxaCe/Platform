@@ -53,8 +53,12 @@ impl std::error::Error for StoreError {}
 /// Всё состояние, поднимаемое из хранилища на старте.
 #[derive(Debug, Default)]
 pub struct LoadedState {
-    /// Пользователи: токен → id. Токены dev-уровня; хэши паролей появятся с настоящим auth.
+    /// Прежние dev-токены: токен → id. Уходят вместе с переездом терминала на сессии (ADR-018).
     pub users: Vec<(UserId, String)>,
+    /// Учётные данные: id → (почта, PHC-хэш пароля). Сам пароль нигде не хранится.
+    pub credentials: Vec<(UserId, String, String)>,
+    /// Живые сессии: (хэш токена, чей, до какого времени в unix-секундах).
+    pub sessions: Vec<(String, UserId, i64)>,
     /// Счета брокера.
     pub accounts: Vec<(UserId, AccountSnapshot)>,
 }
@@ -74,6 +78,22 @@ pub trait Persistence: Send + Sync {
 
     /// Зарегистрировать пользователя (токен → id).
     async fn save_user(&self, user: UserId, token: &str) -> Result<(), StoreError>;
+
+    /// Сохранить учётные данные пользователя (ADR-018). `password_hash` — PHC-строка Argon2id;
+    /// открытый пароль сюда не передаётся никогда.
+    async fn save_credentials(&self, _user: UserId, _email: &str, _password_hash: &str) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    /// Открыть сессию. Хранится **хэш** токена, а не сам токен.
+    async fn save_session(&self, _token_hash: &str, _user: UserId, _created: i64, _expires: i64) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    /// Закрыть сессию (выход).
+    async fn delete_session(&self, _token_hash: &str) -> Result<(), StoreError> {
+        Ok(())
+    }
 
     /// Проверка денежных инвариантов (красная линия №5). Возвращает список нарушений;
     /// пустой вектор — всё сходится. Вызывается на старте после загрузки.

@@ -42,6 +42,7 @@ updated: 2026-07-21
   - [[ADR-015-reusable-frontend-modules]] — переиспользуемые фронтенд-модули · `accepted`
   - [[ADR-016-persistence-postgres]] — персистентность состояния: PostgreSQL · `accepted` (реализовано)
   - [[ADR-017-repo-layout-products]] — структура репозитория: продукты в `apps/`, ядро в `backend/` · `accepted`
+  - [[ADR-018-authentication]] — аутентификация: Argon2id и серверные сессии · `accepted`
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc

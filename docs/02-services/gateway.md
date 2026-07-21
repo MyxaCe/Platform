@@ -28,6 +28,10 @@ docker compose down              # остановить
 | Метод | Путь | Auth | Назначение |
 |---|---|---|---|
 | GET | `/health` | — | проверка живости |
+| POST | `/auth/register` | — | `{email, password}` → учётка + сессия в HttpOnly-cookie (ADR-018) |
+| POST | `/auth/login` | — | `{email, password}` → сессия |
+| POST | `/auth/logout` | cookie | закрыть сессию |
+| GET | `/auth/me` | cookie | `{user_id, email}` |
 | POST | `/admin/users` | — (dev) | создать пользователя `{token}` → `{user_id}` |
 | POST | `/admin/deposit` | — (dev) | пополнить счёт `{user_id, asset, amount}` |
 | GET | `/instruments` | — | список пар с `last/change/bid/ask/high/decimals` |
@@ -88,7 +92,11 @@ smoke-тест через `curl` (см. историю коммита).
 
 ## Ограничения / TODO
 
-- **Auth — dev-уровень** (токен→UserId in-memory): нет хэшей/сессий/ротации. Настоящий auth — [[backlog]].
+- **Auth (ADR-018):** пароли — Argon2id, сессии — непрозрачные токены (в БД хранится их SHA-256),
+  транспорт — HttpOnly-cookie, ограничитель попыток в памяти. `authed()` принимает cookie **или**
+  прежний `Bearer` — легаси для терминала, уйдёт с его переездом на сессии.
+- **Чего в auth ещё нет:** подтверждение почты, восстановление пароля, второй фактор, журнал входов.
+  Обязательно до реальных денег — [[backlog]].
 - Admin-эндпоинты без защиты (dev).
 - Суммы в JSON — числами (большие `i128` теряют точность в JS). Кодировать строками — [[backlog]].
 - WS отдаёт все события всем; нет подписки по инструменту/приватным событиям пользователя — [[backlog]].

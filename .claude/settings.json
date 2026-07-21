@@ -32,7 +32,9 @@
       "Bash(node --check apps/site/public/auth.js)",
       "Bash(node --check apps/site/public/site.js)",
       "Bash(MSYS_NO_PATHCONV=1 timeout 140 docker run --rm --add-host=host.docker.internal:host-gateway mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && cat > t.mjs <<\"EOF\" *)",
-      "Bash(MSYS_NO_PATHCONV=1 timeout 130 docker run --rm --add-host=host.docker.internal:host-gateway mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && cat > t.mjs <<\"EOF\" *)"
+      "Bash(MSYS_NO_PATHCONV=1 timeout 130 docker run --rm --add-host=host.docker.internal:host-gateway mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && cat > t.mjs <<\"EOF\" *)",
+      "Bash(bash scripts/test.sh -p auth)",
+      "Bash(cat)"
     ]
   }
 }
