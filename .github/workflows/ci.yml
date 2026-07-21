@@ -1,0 +1,72 @@
+# Проверки на каждый push и pull request.
+# Держим быстрыми: тесты ядра, clippy, синтаксис фронтенда, сборка образов.
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  backend:
+    name: Тесты и clippy (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Тулчейн
+        run: rustup component add clippy
+
+      # Кэш реестра и сборки: без него каждый прогон качает и собирает всё заново.
+      - name: Кэш cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            backend/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Тесты
+        run: cargo test --workspace
+
+      # -D warnings: предупреждение = ошибка сборки. Тот же режим, что локально.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Форматирование
+        run: cargo fmt --all -- --check
+        continue-on-error: true   # пока не выравнивали стиль по rustfmt
+
+  frontend:
+    name: Синтаксис фронтенда
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Сборки у фронта нет, но синтаксическую ошибку ловим здесь: единый app.js
+      # падает целиком от одной опечатки, и страница просто белая (bug-log BUG-005).
+      - name: node --check по всем модулям
+        run: |
+          set -e
+          find apps -name '*.js' -not -path '*/node_modules/*' -print0 \
+            | xargs -0 -I{} node --check {}
+          echo "Проверено файлов: $(find apps -name '*.js' -not -path '*/node_modules/*' | wc -l)"
+
+  images:
+    name: Сборка образов
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Ловим поломку Dockerfile до того, как она встретится на сервере.
+      - name: docker compose build
+        run: docker compose build

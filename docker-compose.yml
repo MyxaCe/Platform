@@ -11,15 +11,17 @@ services:
     image: postgres:16-alpine
     container_name: exchange-postgres
     environment:
-      POSTGRES_USER: platform
-      POSTGRES_PASSWORD: platform
-      POSTGRES_DB: platform
+      # Значения по умолчанию — только для разработки. На сервере задаются в .env
+      # (см. .env.example): выкатывать прод с паролем "platform" нельзя.
+      POSTGRES_USER: ${POSTGRES_USER:-platform}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-platform}
+      POSTGRES_DB: ${POSTGRES_DB:-platform}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       # gateway стартует только когда БД реально принимает подключения: иначе он
       # упадёт на restore_state (работать на неизвестном состоянии счетов нельзя).
-      test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-platform} -d ${POSTGRES_DB:-platform}"]
       interval: 3s
       timeout: 3s
       retries: 20
@@ -32,13 +34,13 @@ services:
     container_name: exchange-gateway
     environment:
       # Задан → PgStore (ADR-016). Убрать переменную → всё в памяти, как раньше.
-      DATABASE_URL: postgres://platform:platform@postgres:5432/platform
+      DATABASE_URL: postgres://${POSTGRES_USER:-platform}:${POSTGRES_PASSWORD:-platform}@postgres:5432/${POSTGRES_DB:-platform}
       # Сессия должна действовать на всех поддоменах (accounts/trade/my), а не только
       # там, где выполнен вход (ADR-019). В проде — .вашдомен.
       # Локально нельзя писать localhost: браузер ОТБРАСЫВАЕТ cookie с Domain=localhost
       # целиком (проверено — вход переставал работать). Поэтому lvh.me: это публичное
       # DNS-имя, которое резолвится в 127.0.0.1, и для браузера оно обычный домен.
-      COOKIE_DOMAIN: .lvh.me
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-.lvh.me}
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,0 +1,46 @@
+# Выкладка на сервер. Запускается вручную (workflow_dispatch), пока сервера нет.
+#
+# Что нужно, чтобы включить:
+#   1. Сервер с Docker и docker compose.
+#   2. Секреты репозитория: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY.
+#   3. На сервере — клон репозитория и файл .env (см. .env.example).
+#
+# Осознанно не делаем автодеплой на каждый push: платформа работает с деньгами
+# клиентов, выкладка должна быть решением человека, а не побочным эффектом коммита.
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Ветка или тег для выкладки
+        required: true
+        default: master
+
+jobs:
+  deploy:
+    name: Выкатить на сервер
+    runs-on: ubuntu-latest
+    steps:
+      - name: Проверить, что деплой настроен
+        run: |
+          if [ -z "${{ secrets.DEPLOY_HOST }}" ]; then
+            echo "::error::Секреты деплоя не заданы (DEPLOY_HOST/DEPLOY_USER/DEPLOY_SSH_KEY)."
+            echo "Сервера пока нет — см. комментарий в начале файла."
+            exit 1
+          fi
+
+      - name: Выкатить по SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH || '~/platform' }}
+            git fetch --all
+            git checkout ${{ inputs.ref }}
+            git pull
+            docker compose up --build -d
+            docker compose ps
