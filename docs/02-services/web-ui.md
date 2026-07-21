@@ -9,7 +9,7 @@ updated: 2026-07-19
 ## Назначение
 
 Браузерный торговый терминал (стиль профессиональной платформы, ADR-012) на реальных данных
-[[gateway]]. Статический SPA (vanilla JS + TradingView Lightweight Charts) за nginx, каталог `web/`.
+[[gateway]]. Статический SPA (vanilla JS + TradingView Lightweight Charts) за nginx, каталог `apps/terminal/`.
 Актуальная раскладка — раздел «Раскладка терминала» ниже.
 
 ## Запуск
@@ -36,7 +36,7 @@ docker compose up --build   # gateway (внутренний) + web (nginx)
 
 ## Связи
 
-- Общается только с [[gateway]] по HTTP/WS через nginx-прокси (`web/nginx.conf`, один origin — без CORS).
+- Общается только с [[gateway]] по HTTP/WS через nginx-прокси (`apps/terminal/nginx.conf`, один origin — без CORS).
 - Основано на [[ADR-011-web-ui]], [[ADR-012-market-data-and-terminal-ui]].
 
 ## Возможности
@@ -65,7 +65,7 @@ docker compose up --build   # gateway (внутренний) + web (nginx)
   грубая группировка съедает уровни пачками, и на 20 уровнях книга была бы полупустой.
   Внизу — **полоса B/S**: доли суммарного объёма покупок и продаж, заполнение «перетягивается»
   в реальном времени.
-- **Инструменты рисования** (`web/public/drawings.js` — отдельный модуль, оверлей-canvas над
+- **Инструменты рисования** (`apps/terminal/public/drawings.js` — отдельный модуль, оверлей-canvas над
   графиком, свой вертикальный тулбар): trend line, ray, extended line, info line, trend angle,
   horizontal line/ray, vertical line, cross line, **parallel channel**, **pitchfork (вилы Эндрюса)**,
   undo, clear. Якоря в координатах данных (logical-индекс + цена) → двигаются/масштабируются с

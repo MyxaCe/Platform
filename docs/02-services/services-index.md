@@ -67,3 +67,14 @@ web/                        — терминальный UI (nginx + JS)     →
 
 Итого тестов: **76** (core 27 + ledger 11 + orchestrator 17 + gateway 7 + marketdata 5 + broker 9).
 Запуск тестов: `bash scripts/test.sh`. Запуск сервиса: `docker compose up --build` → http://localhost:8888.
+
+
+## Структура репозитория (ADR-017)
+
+- `backend/` — Rust-workspace: [[domain]], [[matching-engine]], [[ledger]], [[orchestrator]],
+  [[marketdata]], [[broker]], `persistence`, [[gateway]].
+- `apps/terminal/` — [[web-ui]], торговый терминал (:8888).
+- `apps/site/` — сайт брокера (:8889), заготовка.
+- `apps/cabinet/` — личный кабинет клиента, появится позже.
+
+CRM — своя система владельца (**MICA**), подключается позже через API, в репозитории не живёт.

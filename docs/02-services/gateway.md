@@ -50,12 +50,12 @@ docker compose down              # остановить
 Фоновый монитор (`spawn_monitor`) каждые 500мс триггерит лимитные ордера и SL/TP по ценам фида.
 | WS | `/stream` | — | живая лента событий (JSON) |
 
-> ⚠️ При добавлении нового REST-пути **обязательно** добавить его в регекс-прокси `web/nginx.conf`
+> ⚠️ При добавлении нового REST-пути **обязательно** добавить его в регекс-прокси `apps/terminal/nginx.conf`
 > (иначе 405/SPA вместо API). См. [[bug-log]] BUG-004.
 
 ## Market data — реальные с Binance (ADR-013)
 
-Симуляции **нет**. Данные реальные, публичный Binance без ключа (модуль `gateway/src/feed.rs`):
+Симуляции **нет**. Данные реальные, публичный Binance без ключа (модуль `backend/gateway/src/feed.rs`):
 - `/candles` → REST `api/v3/klines` (реальный OHLCV), кэш ~2с; таймфреймы 1m..1d.
 - `/instruments` → WS `@ticker` (last/change/high/bid/ask по 30 парам).
 - `/stream` (лента + live-цена) ← WS `@aggTrade` (реальные сделки).
@@ -82,7 +82,7 @@ docker compose down              # остановить
 
 ## Тесты
 
-`gateway/tests/api.rs` — 7 тестов через `oneshot`: health, 401 без/с битым токеном, полный путь
+`backend/gateway/tests/api.rs` — 7 тестов через `oneshot`: health, 401 без/с битым токеном, полный путь
 сделки с движением балансов, снапшот стакана, self-trade → 409, рыночная покупка. Плюс живой
 smoke-тест через `curl` (см. историю коммита).
 

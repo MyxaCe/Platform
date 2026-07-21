@@ -1,5 +1,6 @@
-# Живая биржа: postgres (состояние) + gateway (REST+WS, внутренний) + web (UI на nginx).
-# Наружу порт 8888 (диапазон 8080–8282 зарезервирован WinNAT на dev-машине).
+# Платформа целиком: postgres (состояние) + gateway (REST+WS, внутренний) +
+# terminal (торговый терминал) + site (сайт брокера).
+# Наружу: терминал 8888, сайт 8889 (диапазон 8080–8282 занят WinNAT на dev-машине).
 services:
   postgres:
     image: postgres:16-alpine
@@ -21,7 +22,7 @@ services:
 
   gateway:
     build:
-      context: .
+      context: ./backend
       dockerfile: gateway/Dockerfile
     container_name: exchange-gateway
     environment:
@@ -32,15 +33,24 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  web:
+  terminal:
     build:
-      context: ./web
+      context: ./apps/terminal
       dockerfile: Dockerfile
-    container_name: exchange-web
+    container_name: exchange-terminal
     ports:
       - "8888:80"
     depends_on:
       - gateway
+    restart: unless-stopped
+
+  site:
+    build:
+      context: ./apps/site
+      dockerfile: Dockerfile
+    container_name: exchange-site
+    ports:
+      - "8889:80"
     restart: unless-stopped
 
 volumes:
