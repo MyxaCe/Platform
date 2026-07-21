@@ -10,8 +10,9 @@
  * ========================================================================== */
 (function () {
   const $ = (s) => document.querySelector(s);
-  const SITE_PORT = 8889, TERMINAL_PORT = 8888;
-  const hostUrl = (port) => `${location.protocol}//${location.hostname}:${port}/`;
+  // Продукты живут на поддоменах (ADR-019): my.<домен> → accounts.<домен> и т.д.
+  const base = location.host.replace(/^my\./, '');
+  const hostUrl = (sub) => `${location.protocol}//${sub}${base}/`;
 
   // Знак перед валютой: «$-0.06» читается как опечатка, правильно «-$0.06».
   const usd = (cents) => (cents < 0 ? '-' : '') + '$' +
@@ -39,8 +40,8 @@
     setInterval(refresh, 4000);
   }
 
-  $('#gateLogin').href = hostUrl(SITE_PORT);
-  $('#toTerminal').href = hostUrl(TERMINAL_PORT);
+  $('#gateLogin').href = hostUrl('accounts.');
+  $('#toTerminal').href = hostUrl('trade.');
   $('#toTerminal').target = '_blank';
   $('#toTerminal').rel = 'noopener';
 

@@ -129,18 +129,18 @@
   });
   refreshMe();
   // Кнопки шапки, дубль «Входа» в бургер-меню и призывы на странице.
-  document.querySelectorAll('[data-i18n="cta.login"]').forEach((b) =>
-    b.addEventListener('click', (e) => { e.preventDefault(); nav.classList.remove('open'); auth.open('login'); }));
-  document.querySelectorAll('[data-i18n="cta.register"], [data-i18n="cta.start"]').forEach((b) =>
-    b.addEventListener('click', (e) => { e.preventDefault(); auth.open('register'); }));
 
   // ---- Ссылки на терминал --------------------------------------------------
   // Терминал — отдельный продукт на своём порту (ADR-017). Хост берём текущий,
   // чтобы ссылка работала и локально, и с любой другой машины в сети.
+  const sub = (name) => `${location.protocol}//${name}.${location.host}/`;
   document.querySelectorAll('[data-i18n="cta.terminal"]').forEach((a) => {
-    a.href = `${location.protocol}//${location.hostname}:8888/`;
-    a.target = '_blank'; a.rel = 'noopener';
+    a.href = sub('trade'); a.target = '_blank'; a.rel = 'noopener';
   });
+  // Вход и регистрация переехали на поддомен accounts (ADR-019): модалка на сайте
+  // больше не нужна, кнопки ведут туда.
+  document.querySelectorAll('[data-i18n="cta.login"]').forEach((a) => { a.href = sub('accounts'); });
+  document.querySelectorAll('[data-i18n="cta.register"], [data-i18n="cta.start"]').forEach((a) => { a.href = sub('accounts'); });
 
   // ---- Мобильное меню ------------------------------------------------------
   $('#burger').addEventListener('click', (e) => { e.stopPropagation(); nav.classList.toggle('open'); });

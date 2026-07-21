@@ -1,7 +1,11 @@
 # Платформа целиком: postgres (состояние) + gateway (REST+WS, внутренний) +
 # terminal (торговый терминал) + site (сайт брокера).
-# Наружу: терминал 8888, сайт 8889, личный кабинет 8890
-# (диапазон 8080–8282 занят WinNAT на dev-машине).
+# Наружу торчит только edge (:8888) и маршрутизирует по поддоменам, как в проде:
+#   lvh.me:8888 — сайт · accounts.lvh.me:8888 — вход
+#   trade.lvh.me:8888 — терминал · my.lvh.me:8888 — кабинет
+# lvh.me — публичное DNS-имя в 127.0.0.1: правки hosts не нужны, а для браузера это
+# обычный домен, поэтому единая cookie на поддомены работает (с localhost — нет).
+# (8888 — потому что диапазон 8080–8282 занят WinNAT на dev-машине.)
 services:
   postgres:
     image: postgres:16-alpine
@@ -29,6 +33,12 @@ services:
     environment:
       # Задан → PgStore (ADR-016). Убрать переменную → всё в памяти, как раньше.
       DATABASE_URL: postgres://platform:platform@postgres:5432/platform
+      # Сессия должна действовать на всех поддоменах (accounts/trade/my), а не только
+      # там, где выполнен вход (ADR-019). В проде — .вашдомен.
+      # Локально нельзя писать localhost: браузер ОТБРАСЫВАЕТ cookie с Domain=localhost
+      # целиком (проверено — вход переставал работать). Поэтому lvh.me: это публичное
+      # DNS-имя, которое резолвится в 127.0.0.1, и для браузера оно обычный домен.
+      COOKIE_DOMAIN: .lvh.me
     depends_on:
       postgres:
         condition: service_healthy
@@ -39,8 +49,6 @@ services:
       context: ./apps/terminal
       dockerfile: Dockerfile
     container_name: exchange-terminal
-    ports:
-      - "8888:80"
     depends_on:
       - gateway
     restart: unless-stopped
@@ -50,8 +58,6 @@ services:
       context: ./apps
       dockerfile: site/Dockerfile
     container_name: exchange-site
-    ports:
-      - "8889:80"
     depends_on:
       - gateway          # лендинг берёт живые котировки через прокси на шлюз
     restart: unless-stopped
@@ -61,10 +67,32 @@ services:
       context: ./apps
       dockerfile: cabinet/Dockerfile
     container_name: exchange-cabinet
-    ports:
-      - "8890:80"
     depends_on:
       - gateway          # кабинет показывает счёт и сделки через прокси на шлюз
+    restart: unless-stopped
+
+  accounts:
+    build:
+      context: ./apps
+      dockerfile: accounts/Dockerfile
+    container_name: exchange-accounts
+    depends_on:
+      - gateway
+    restart: unless-stopped
+
+  edge:
+    build:
+      context: ./apps
+      dockerfile: edge/Dockerfile
+    container_name: exchange-edge
+    ports:
+      - "8888:80"
+    depends_on:
+      - site
+      - accounts
+      - terminal
+      - cabinet
+      - gateway
     restart: unless-stopped
 
 volumes:

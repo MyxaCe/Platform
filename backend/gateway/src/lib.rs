@@ -29,6 +29,8 @@ use domain::order::{OrderId, Side, TimeInForce};
 use broker::{Broker, PosSide};
 use persistence::{NoopStore, Persistence};
 
+pub mod mailer;
+
 /// Реэкспорт: тестам и бинарю нужен трейт хранилища, чтобы подставить свою реализацию.
 pub use persistence;
 use exchange_core::Event;
@@ -47,6 +49,9 @@ pub struct UserRegistry {
     by_token: HashMap<String, UserId>,
     by_email: HashMap<String, (UserId, String)>,
     sessions: HashMap<String, (UserId, i64)>,
+    /// Кто подтвердил почту кодом. Пока в памяти: до реальных денег переедет в БД
+    /// вместе с остальным профилем.
+    verified: std::collections::HashSet<UserId>,
     next: u64,
 }
 impl UserRegistry {
@@ -95,6 +100,12 @@ impl UserRegistry {
     pub fn drop_session(&mut self, token_hash: &str) {
         self.sessions.remove(token_hash);
     }
+    pub fn mark_verified(&mut self, user: UserId) {
+        self.verified.insert(user);
+    }
+    pub fn is_verified(&self, user: UserId) -> bool {
+        self.verified.contains(&user)
+    }
 
     /// Идемпотентно: известный токен возвращает свой id. Флаг — создан ли новый.
     ///
@@ -139,6 +150,9 @@ pub struct AppState {
     /// Лок на счёт: сериализует «мутация → слепок → запись» по одному счёту.
     /// Разные счета не мешают друг другу.
     acct_locks: Arc<Mutex<HashMap<UserId, Arc<Mutex<()>>>>>,
+    /// Коды подтверждения почты: пользователь → (код, до какого времени). В памяти:
+    /// живут минуты и переживать перезапуск не обязаны.
+    codes: Arc<Mutex<HashMap<UserId, (String, i64)>>>,
     /// Попытки входа и регистрации для защиты от перебора (ADR-018): ключ → отметки времени.
     /// Живёт в памяти процесса; при распиле на сервисы переедет в общее хранилище.
     attempts: Arc<Mutex<HashMap<String, Vec<i64>>>>,
@@ -165,6 +179,7 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         broker: Arc::new(Mutex::new(Broker::new(10_000_000, 1))), // старт $100k, leverage 1
         store,
         acct_locks: Arc::new(Mutex::new(HashMap::new())),
+        codes: Arc::new(Mutex::new(HashMap::new())),
         attempts: Arc::new(Mutex::new(HashMap::new())),
     }
 }
@@ -259,6 +274,9 @@ async fn publish(st: &AppState, events: &[Event]) {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/auth/check-email", post(check_email))
+        .route("/auth/send-code", post(send_code))
+        .route("/auth/verify-code", post(verify_code))
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
@@ -537,6 +555,8 @@ struct CredentialsReq {
 struct MeResp {
     user_id: u64,
     email: String,
+    /// Подтверждена ли почта кодом. Пока нет — кабинет ограничивает операции.
+    verified: bool,
 }
 
 /// Достать значение cookie из заголовка.
@@ -551,7 +571,13 @@ fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 /// `Secure` включается переменной COOKIE_SECURE, когда сервис работает за HTTPS.
 fn session_cookie(token: &str, max_age: i64) -> String {
     let secure = if std::env::var("COOKIE_SECURE").is_ok() { "; Secure" } else { "" };
-    format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}{secure}")
+    // Домен нужен, чтобы сессия действовала на всех поддоменах продукта
+    // (accounts/trade/my), а не только там, где выполнен вход (ADR-019).
+    let domain = match std::env::var("COOKIE_DOMAIN") {
+        Ok(d) if !d.is_empty() => format!("; Domain={d}"),
+        _ => String::new(),
+    };
+    format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}{secure}{domain}")
 }
 
 /// Скользящее окно попыток. `true` — лимит исчерпан.
@@ -590,6 +616,73 @@ async fn open_session(st: &AppState, user: UserId) -> Result<String, ApiErr> {
     Ok(session_cookie(&token, SESSION_TTL_SECS))
 }
 
+#[derive(Deserialize)]
+struct EmailReq {
+    email: String,
+}
+
+#[derive(Serialize)]
+struct EmailCheckResp {
+    /// Зарегистрирована ли почта: сайт по этому ответу решает, спрашивать пароль
+    /// (вход) или заводить учётку (регистрация).
+    registered: bool,
+}
+
+/// Шаг 1 пошагового входа: существует ли учётка с такой почтой.
+///
+/// Осознанный компромисс: ответ раскрывает, зарегистрирован ли адрес. Так устроен
+/// вход у большинства крупных сервисов — иначе пошаговую форму не сделать. Риск
+/// (перебор адресов) гасится ограничителем: 20 проверок за 5 минут с одного IP.
+async fn check_email(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<EmailReq>) -> Result<Json<EmailCheckResp>, ApiErr> {
+    if too_many(&st, &format!("check:{}", client_ip(&headers)), 20, 300).await {
+        return Err(err(StatusCode::TOO_MANY_REQUESTS, "too many attempts, try later"));
+    }
+    let email = auth::normalize_email(&req.email);
+    if !auth::is_email_like(&email) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid email"));
+    }
+    let registered = st.users.lock().await.find_by_email(&email).is_some();
+    Ok(Json(EmailCheckResp { registered }))
+}
+
+#[derive(Deserialize)]
+struct VerifyReq {
+    code: String,
+}
+
+/// Выслать код подтверждения на почту текущего пользователя.
+async fn send_code(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<serde_json::Value>, ApiErr> {
+    let user = authed(&st, &headers).await?;
+    if too_many(&st, &format!("code:{}", user.0), 5, 600).await {
+        return Err(err(StatusCode::TOO_MANY_REQUESTS, "too many attempts, try later"));
+    }
+    let email = st.users.lock().await.email_of(user).unwrap_or_default();
+    let code = auth::new_verification_code();
+    st.codes.lock().await.insert(user, (code.clone(), now_unix() + 900)); // 15 минут
+    mailer::send_code(&email, &code).await;
+    // Признак `delivered` показывает интерфейсу, ушло ли письмо на самом деле.
+    // Без настроенного SMTP код уходит в лог сервера, и врать об этом нельзя.
+    Ok(Json(serde_json::json!({ "sent": true, "delivered": mailer::is_configured() })))
+}
+
+/// Проверить код подтверждения.
+async fn verify_code(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<VerifyReq>) -> Result<Json<serde_json::Value>, ApiErr> {
+    let user = authed(&st, &headers).await?;
+    if too_many(&st, &format!("verify:{}", user.0), 10, 600).await {
+        return Err(err(StatusCode::TOO_MANY_REQUESTS, "too many attempts, try later"));
+    }
+    let ok = {
+        let codes = st.codes.lock().await;
+        codes.get(&user).is_some_and(|(c, exp)| *c == req.code.trim() && *exp > now_unix())
+    };
+    if !ok {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid or expired code"));
+    }
+    st.codes.lock().await.remove(&user);
+    st.users.lock().await.mark_verified(user);
+    Ok(Json(serde_json::json!({ "verified": true })))
+}
+
 async fn register(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<CredentialsReq>) -> Result<impl IntoResponse, ApiErr> {
     if too_many(&st, &format!("reg:{}", client_ip(&headers)), 5, 3600).await {
         return Err(err(StatusCode::TOO_MANY_REQUESTS, "too many attempts, try later"));
@@ -610,7 +703,7 @@ async fn register(State(st): State<AppState>, headers: HeaderMap, Json(req): Jso
         return Err(err(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable"));
     }
     let ck = open_session(&st, user).await?;
-    Ok(([(axum::http::header::SET_COOKIE, ck)], Json(MeResp { user_id: user.0, email })))
+    Ok(([(axum::http::header::SET_COOKIE, ck)], Json(MeResp { user_id: user.0, email, verified: false })))
 }
 
 async fn login(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<CredentialsReq>) -> Result<impl IntoResponse, ApiErr> {
@@ -629,7 +722,8 @@ async fn login(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<C
         return Err(err(StatusCode::UNAUTHORIZED, "invalid email or password"));
     }
     let ck = open_session(&st, user).await?;
-    Ok(([(axum::http::header::SET_COOKIE, ck)], Json(MeResp { user_id: user.0, email })))
+    let verified = st.users.lock().await.is_verified(user);
+    Ok(([(axum::http::header::SET_COOKIE, ck)], Json(MeResp { user_id: user.0, email, verified })))
 }
 
 async fn logout(State(st): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -643,8 +737,9 @@ async fn logout(State(st): State<AppState>, headers: HeaderMap) -> impl IntoResp
 
 async fn me(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<MeResp>, ApiErr> {
     let user = authed(&st, &headers).await?;
-    let email = st.users.lock().await.email_of(user).unwrap_or_default();
-    Ok(Json(MeResp { user_id: user.0, email }))
+    let reg = st.users.lock().await;
+    let email = reg.email_of(user).unwrap_or_default();
+    Ok(Json(MeResp { user_id: user.0, email, verified: reg.is_verified(user) }))
 }
 
 /// Кто выполняет запрос: сначала сессия из cookie (ADR-018), затем — прежний

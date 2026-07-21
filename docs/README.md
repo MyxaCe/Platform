@@ -43,6 +43,7 @@ updated: 2026-07-21
   - [[ADR-016-persistence-postgres]] — персистентность состояния: PostgreSQL · `accepted` (реализовано)
   - [[ADR-017-repo-layout-products]] — структура репозитория: продукты в `apps/`, ядро в `backend/` · `accepted`
   - [[ADR-018-authentication]] — аутентификация: Argon2id и серверные сессии · `accepted`
+  - [[ADR-019-subdomains-and-stepped-login]] — поддомены продуктов и пошаговый вход · `accepted`
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc
@@ -56,9 +57,9 @@ updated: 2026-07-21
 | | |
 |---|---|
 | Фаза | **2h — продукты** · терминал готов, состояние durable (PostgreSQL); 86 тестов + clippy |
-| Структура | `backend/` — ядро · `apps/terminal/` · `apps/site/` · `apps/cabinet/` · `apps/shared/` (ADR-017) |
+| Структура | `backend/` — ядро · `apps/`: edge, site, accounts, terminal, cabinet, shared (ADR-017/019) |
 | Стек | Rust: `domain`+`core`+`ledger`+`orchestrator`+`broker`+`persistence`+`gateway` (→Binance) · web: nginx + JS |
-| Запуск | `docker compose up --build` → терминал **:8888**, сайт **:8889**, кабинет **:8890** |
+| Запуск | `docker compose up --build` → **lvh.me:8888** · accounts / trade / my — поддомены |
 | Следующий шаг | Пополнение/вывод и KYC в [[cabinet]] · плечо/ликвидация · техдолг в [[backlog]] |
 | Дата | 2026-07-21 |
 

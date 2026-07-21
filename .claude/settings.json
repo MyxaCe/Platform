@@ -49,7 +49,10 @@
       "Bash(MSYS_NO_PATHCONV=1 timeout 170 docker run --rm --add-host=host.docker.internal:host-gateway -v C:/Users/user/AppData/Local/Temp/claude/c--Users-user-Desktop-Platform/3c0b010d-eb27-4472-a18e-d6fa45c1d01c/scratchpad:/out mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && cat > s.mjs <<\"EOF\" *)",
       "Bash(node --check apps/terminal/public/app.js)",
       "Bash(node --check apps/terminal/public/positions.js)",
-      "Bash(MSYS_NO_PATHCONV=1 timeout 100 docker run --rm --add-host=host.docker.internal:host-gateway mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && node -e \" *)"
+      "Bash(MSYS_NO_PATHCONV=1 timeout 100 docker run --rm --add-host=host.docker.internal:host-gateway mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && node -e \" *)",
+      "Bash(MSYS_NO_PATHCONV=1 timeout 180 docker run --rm --add-host=host.docker.internal:host-gateway --add-host=accounts.localhost:127.0.0.1 mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && cat > t.mjs <<\"EOF\" *)",
+      "Bash(curl -s -i -X POST http://localhost:8888/auth/register -H 'Host: accounts.localhost' -H 'content-type: application/json' -d '{\"email\":\"__TRACKED_VAR__\",\"password\":\"Str0ngPass1\"}')",
+      "Bash(MSYS_NO_PATHCONV=1 timeout 200 docker run --rm --add-host=host.docker.internal:host-gateway mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && cat > t.mjs <<\"EOF\" *)"
     ]
   }
 }

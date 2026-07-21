@@ -93,6 +93,14 @@ pub fn hash_session_token(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(digest)
 }
 
+/// Шестизначный код подтверждения почты. Берётся из криптографического источника:
+/// предсказуемый код означал бы обход подтверждения.
+pub fn new_verification_code() -> String {
+    let mut b = [0u8; 4];
+    OsRng.fill_bytes(&mut b);
+    format!("{:06}", u32::from_be_bytes(b) % 1_000_000)
+}
+
 /// Привести почту к каноничному виду для поиска и проверки уникальности:
 /// регистр в адресах не значим, пробелы по краям — опечатка.
 pub fn normalize_email(email: &str) -> String {
@@ -167,6 +175,15 @@ mod tests {
         assert_ne!(h1, h2);
         assert_eq!(hash_session_token(&t1), h1, "хэш воспроизводим — по нему ищем сессию");
         assert!(t1.len() >= 40, "32 байта энтропии");
+    }
+
+    #[test]
+    fn verification_code_is_six_digits() {
+        for _ in 0..50 {
+            let c = new_verification_code();
+            assert_eq!(c.len(), 6, "код всегда шестизначный, включая ведущие нули");
+            assert!(c.chars().all(|c| c.is_ascii_digit()));
+        }
     }
 
     #[test]
