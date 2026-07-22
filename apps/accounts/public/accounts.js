@@ -17,14 +17,17 @@
     return `${location.protocol}//${sub}${base}${port}/`;
   };
 
-  // Быстрые способы входа. `ready` включится, когда появятся ключи провайдера и домен.
+  // Быстрые способы входа. Кнопка активна, только если провайдер настроен на
+  // сервере (есть ключи) — список приходит из /auth/oauth/providers.
   const PROVIDERS = [
-    { id: 'google', label: 'Google', ready: false, mark: 'G' },
-    { id: 'apple', label: 'Apple', ready: false, mark: 'A' },
-    { id: 'telegram', label: 'Telegram', ready: false, mark: 'TG' },
-    { id: 'max', label: 'MAX', ready: false, mark: 'M' },
-    { id: 'qr', label: 'QR', ready: false, mark: 'QR' },
+    { id: 'yandex', label: 'Yandex', mark: 'Я' },
+    { id: 'google', label: 'Google', mark: 'G' },
+    { id: 'apple', label: 'Apple', mark: 'A' },
+    { id: 'telegram', label: 'Telegram', mark: 'TG' },
+    { id: 'max', label: 'MAX', mark: 'M' },
+    { id: 'qr', label: 'QR', mark: 'QR' },
   ];
+  let oauthOn = new Set();
 
   let email = '';
   let isNew = false;
@@ -41,8 +44,26 @@
   const errKey = (s) => (s === 429 ? 'e.rate' : s === 401 ? 'e.creds' : 'e.net');
 
   // ---- Шаг 1: почта --------------------------------------------------------
-  $('#providers').innerHTML = PROVIDERS.map((p) =>
-    `<button class="prov" data-p="${p.id}"${p.ready ? '' : ' disabled'}><i>${p.mark}</i>${p.label}</button>`).join('');
+  function renderProviders() {
+    $('#providers').innerHTML = PROVIDERS.map((p) =>
+      `<button class="prov" data-p="${p.id}"${oauthOn.has(p.id) ? '' : ' disabled'}><i>${p.mark}</i>${p.label}</button>`).join('');
+  }
+  renderProviders();
+  fetch('/auth/oauth/providers').then((r) => (r.ok ? r.json() : [])).then((list) => {
+    oauthOn = new Set(list); renderProviders();
+  }).catch(() => {});
+
+  // Клик по настроенному провайдеру → полностраничный переход на его OAuth.
+  $('#providers').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-p]');
+    if (btn && !btn.disabled && oauthOn.has(btn.dataset.p)) location.href = `/auth/oauth/${btn.dataset.p}/start`;
+  });
+
+  // Вернулись с ошибкой OAuth — покажем и уберём из адреса.
+  if (new URLSearchParams(location.search).get('error') === 'oauth') {
+    $('#provNote').textContent = t('e.oauth');
+    history.replaceState(null, '', location.pathname);
+  }
 
 
 

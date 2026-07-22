@@ -31,7 +31,11 @@ docker compose down              # остановить
 | POST | `/auth/register` | — | `{email, password}` → учётка + сессия в HttpOnly-cookie (ADR-018) |
 | POST | `/auth/login` | — | `{email, password}` → сессия |
 | POST | `/auth/logout` | cookie | закрыть сессию |
-| GET | `/auth/me` | cookie | `{user_id, email}` |
+| GET | `/auth/me` | cookie | `{user_id, email, verified}` |
+| POST | `/auth/passkey/{register,login}/{start,finish}` | — / cookie | Passkey (ADR-020) |
+| GET | `/auth/oauth/providers` | — | список настроенных OAuth-провайдеров |
+| GET | `/auth/oauth/{provider}/start` | — | редирект к провайдеру (ADR-021) |
+| GET | `/auth/oauth/{provider}/callback` | — | возврат: сессия → кабинет |
 | POST | `/admin/users` | — (dev) | создать пользователя `{token}` → `{user_id}` |
 | POST | `/admin/deposit` | — (dev) | пополнить счёт `{user_id, asset, amount}` |
 | GET | `/instruments` | — | список пар с `last/change/bid/ask/high/decimals` |

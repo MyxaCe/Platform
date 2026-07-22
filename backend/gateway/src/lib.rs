@@ -30,6 +30,7 @@ use broker::{Broker, PosSide};
 use persistence::{NoopStore, Persistence};
 
 pub mod mailer;
+pub mod oauth;
 pub mod passkey;
 
 /// Реэкспорт: тестам и бинарю нужен трейт хранилища, чтобы подставить свою реализацию.
@@ -305,6 +306,9 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/passkey/register/finish", post(passkey::register_finish))
         .route("/auth/passkey/login/start", post(passkey::login_start))
         .route("/auth/passkey/login/finish", post(passkey::login_finish))
+        .route("/auth/oauth/providers", get(oauth::providers))
+        .route("/auth/oauth/:provider/start", get(oauth::start))
+        .route("/auth/oauth/:provider/callback", get(oauth::callback))
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))

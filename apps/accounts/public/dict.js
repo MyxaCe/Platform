@@ -26,6 +26,7 @@
       'e.rate': 'Too many attempts. Please try again later.',
       'e.net': 'Server is unavailable. Please try again.',
       'e.pknone': 'No passkey for this site was found on your device.',
+      'e.oauth': 'Sign-in via the provider did not complete. Please try again.',
       'dev.note': 'Mail server is not configured yet, so no email was sent. The code is printed in the gateway log: docker compose logs gateway',
     },
     ru: {
@@ -53,6 +54,7 @@
       'e.rate': 'Слишком много попыток. Попробуйте позже.',
       'e.net': 'Сервер недоступен. Попробуйте ещё раз.',
       'e.pknone': 'На этом устройстве нет ключа Passkey для нашего сайта.',
+      'e.oauth': 'Вход через провайдера не завершился. Попробуйте ещё раз.',
       'dev.note': 'Почтовый сервер ещё не настроен, письмо не отправлено. Код печатается в лог шлюза: docker compose logs gateway',
     },
   };
