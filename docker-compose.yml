@@ -40,7 +40,8 @@ services:
       # Локально нельзя писать localhost: браузер ОТБРАСЫВАЕТ cookie с Domain=localhost
       # целиком (проверено — вход переставал работать). Поэтому lvh.me: это публичное
       # DNS-имя, которое резолвится в 127.0.0.1, и для браузера оно обычный домен.
-      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-.lvh.me}
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-.meriom.com}
+      COOKIE_SECURE: ${COOKIE_SECURE:-1}
     depends_on:
       postgres:
         condition: service_healthy
@@ -88,7 +89,12 @@ services:
       dockerfile: edge/Dockerfile
     container_name: exchange-edge
     ports:
-      - "8888:80"
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Сертификат монтируется, а не копируется в образ: приватный ключ не должен
+      # попасть ни в образ, ни в git (машинно-зависимый, лежит в apps/edge/certs).
+      - ./apps/edge/certs:/etc/nginx/certs:ro
     depends_on:
       - site
       - accounts

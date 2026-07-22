@@ -67,7 +67,18 @@
       "Bash(grep -E \"^\\\\.env$|\\\\.env\\\\.\")",
       "Bash(git ls-tree *)",
       "Bash(xargs -I{} echo \"  файлов target: {} ✓\")",
-      "Bash(git commit -q -m 'chore: обновлён список разрешений инструментария *)"
+      "Bash(git commit -q -m 'chore: обновлён список разрешений инструментария *)",
+      "Bash(where winget *)",
+      "Bash(where choco *)",
+      "Bash(where scoop *)",
+      "Bash(net session *)",
+      "Bash(winget install *)",
+      "Bash(curl -s -o /dev/null -w '%{http_code}' --resolve meriom.com:443:127.0.0.1 https://meriom.com/)",
+      "Bash(echo \"сайт:    $\\(curl -s -o /dev/null -w '%{http_code}' --resolve meriom.com:443:127.0.0.1 https://meriom.com/\\)\")",
+      "Bash(curl -s -o /dev/null -w '%{http_code}' --resolve accounts.meriom.com:443:127.0.0.1 https://accounts.meriom.com/)",
+      "Bash(echo \"вход:    $\\(curl -s -o /dev/null -w '%{http_code}' --resolve accounts.meriom.com:443:127.0.0.1 https://accounts.meriom.com/\\)\")",
+      "Bash(curl -s -o /dev/null -w '%{http_code}' --resolve trade.meriom.com:443:127.0.0.1 https://trade.meriom.com/)",
+      "Bash(nslookup meriom.com)"
     ]
   }
 }
