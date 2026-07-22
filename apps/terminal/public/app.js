@@ -7,9 +7,8 @@ const overlays = { sma: 0, ema: 0, wma: 0, supertrend: 0, psar: 0, ichimoku: 0, 
 let oscillator = '';
 let rawCandles = [], currentDeals = [];
 
-const token = () => document.getElementById('userSel').value;
-// Единственная точка доступа к REST (ADR-015): заголовки и разбор ответов — в api.js.
-const api = Api.create({ token });
+// Единственная точка доступа к REST (ADR-015). Авторизация — сессионной cookie.
+const api = Api.create();
 const pdec = (id) => (META[id]?.price_decimals ?? 2);
 const qdec = (id) => (META[id]?.qty_decimals ?? 3);
 const pscale = (id) => 10 ** pdec(id);
@@ -369,7 +368,6 @@ async function submit(side) {
 }
 document.getElementById('btnBuy').addEventListener('click', () => submit('buy'));
 document.getElementById('btnSell').addEventListener('click', () => submit('sell'));
-document.getElementById('userSel').addEventListener('change', () => { pollAccount(); panel.refresh(); });
 
 // ============================ Account / positions / history ================
 async function pollAccount() { try { const a = await api.account(); if (!a) return; document.getElementById('mBalance').textContent = usd(a.balance); document.getElementById('mEquity').textContent = usd(a.equity); document.getElementById('mMargin').textContent = usd(a.used_margin); document.getElementById('mFree').textContent = usd(a.free_margin); const p = document.getElementById('mPnl'); p.textContent = usd(a.open_pnl); p.style.color = a.open_pnl > 0 ? 'var(--up)' : a.open_pnl < 0 ? 'var(--down)' : ''; } catch (e) { /* */ } }
@@ -391,6 +389,22 @@ function computeSignals() {
 // Поиск, сортировка, избранное и клик по строке — внутри watchlist.js (ADR-015).
 
 // ============================ Start ========================================
+// Доступ и общая шапка (ADR-018/019): терминал — залогиненный продукт. Кто мы —
+// спрашиваем у сервера по сессионной cookie; не вошли → на страницу входа.
+const domainBase = location.host.replace(/^trade\./, '');
+document.getElementById('toCabinet').href = `${location.protocol}//my.${domainBase}/`;
+document.getElementById('logout').addEventListener('click', async () => {
+  try { await fetch('/auth/logout', { method: 'POST' }); } catch { /* всё равно уводим */ }
+  location.href = `${location.protocol}//accounts.${domainBase}/`;
+});
+async function boot() {
+  let me = null;
+  try { const r = await fetch('/auth/me'); if (r.ok) me = await r.json(); } catch { /* не вошли */ }
+  if (!me || !me.email) { location.href = `${location.protocol}//accounts.${domainBase}/`; return; }
+  document.getElementById('who').textContent = me.email;
+}
+boot();
+
 renderIcons();
 applyLayout();
 initResizers();

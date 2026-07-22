@@ -9,7 +9,7 @@
 // с этим модулем правка будет в одном месте, а не в каждом виджете.
 //
 // Контракт:
-//   const api = Api.create({ token: () => 'bearer-token' });
+//   const api = Api.create();  // авторизация — сессионной cookie
 //
 // Соглашение по ошибкам (повторяет прежнее поведение app.js):
 //   • чтение   → данные при успехе, null при сетевой ошибке или не-2xx.
@@ -19,15 +19,14 @@
 //   • мутация  → { ok, status, data } — вызывающий сам решает, что показать.
 // ============================================================================
 (function () {
-  /** Создать клиента. `ctx.token()` вызывается на каждом запросе — токен может смениться. */
-  function create(ctx) {
-    const token = (ctx && ctx.token) || (() => '');
-    const auth = () => ({ Authorization: `Bearer ${token()}` });
-
+  /** Создать клиента. Авторизация — сессионной cookie (ADR-018): терминал и API на
+   *  одном origin (trade.<домен>), браузер шлёт cookie сам. Заголовок Bearer больше
+   *  не нужен. */
+  function create() {
     /** GET с разбором JSON. Возвращает данные либо null (ошибка сети / не-2xx). */
-    async function read(url, headers) {
+    async function read(url) {
       try {
-        const r = await fetch(url, headers ? { headers } : undefined);
+        const r = await fetch(url);
         if (!r.ok) return null;
         return await r.json();
       } catch {
@@ -37,7 +36,7 @@
 
     /** POST/DELETE с телом. Возвращает { ok, status, data }; data может быть null. */
     async function mutate(url, method, body) {
-      const opts = { method, headers: auth() };
+      const opts = { method, headers: {} };
       if (body !== undefined) {
         opts.headers['Content-Type'] = 'application/json';
         opts.body = JSON.stringify(body);
@@ -64,16 +63,16 @@
       stats: (id) => read(`/stats/${id}`),
 
       // ---- Счёт пользователя ---------------------------------------------
-      account: () => read('/account', auth()),
+      account: () => read('/account'),
 
       // ---- Позиции ---------------------------------------------------------
-      deals: () => read('/deals', auth()),
+      deals: () => read('/deals'),
       openDeal: (body) => mutate('/deals', 'POST', body),
       closeDeal: (id) => mutate(`/deals/${id}/close`, 'POST'),
-      closedDeals: () => read('/deals/closed', auth()),
+      closedDeals: () => read('/deals/closed'),
 
       // ---- Отложенные (лимитные) ордера -----------------------------------
-      pending: () => read('/pending', auth()),
+      pending: () => read('/pending'),
       placePending: (body) => mutate('/pending', 'POST', body),
       cancelPending: (id) => mutate(`/pending/${id}`, 'DELETE'),
     };

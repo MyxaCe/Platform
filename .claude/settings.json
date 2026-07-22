@@ -106,7 +106,24 @@
       "Bash(git checkout *)",
       "Bash(MSYS_NO_PATHCONV=1 docker run --rm -e CARGO_TARGET_DIR=/target -v \"$\\(pwd\\)/backend:/app\" -w /app -v platform-target:/target -v platform-registry:/usr/local/cargo/registry rust:slim sh -c \"rustup component add clippy >/dev/null 2>&1 && cargo clippy --workspace --all-targets -- -D warnings 2>&1 | grep -E 'error|warning:|Finished' | tail -4\")",
       "Bash(git branch *)",
-      "Bash(git worktree *)"
+      "Bash(git worktree *)",
+      "Read(//c/Users/user/Desktop/Platform-CRM/docs/**)",
+      "Bash(cd \"c:/Users/user/Desktop/Platform-CRM\" && echo \"=== apps/ tree ===\" && find apps -maxdepth 2 -type f | sort && echo && echo \"=== apps/shared ===\" && ls apps/shared/)",
+      "Read(//c/Users/user/Desktop/Platform-CRM/**)",
+      "Bash(node --check apps/terminal/public/api.js)",
+      "Bash(curl -sk -o /dev/null -w '%{http_code}' https://trade.meriom.com/)",
+      "Bash(echo \"терминал отвечает: $\\(curl -sk -o /dev/null -w '%{http_code}' https://trade.meriom.com/\\)\")",
+      "Bash(cd \"c:/Users/user/Desktop/Platform-CRM\" && echo \"=== edge/nginx.conf ===\" && cat apps/edge/nginx.conf && echo && echo \"=== docker-compose.yml ===\" && cat docker-compose.yml)",
+      "Read(//c/Users/user/Desktop/Platform-CRM/apps/cabinet/public/**)",
+      "Read(//c/Users/user/Desktop/Platform-CRM/apps/shared/**)",
+      "Bash(grep -n \"trade\\\\\\\\\\\\\\\\\\\\.\\\\|replace\\(/\\\\^trade\\\\|domainBase\\\\|toCabinet\\\\|#who\\\\|getElementById\\('who'\\)\" apps/terminal/public/app.js)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\user\\Desktop\\Platform-CRM\\docs\\01-architecture\\decisions",
+      "c:\\Users\\user\\Desktop\\Platform-CRM\\docs",
+      "c:\\Users\\user\\Desktop\\Platform-CRM\\apps\\crm\\public",
+      "c:\\Users\\user\\Desktop\\Platform-CRM\\apps\\crm",
+      "c:\\Users\\user\\Desktop\\Platform-CRM"
     ]
   }
 }
