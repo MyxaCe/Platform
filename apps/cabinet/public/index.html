@@ -62,11 +62,13 @@
           </div>
           <div class="panel">
             <h2 data-i18n="ov.actions">Funding</h2>
-            <p class="muted small" data-i18n="ov.fundNote">Deposits and withdrawals are not connected yet — this is a demo environment with paper money.</p>
+            <p class="muted small" data-i18n="ov.fundNote">Demo environment — funds are virtual (paper money).</p>
+            <input id="fundAmount" class="fund__amount" type="number" min="1" step="1" data-i18n-ph="ov.amount" placeholder="Amount, $" />
             <div class="btnrow">
-              <button class="btn btn--accent" disabled data-i18n="ov.deposit">Deposit</button>
-              <button class="btn btn--ghost" disabled data-i18n="ov.withdraw">Withdraw</button>
+              <button class="btn btn--accent" id="btnDeposit" data-i18n="ov.deposit">Deposit</button>
+              <button class="btn btn--ghost" id="btnWithdraw" data-i18n="ov.withdraw">Withdraw</button>
             </div>
+            <div id="fundMsg" class="muted small" style="margin-top:8px"></div>
           </div>
         </div>
       </section>

@@ -24,6 +24,12 @@
   const get = async (url) => {
     try { const r = await fetch(url); return r.ok ? await r.json() : null; } catch { return null; }
   };
+  const post = async (url, body) => {
+    try {
+      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      return { ok: r.ok, status: r.status };
+    } catch { return { ok: false, status: 0 }; }
+  };
 
   // ---- Доступ --------------------------------------------------------------
   let me = null;
@@ -125,6 +131,20 @@
   paintLang();
 
   $('#themeBtn').addEventListener('click', () => Theme.toggle());
+
+  // Пополнение/вывод (демо-деньги). Ввод в долларах → центы; сервер проверяет
+  // лимиты и свободные средства.
+  async function fund(url) {
+    const dollars = parseFloat($('#fundAmount').value);
+    if (!(dollars > 0)) { $('#fundMsg').textContent = t('fund.bad'); return; }
+    const r = await post(url, { amount: Math.round(dollars * 100) });
+    if (r.ok) { $('#fundAmount').value = ''; $('#fundMsg').textContent = t('fund.ok'); refresh(); }
+    else if (r.status === 402) $('#fundMsg').textContent = t('fund.insufficient');
+    else if (r.status === 400) $('#fundMsg').textContent = t('fund.bad');
+    else $('#fundMsg').textContent = t('fund.err');
+  }
+  $('#btnDeposit').addEventListener('click', () => fund('/account/deposit'));
+  $('#btnWithdraw').addEventListener('click', () => fund('/account/withdraw'));
 
   // Привязка Passkey к аккаунту (ADR-020). Кнопка неактивна, если браузер не умеет.
   const pkBtn = $('#addPasskey'), pkStatus = $('#pkStatus');

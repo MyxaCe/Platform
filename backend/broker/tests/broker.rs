@@ -172,3 +172,40 @@ fn snapshot_of_unknown_user_is_start_balance() {
     assert_eq!(snap.balance, 1_000_000);
     assert!(snap.positions.is_empty() && snap.closed.is_empty());
 }
+
+// ---- Пополнение и вывод ----------------------------------------------------
+
+#[test]
+fn deposit_increases_balance() {
+    let mut b = Broker::new(1_000_000, 1);
+    assert_eq!(b.balance(ALICE), 1_000_000);
+    assert_eq!(b.deposit(ALICE, 500_000), 1_500_000);
+    assert_eq!(b.balance(ALICE), 1_500_000);
+}
+
+#[test]
+fn withdraw_decreases_balance() {
+    let mut b = Broker::new(1_000_000, 1);
+    assert_eq!(b.withdraw(ALICE, 400_000).unwrap(), 600_000);
+    assert_eq!(b.balance(ALICE), 600_000);
+}
+
+#[test]
+fn cannot_withdraw_more_than_free() {
+    let mut b = Broker::new(1_000_000, 1);
+    assert_eq!(b.withdraw(ALICE, 1_000_001), Err(BrokerError::InsufficientFunds));
+    assert_eq!(b.balance(ALICE), 1_000_000, "неудачный вывод не меняет баланс");
+}
+
+#[test]
+fn margin_locks_funds_from_withdrawal() {
+    let mut b = Broker::new(1_000_000, 1);
+    // Открываем позицию: нотионал = маржа при leverage=1 → часть баланса занята.
+    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, None).unwrap();
+    let free = b.free_margin(ALICE);
+    assert!(free < 1_000_000, "часть средств ушла под маржу");
+    // Больше свободного вывести нельзя.
+    assert_eq!(b.withdraw(ALICE, free + 1), Err(BrokerError::InsufficientFunds));
+    // Ровно свободное — можно.
+    assert!(b.withdraw(ALICE, free).is_ok());
+}

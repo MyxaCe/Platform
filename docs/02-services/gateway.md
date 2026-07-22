@@ -53,7 +53,9 @@ docker compose down              # остановить
 | POST | `/pending` | Bearer | лимитный ордер `{instrument, side, qty, price, sl?, tp?}` |
 | GET | `/pending` | Bearer | отложенные ордера |
 | DELETE | `/pending/{id}` | Bearer | отменить лимитный ордер |
-| GET | `/account` | Bearer | `{balance, equity, used_margin, free_margin, open_pnl}` (центы) |
+| GET | `/account` | cookie | `{balance, equity, used_margin, free_margin, open_pnl}` (центы) |
+| POST | `/account/deposit` | cookie | пополнить `{amount}` (центы, демо-деньги) → `{balance}` |
+| POST | `/account/withdraw` | cookie | вывести `{amount}` → `{balance}`; больше свободного → 402 |
 
 Фоновый монитор (`spawn_monitor`) каждые 500мс триггерит лимитные ордера и SL/TP по ценам фида.
 | WS | `/stream` | — | живая лента событий (JSON) |

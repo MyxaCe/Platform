@@ -81,6 +81,8 @@ pub enum BrokerError {
     InsufficientMargin,
     UnknownPosition,
     UnknownPending,
+    /// Вывод больше, чем свободно (за вычетом занятого под маржу).
+    InsufficientFunds,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -227,6 +229,24 @@ impl Broker {
     /// Закрыть позицию по марк-цене. Возвращает реализованный P&L.
     pub fn close(&mut self, user: UserId, id: u64, mark: i64) -> Result<Cents, BrokerError> {
         self.acct(user).close_pos(id, mark).ok_or(BrokerError::UnknownPosition)
+    }
+
+    /// Пополнить счёт (демо: бумажные деньги). Возвращает новый баланс.
+    pub fn deposit(&mut self, user: UserId, amount: Cents) -> Cents {
+        let a = self.acct(user);
+        a.balance += amount;
+        a.balance
+    }
+
+    /// Вывести со счёта. Нельзя вывести больше, чем свободно (баланс минус занятое
+    /// под маржу открытых позиций). Возвращает новый баланс.
+    pub fn withdraw(&mut self, user: UserId, amount: Cents) -> Result<Cents, BrokerError> {
+        if amount > self.free_margin(user) {
+            return Err(BrokerError::InsufficientFunds);
+        }
+        let a = self.acct(user);
+        a.balance -= amount;
+        Ok(a.balance)
     }
 
     /// Разместить отложенный (лимитный) ордер. Возвращает его id.

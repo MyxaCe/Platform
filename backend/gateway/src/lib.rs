@@ -238,6 +238,8 @@ pub fn router(state: AppState) -> Router {
         .route("/pending", post(place_pending).get(list_pending))
         .route("/pending/:id", delete(cancel_pending))
         .route("/account", get(account))
+        .route("/account/deposit", post(deposit_funds))
+        .route("/account/withdraw", post(withdraw_funds))
         .route("/stream", get(ws_stream))
         .with_state(state)
 }
@@ -841,6 +843,39 @@ async fn close_deal(State(st): State<AppState>, headers: HeaderMap, Path(id): Pa
 }
 
 /// Сводка счёта: баланс/equity/маржа/free/open P&L (в центах).
+#[derive(Deserialize)]
+struct FundReq {
+    /// Сумма в центах (демо-деньги). Фронт шлёт целые центы.
+    amount: i64,
+}
+
+/// Максимум за одну операцию — $1 000 000 (демо, чтобы не вводили абсурд).
+const FUND_MAX_CENTS: i64 = 100_000_000;
+
+/// Пополнить счёт демо-деньгами. Проводится как мутация счёта (ADR-016):
+/// под локом счёта, слепок, запись; при отказе хранилища — откат и 503.
+async fn deposit_funds(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<FundReq>) -> Result<Json<serde_json::Value>, ApiErr> {
+    let user = authed(&st, &headers).await?;
+    if req.amount <= 0 || req.amount > FUND_MAX_CENTS {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid amount"));
+    }
+    let balance = with_account(&st, user, |b| Ok(b.deposit(user, req.amount as i128))).await?;
+    Ok(Json(serde_json::json!({ "balance": balance })))
+}
+
+/// Вывести со счёта. Нельзя больше свободного (за вычетом занятого под маржу).
+async fn withdraw_funds(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<FundReq>) -> Result<Json<serde_json::Value>, ApiErr> {
+    let user = authed(&st, &headers).await?;
+    if req.amount <= 0 || req.amount > FUND_MAX_CENTS {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid amount"));
+    }
+    let balance = with_account(&st, user, |b| {
+        b.withdraw(user, req.amount as i128).map_err(|_| err(StatusCode::PAYMENT_REQUIRED, "insufficient_funds"))
+    })
+    .await?;
+    Ok(Json(serde_json::json!({ "balance": balance })))
+}
+
 async fn account(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<AccountDto>, ApiErr> {
     let user = authed(&st, &headers).await?;
     let m = marks(&st).await;

@@ -116,7 +116,15 @@
       "Bash(cd \"c:/Users/user/Desktop/Platform-CRM\" && echo \"=== edge/nginx.conf ===\" && cat apps/edge/nginx.conf && echo && echo \"=== docker-compose.yml ===\" && cat docker-compose.yml)",
       "Read(//c/Users/user/Desktop/Platform-CRM/apps/cabinet/public/**)",
       "Read(//c/Users/user/Desktop/Platform-CRM/apps/shared/**)",
-      "Bash(grep -n \"trade\\\\\\\\\\\\\\\\\\\\.\\\\|replace\\(/\\\\^trade\\\\|domainBase\\\\|toCabinet\\\\|#who\\\\|getElementById\\('who'\\)\" apps/terminal/public/app.js)"
+      "Bash(grep -n \"trade\\\\\\\\\\\\\\\\\\\\.\\\\|replace\\(/\\\\^trade\\\\|domainBase\\\\|toCabinet\\\\|#who\\\\|getElementById\\('who'\\)\" apps/terminal/public/app.js)",
+      "Bash(MSYS_NO_PATHCONV=1 docker run --rm mcr.microsoft.com/playwright:latest node -e \"try{console.log\\('playwright:', !!require\\('playwright'\\).chromium\\)}catch\\(e\\){console.log\\('ERR', e.message\\)}\")",
+      "Bash(cp C:/Users/user/Desktop/Platform-CRM/apps/crm/public/* C:/Users/user/AppData/Local/Temp/claude/c--Users-user-Desktop-Platform/3cc9a586-368c-4b3a-801d-cb04d425af1a/scratchpad/webroot/)",
+      "Bash(cp C:/Users/user/Desktop/Platform-CRM/apps/shared/* C:/Users/user/AppData/Local/Temp/claude/c--Users-user-Desktop-Platform/3cc9a586-368c-4b3a-801d-cb04d425af1a/scratchpad/webroot/shared/)",
+      "Bash(MSYS_NO_PATHCONV=1 docker run --rm -v C:/Users/user/AppData/Local/Temp/claude/c--Users-user-Desktop-Platform/3cc9a586-368c-4b3a-801d-cb04d425af1a/scratchpad:/work -w /work mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'npm i --no-save --silent playwright-core@1.48.0 2>/dev/null && node runner.js')",
+      "Bash(MSYS_NO_PATHCONV=1 docker run --rm -v __CMDSUB_OUTPUT__/apps/crm/public:/js -w /js mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'for f in crm.js dict.js; do node --check \"$f\" && echo \"ok: $f\"; done')",
+      "Bash(MSYS_NO_PATHCONV=1 docker run --rm -v \"$\\(pwd\\)/apps/crm/nginx.conf:/etc/nginx/conf.d/default.conf:ro\" nginx:alpine nginx -t)",
+      "Bash(cd \"c:/Users/user/Desktop/Platform-CRM\" && docker compose config --quiet && echo \"compose OK: config valid\" && echo \"--- crm service present? ---\" && docker compose config --services | grep -E \"crm|edge\")",
+      "Bash(MSYS_NO_PATHCONV=1 docker build -q -f apps/crm/Dockerfile -t crm-build-test ./apps)"
     ],
     "additionalDirectories": [
       "c:\\Users\\user\\Desktop\\Platform-CRM\\docs\\01-architecture\\decisions",

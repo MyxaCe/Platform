@@ -310,3 +310,48 @@ async fn passkey_login_start_without_key_is_404() {
     let (s, _, _) = send_ck(&app, "POST", "/auth/passkey/login/start", None, Some(json!({ "email": "nopk@example.com" }))).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
+
+// ---- Пополнение и вывод (демо-деньги) --------------------------------------
+
+#[tokio::test]
+async fn deposit_then_withdraw_via_session() {
+    let app = app().await;
+    let (_, _, set) = send_ck(&app, "POST", "/auth/register", None, Some(CREDS("fund@example.com"))).await;
+    let ck = session_of(&set);
+
+    // Стартовый баланс демо-брокера — $100k (10_000_000 центов).
+    let (s, acc, _) = send_ck(&app, "GET", "/account", Some(&ck), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(acc["balance"], 10_000_000);
+
+    // Пополнение +$500.
+    let (s, d, _) = send_ck(&app, "POST", "/account/deposit", Some(&ck), Some(json!({ "amount": 50_000 }))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(d["balance"], 10_050_000);
+
+    // Вывод -$200.
+    let (s, w, _) = send_ck(&app, "POST", "/account/withdraw", Some(&ck), Some(json!({ "amount": 20_000 }))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(w["balance"], 10_030_000);
+}
+
+#[tokio::test]
+async fn withdraw_over_free_is_402() {
+    let app = app().await;
+    let (_, _, set) = send_ck(&app, "POST", "/auth/register", None, Some(CREDS("poor@example.com"))).await;
+    let ck = session_of(&set);
+    let (s, _, _) = send_ck(&app, "POST", "/account/withdraw", Some(&ck), Some(json!({ "amount": 10_000_001 }))).await;
+    assert_eq!(s, StatusCode::PAYMENT_REQUIRED);
+}
+
+#[tokio::test]
+async fn funding_rejects_bad_amount_and_needs_auth() {
+    let app = app().await;
+    let (s, _, _) = send_ck(&app, "POST", "/account/deposit", None, Some(json!({ "amount": 100 }))).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "без сессии — 401");
+
+    let (_, _, set) = send_ck(&app, "POST", "/auth/register", None, Some(CREDS("bad@example.com"))).await;
+    let ck = session_of(&set);
+    let (s, _, _) = send_ck(&app, "POST", "/account/deposit", Some(&ck), Some(json!({ "amount": 0 }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "ноль/минус — 400");
+}
