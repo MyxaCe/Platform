@@ -101,7 +101,8 @@
       "Bash(MSYS_NO_PATHCONV=1 docker run --rm -e CARGO_TARGET_DIR=/target -v \"$\\(pwd\\)/backend:/app\" -w /app -v platform-target:/target -v platform-registry:/usr/local/cargo/registry rust:slim sh -c \"touch gateway/src/oauth.rs && cargo clippy -p gateway 2>&1 | grep -B1 -A8 'redundant'\")",
       "Bash(sed -i 's|\\\\.map\\(|e| auth::normalize_email\\(e\\)\\)|XXXX|' backend/gateway/src/oauth.rs)",
       "Bash(MSYS_NO_PATHCONV=1 docker run --rm -e CARGO_TARGET_DIR=/target -v \"$\\(pwd\\)/backend:/app\" -w /app -v platform-target:/target -v platform-registry:/usr/local/cargo/registry rust:slim sh -c \"cargo clippy --workspace --all-targets -- -D warnings 2>&1 | grep -E 'error|warning:|Finished' | tail -6\")",
-      "Bash(MSYS_NO_PATHCONV=1 docker run --rm -e CARGO_TARGET_DIR=/target -v \"$\\(pwd\\)/backend:/app\" -w /app -v platform-target:/target -v platform-registry:/usr/local/cargo/registry rust:slim sh -c \"rustup component add clippy >/dev/null 2>&1 && cargo clippy --workspace --all-targets -- -D warnings 2>&1 | grep -E 'error|warning:|Finished' | tail -6\")"
+      "Bash(MSYS_NO_PATHCONV=1 docker run --rm -e CARGO_TARGET_DIR=/target -v \"$\\(pwd\\)/backend:/app\" -w /app -v platform-target:/target -v platform-registry:/usr/local/cargo/registry rust:slim sh -c \"rustup component add clippy >/dev/null 2>&1 && cargo clippy --workspace --all-targets -- -D warnings 2>&1 | grep -E 'error|warning:|Finished' | tail -6\")",
+      "Bash(git commit -q -m 'docs: брифинг для параллельной сессии по CRM/бэк-офису *)"
     ]
   }
 }
