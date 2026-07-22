@@ -77,6 +77,13 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at  BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id);
+CREATE TABLE IF NOT EXISTS passkeys (
+  cred_id     TEXT PRIMARY KEY,          -- id учётных данных ключа (url-safe base64)
+  user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  data        TEXT NOT NULL,             -- JSON публичного ключа (webauthn Passkey)
+  created_at  BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS passkeys_user_idx ON passkeys (user_id);
 CREATE TABLE IF NOT EXISTS accounts (
   user_id     BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   balance     NUMERIC(38,0) NOT NULL,
@@ -159,6 +166,14 @@ impl Persistence for PgStore {
             .map_err(db)?
             .iter()
             .map(|r: &PgRow| (r.get::<String, _>("token_hash"), UserId(r.get::<i64, _>("user_id") as u64), r.get::<i64, _>("expires_at")))
+            .collect();
+
+        let passkeys = sqlx::query("SELECT user_id, data FROM passkeys")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db)?
+            .iter()
+            .map(|r: &PgRow| (UserId(r.get::<i64, _>("user_id") as u64), r.get::<String, _>("data")))
             .collect();
 
         let mut accounts = Vec::new();
@@ -244,7 +259,7 @@ impl Persistence for PgStore {
             accounts.push((*uid, AccountSnapshot { balance, next_id, positions, pendings, closed }));
         }
 
-        Ok(LoadedState { users, credentials, sessions, accounts })
+        Ok(LoadedState { users, credentials, sessions, passkeys, accounts })
     }
 
     async fn save_account(&self, user: UserId, snap: &AccountSnapshot) -> Result<(), StoreError> {
@@ -369,6 +384,20 @@ impl Persistence for PgStore {
             .execute(&self.pool)
             .await
             .map_err(db)?;
+        Ok(())
+    }
+
+    async fn save_passkey(&self, user: UserId, cred_id: &str, data: &str) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO passkeys (cred_id, user_id, data) VALUES ($1, $2, $3)
+             ON CONFLICT (cred_id) DO UPDATE SET data = EXCLUDED.data",
+        )
+        .bind(cred_id)
+        .bind(user.0 as i64)
+        .bind(data)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
         Ok(())
     }
 

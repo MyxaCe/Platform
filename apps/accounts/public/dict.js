@@ -7,6 +7,7 @@
       's1.provNote': 'Fast sign-in methods need provider credentials and a verified domain — not configured yet.',
       's2.title': 'Enter your password', 's2.titleNew': 'Create a password',
       's2.subLogin': 'Signing in as', 's2.subNew': 'Creating an account for',
+      's2.passkey': 'Sign in with a passkey',
       's3.title': 'Confirm your email', 's3.sub': 'We sent a 6-digit code to',
       's4.title': 'You are all set', 's4.sub': 'Your account is ready.',
       's4.cabinet': 'Go to client area', 's4.terminal': 'Open terminal',
@@ -24,6 +25,7 @@
       'e.code': 'Invalid or expired code',
       'e.rate': 'Too many attempts. Please try again later.',
       'e.net': 'Server is unavailable. Please try again.',
+      'e.pknone': 'No passkey for this site was found on your device.',
       'dev.note': 'Mail server is not configured yet, so no email was sent. The code is printed in the gateway log: docker compose logs gateway',
     },
     ru: {
@@ -32,6 +34,7 @@
       's1.provNote': 'Быстрым способам входа нужны ключи провайдеров и подтверждённый домен — пока не настроено.',
       's2.title': 'Введите пароль', 's2.titleNew': 'Придумайте пароль',
       's2.subLogin': 'Вход в аккаунт', 's2.subNew': 'Создаём аккаунт для',
+      's2.passkey': 'Войти по Passkey',
       's3.title': 'Подтвердите почту', 's3.sub': 'Мы отправили шестизначный код на',
       's4.title': 'Готово', 's4.sub': 'Аккаунт создан.',
       's4.cabinet': 'В личный кабинет', 's4.terminal': 'Открыть терминал',
@@ -49,6 +52,7 @@
       'e.code': 'Неверный или просроченный код',
       'e.rate': 'Слишком много попыток. Попробуйте позже.',
       'e.net': 'Сервер недоступен. Попробуйте ещё раз.',
+      'e.pknone': 'На этом устройстве нет ключа Passkey для нашего сайта.',
       'dev.note': 'Почтовый сервер ещё не настроен, письмо не отправлено. Код печатается в лог шлюза: docker compose logs gateway',
     },
   };

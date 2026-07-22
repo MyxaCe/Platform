@@ -78,7 +78,17 @@
       "Bash(curl -s -o /dev/null -w '%{http_code}' --resolve accounts.meriom.com:443:127.0.0.1 https://accounts.meriom.com/)",
       "Bash(echo \"вход:    $\\(curl -s -o /dev/null -w '%{http_code}' --resolve accounts.meriom.com:443:127.0.0.1 https://accounts.meriom.com/\\)\")",
       "Bash(curl -s -o /dev/null -w '%{http_code}' --resolve trade.meriom.com:443:127.0.0.1 https://trade.meriom.com/)",
-      "Bash(nslookup meriom.com)"
+      "Bash(nslookup meriom.com)",
+      "Read(//c/Windows/System32/drivers/etc/**)",
+      "Bash(printf '\\\\n# meriom.com — локальная разработка \\(127.0.0.1\\)\\\\n127.0.0.1 meriom.com\\\\n127.0.0.1 accounts.meriom.com\\\\n127.0.0.1 trade.meriom.com\\\\n127.0.0.1 my.meriom.com\\\\n')",
+      "Bash(git commit -q -m 'docs: локальный резолвинг meriom.com через hosts \\(ADR-019\\) *)",
+      "Bash(node --check apps/accounts/public/accounts.js)",
+      "Bash(node --check apps/shared/passkey.js)",
+      "Bash(curl -sk https://accounts.meriom.com/)",
+      "Bash(curl -sk -o /dev/null -w \"%{http_code}\\\\n\" https://accounts.meriom.com/shared/passkey.js)",
+      "Bash(curl -sk https://accounts.meriom.com/accounts.js)",
+      "Bash(MSYS_NO_PATHCONV=1 timeout 220 docker run --rm --add-host=host.docker.internal:host-gateway mcr.microsoft.com/playwright:v1.48.0-jammy sh -c 'cd /tmp && npm i playwright-core@1.48 -s >/dev/null 2>&1 && cat > t.mjs <<\"EOF\" *)",
+      "Bash(MSYS_NO_PATHCONV=1 docker run --rm -e CARGO_TARGET_DIR=/target -v \"$\\(pwd\\)/backend:/app\" -w /app -v platform-target:/target -v platform-registry:/usr/local/cargo/registry rust:slim sh -c \"apt-get update -qq && apt-get install -y -qq libssl-dev pkg-config >/dev/null 2>&1 && rustup component add clippy >/dev/null 2>&1 && cargo clippy --workspace --all-targets -- -D warnings 2>&1 | grep -E 'error|warning|Finished' | tail -20\")"
     ]
   }
 }

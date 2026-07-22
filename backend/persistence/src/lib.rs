@@ -59,6 +59,8 @@ pub struct LoadedState {
     pub credentials: Vec<(UserId, String, String)>,
     /// Живые сессии: (хэш токена, чей, до какого времени в unix-секундах).
     pub sessions: Vec<(String, UserId, i64)>,
+    /// Passkey-ключи: (чей, JSON публичного ключа). Приватный ключ у нас не хранится.
+    pub passkeys: Vec<(UserId, String)>,
     /// Счета брокера.
     pub accounts: Vec<(UserId, AccountSnapshot)>,
 }
@@ -92,6 +94,11 @@ pub trait Persistence: Send + Sync {
 
     /// Закрыть сессию (выход).
     async fn delete_session(&self, _token_hash: &str) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    /// Сохранить/обновить публичный Passkey-ключ (ADR-020). `data` — JSON `Passkey`.
+    async fn save_passkey(&self, _user: UserId, _cred_id: &str, _data: &str) -> Result<(), StoreError> {
         Ok(())
     }
 

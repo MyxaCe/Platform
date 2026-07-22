@@ -30,6 +30,7 @@ use broker::{Broker, PosSide};
 use persistence::{NoopStore, Persistence};
 
 pub mod mailer;
+pub mod passkey;
 
 /// Реэкспорт: тестам и бинарю нужен трейт хранилища, чтобы подставить свою реализацию.
 pub use persistence;
@@ -52,6 +53,9 @@ pub struct UserRegistry {
     /// Кто подтвердил почту кодом. Пока в памяти: до реальных денег переедет в БД
     /// вместе с остальным профилем.
     verified: std::collections::HashSet<UserId>,
+    /// Публичные ключи Passkey по пользователям (ADR-020). Приватные ключи — только
+    /// на устройстве клиента; у нас лежит то, чем проверяется подпись.
+    passkeys: HashMap<UserId, Vec<webauthn_rs::prelude::Passkey>>,
     next: u64,
 }
 impl UserRegistry {
@@ -106,6 +110,15 @@ impl UserRegistry {
     pub fn is_verified(&self, user: UserId) -> bool {
         self.verified.contains(&user)
     }
+    pub fn add_passkey(&mut self, user: UserId, pk: webauthn_rs::prelude::Passkey) {
+        self.passkeys.entry(user).or_default().push(pk);
+    }
+    pub fn passkeys_of(&self, user: UserId) -> Vec<webauthn_rs::prelude::Passkey> {
+        self.passkeys.get(&user).cloned().unwrap_or_default()
+    }
+    pub fn set_passkeys(&mut self, user: UserId, keys: Vec<webauthn_rs::prelude::Passkey>) {
+        self.passkeys.insert(user, keys);
+    }
 
     /// Идемпотентно: известный токен возвращает свой id. Флаг — создан ли новый.
     ///
@@ -156,6 +169,9 @@ pub struct AppState {
     /// Попытки входа и регистрации для защиты от перебора (ADR-018): ключ → отметки времени.
     /// Живёт в памяти процесса; при распиле на сервисы переедет в общее хранилище.
     attempts: Arc<Mutex<HashMap<String, Vec<i64>>>>,
+    /// WebAuthn-движок (ADR-020) и незавершённые церемонии passkey (flow-id → состояние).
+    webauthn: Arc<webauthn_rs::Webauthn>,
+    pk_flows: Arc<Mutex<HashMap<String, (passkey::PkFlow, i64)>>>,
 }
 
 pub fn build_state() -> AppState {
@@ -181,6 +197,8 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         acct_locks: Arc::new(Mutex::new(HashMap::new())),
         codes: Arc::new(Mutex::new(HashMap::new())),
         attempts: Arc::new(Mutex::new(HashMap::new())),
+        webauthn: passkey::build_webauthn(),
+        pk_flows: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -189,7 +207,7 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
     st.store.init().await?;
     let loaded = st.store.load_all().await?;
     let (users_n, accounts_n) = (loaded.users.len(), loaded.accounts.len());
-    let (creds_n, sess_n) = (loaded.credentials.len(), loaded.sessions.len());
+    let (creds_n, sess_n, pk_n) = (loaded.credentials.len(), loaded.sessions.len(), loaded.passkeys.len());
     {
         let mut reg = st.users.lock().await;
         for (id, token) in loaded.users {
@@ -200,6 +218,12 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
         }
         for (token_hash, id, expires) in loaded.sessions {
             reg.put_session(token_hash, id, expires);
+        }
+        for (id, data) in loaded.passkeys {
+            match serde_json::from_str(&data) {
+                Ok(pk) => reg.add_passkey(id, pk),
+                Err(e) => eprintln!("[passkey] не разобрал сохранённый ключ пользователя {}: {e}", id.0),
+            }
         }
     }
     {
@@ -213,8 +237,8 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
     if !broken.is_empty() {
         return Err(persistence::StoreError(format!("нарушены инварианты: {}", broken.join("; "))));
     }
-    if users_n + accounts_n + creds_n + sess_n > 0 {
-        println!("[gateway] восстановлено из хранилища: пользователей {users_n}, счетов {accounts_n}, учётных записей {creds_n}, сессий {sess_n}");
+    if users_n + accounts_n + creds_n + sess_n + pk_n > 0 {
+        println!("[gateway] восстановлено из хранилища: пользователей {users_n}, счетов {accounts_n}, учётных записей {creds_n}, сессий {sess_n}, passkey {pk_n}");
     }
     Ok(())
 }
@@ -277,6 +301,10 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/check-email", post(check_email))
         .route("/auth/send-code", post(send_code))
         .route("/auth/verify-code", post(verify_code))
+        .route("/auth/passkey/register/start", post(passkey::register_start))
+        .route("/auth/passkey/register/finish", post(passkey::register_finish))
+        .route("/auth/passkey/login/start", post(passkey::login_start))
+        .route("/auth/passkey/login/finish", post(passkey::login_finish))
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
@@ -626,6 +654,8 @@ struct EmailCheckResp {
     /// Зарегистрирована ли почта: сайт по этому ответу решает, спрашивать пароль
     /// (вход) или заводить учётку (регистрация).
     registered: bool,
+    /// Есть ли у пользователя привязанный Passkey — тогда предлагаем вход по ключу.
+    has_passkey: bool,
 }
 
 /// Шаг 1 пошагового входа: существует ли учётка с такой почтой.
@@ -641,8 +671,14 @@ async fn check_email(State(st): State<AppState>, headers: HeaderMap, Json(req): 
     if !auth::is_email_like(&email) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid email"));
     }
-    let registered = st.users.lock().await.find_by_email(&email).is_some();
-    Ok(Json(EmailCheckResp { registered }))
+    let (registered, has_passkey) = {
+        let reg = st.users.lock().await;
+        match reg.find_by_email(&email) {
+            Some((id, _)) => (true, !reg.passkeys_of(id).is_empty()),
+            None => (false, false),
+        }
+    };
+    Ok(Json(EmailCheckResp { registered, has_passkey }))
 }
 
 #[derive(Deserialize)]

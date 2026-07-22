@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Системные зависимости (OpenSSL для webauthn-rs)
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
       - name: Тулчейн
         run: rustup component add clippy
 

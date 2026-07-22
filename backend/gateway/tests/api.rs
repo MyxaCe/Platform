@@ -284,3 +284,29 @@ async fn login_attempts_are_rate_limited() {
     }
     assert!(saw_429, "перебор паролей должен упираться в ограничитель");
 }
+
+// ---- Passkey (ADR-020) — граничные случаи без виртуального аутентификатора ---
+
+#[tokio::test]
+async fn passkey_register_start_requires_session() {
+    let app = app().await;
+    // Привязка ключа — операция залогиненного пользователя.
+    let (s, _, _) = send_ck(&app, "POST", "/auth/passkey/register/start", None, None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn passkey_login_start_unknown_email_is_404() {
+    let app = app().await;
+    let (s, _, _) = send_ck(&app, "POST", "/auth/passkey/login/start", None, Some(json!({ "email": "nobody@example.com" }))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn passkey_login_start_without_key_is_404() {
+    let app = app().await;
+    // Пользователь есть, но ключ не привязан — тот же 404, что и «нет такого».
+    send_ck(&app, "POST", "/auth/register", None, Some(CREDS("nopk@example.com"))).await;
+    let (s, _, _) = send_ck(&app, "POST", "/auth/passkey/login/start", None, Some(json!({ "email": "nopk@example.com" }))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}

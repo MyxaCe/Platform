@@ -44,6 +44,7 @@ updated: 2026-07-21
   - [[ADR-017-repo-layout-products]] — структура репозитория: продукты в `apps/`, ядро в `backend/` · `accepted`
   - [[ADR-018-authentication]] — аутентификация: Argon2id и серверные сессии · `accepted`
   - [[ADR-019-subdomains-and-stepped-login]] — поддомены продуктов и пошаговый вход · `accepted`
+  - [[ADR-020-passkey-webauthn]] — Passkey / WebAuthn · `accepted`
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc

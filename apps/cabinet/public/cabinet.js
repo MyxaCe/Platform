@@ -125,6 +125,20 @@
   paintLang();
 
   $('#themeBtn').addEventListener('click', () => Theme.toggle());
+
+  // Привязка Passkey к аккаунту (ADR-020). Кнопка неактивна, если браузер не умеет.
+  const pkBtn = $('#addPasskey'), pkStatus = $('#pkStatus');
+  if (!window.Passkey || !Passkey.supported()) {
+    pkBtn.disabled = true;
+    pkStatus.textContent = t('pk.unsupported');
+  }
+  pkBtn.addEventListener('click', async () => {
+    pkBtn.disabled = true;
+    pkStatus.textContent = t('pk.registering');
+    const r = await Passkey.register();
+    pkBtn.disabled = false;
+    pkStatus.textContent = t(r.ok ? 'pk.added' : 'pk.fail');
+  });
   $('#logout').addEventListener('click', async () => {
     try { await fetch('/auth/logout', { method: 'POST' }); } catch { /* всё равно уводим на гейт */ }
     location.reload();

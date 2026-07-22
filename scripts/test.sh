@@ -9,4 +9,4 @@ MSYS_NO_PATHCONV=1 docker run --rm \
   -v "${ROOT}/backend:/app" -w /app \
   -v platform-target:/target \
   -v platform-registry:/usr/local/cargo/registry \
-  rust:slim cargo test "$@"
+  rust:slim sh -c "apt-get update -qq && apt-get install -y -qq libssl-dev pkg-config >/dev/null 2>&1 && cargo test $*"

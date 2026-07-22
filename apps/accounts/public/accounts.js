@@ -23,12 +23,12 @@
     { id: 'apple', label: 'Apple', ready: false, mark: 'A' },
     { id: 'telegram', label: 'Telegram', ready: false, mark: 'TG' },
     { id: 'max', label: 'MAX', ready: false, mark: 'M' },
-    { id: 'passkey', label: 'Passkey', ready: false, mark: 'PK' },
     { id: 'qr', label: 'QR', ready: false, mark: 'QR' },
   ];
 
   let email = '';
   let isNew = false;
+  let hasPasskey = false;
 
   const show = (name) => document.querySelectorAll('.step').forEach((s) => s.classList.toggle('hidden', s.dataset.step !== name));
   const setErr = (id, key) => { const e = $(id); e.textContent = key ? t(key) : ''; e.classList.toggle('on', !!key); };
@@ -44,6 +44,8 @@
   $('#providers').innerHTML = PROVIDERS.map((p) =>
     `<button class="prov" data-p="${p.id}"${p.ready ? '' : ' disabled'}><i>${p.mark}</i>${p.label}</button>`).join('');
 
+
+
   $('#formEmail').addEventListener('submit', async (e) => {
     e.preventDefault();
     setErr('#errEmail', '');
@@ -53,11 +55,14 @@
     if (!r.ok) { setErr('#errEmail', errKey(r.status)); return; }
     email = v.toLowerCase();
     isNew = !r.data.registered;
+    hasPasskey = !!r.data.has_passkey;
     // Второй шаг перерисовывается под ситуацию: вход или создание аккаунта.
     $('#pwTitle').textContent = t(isNew ? 's2.titleNew' : 's2.title');
     $('#pwEmail').textContent = `${t(isNew ? 's2.subNew' : 's2.subLogin')} ${email}`;
     $('#confirmWrap').classList.toggle('hidden', !isNew);
     $('#agreeWrap').classList.toggle('hidden', !isNew);
+    // Вход по ключу предлагаем только тем, у кого он привязан, и только на входе.
+    $('#usePasskey').classList.toggle('hidden', !(hasPasskey && !isNew && window.Passkey && Passkey.supported()));
     $('.agree').innerHTML = t('f.agree')
       .replace('{terms}', `<a href="${host('')}#more" target="_blank" rel="noopener">${t('f.terms')}</a>`)
       .replace('{risk}', `<a href="${host('')}#more" target="_blank" rel="noopener">${t('f.risk')}</a>`);
@@ -65,6 +70,14 @@
     $('#password').focus();
   });
 
+  $('#usePasskey').addEventListener('click', async () => {
+    const btn = $('#usePasskey'); btn.disabled = true;
+    const r = await Passkey.login(email);
+    btn.disabled = false;
+    if (r.ok) { finish(); return; }
+    if (r.error === 'unsupported' || r.error === 'NotAllowedError') return; // отмена — молча
+    setErr('#errPass', r.status === 404 ? 'e.pknone' : 'e.net');
+  });
   $('#backToEmail').addEventListener('click', () => { show('email'); $('#email').focus(); });
   $('#peek').addEventListener('click', () => {
     const i = $('#password');

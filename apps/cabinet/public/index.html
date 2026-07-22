@@ -105,11 +105,13 @@
           </div>
           <div class="panel">
             <h2 data-i18n="prof.security">Security</h2>
-            <p class="muted small" data-i18n="prof.secNote">Password change, two-factor authentication and login history are not available yet.</p>
+            <p class="muted small" data-i18n="prof.secNote">Add a passkey for password-free sign-in. Password change and two-factor are coming.</p>
             <div class="btnrow">
+              <button class="btn btn--accent" id="addPasskey" data-i18n="prof.addPasskey">Add a passkey</button>
               <button class="btn btn--ghost" disabled data-i18n="prof.changePass">Change password</button>
               <button class="btn btn--ghost" disabled data-i18n="prof.twofa">Two-factor</button>
             </div>
+            <div id="pkStatus" class="muted small" style="margin-top:10px"></div>
           </div>
           <div class="panel">
             <h2 data-i18n="prof.kyc">Verification</h2>
@@ -123,6 +125,7 @@
 
   <script>window.__themeKey = 'cabinet';</script>
   <script src="/shared/i18n.js"></script>
+  <script src="/shared/passkey.js"></script>
   <script src="/shared/theme.js"></script>
   <script src="/dict.js"></script>
   <script src="/cabinet.js"></script>

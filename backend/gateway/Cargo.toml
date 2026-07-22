@@ -28,6 +28,9 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
+# Passkey / WebAuthn (ADR-020): серверная проверка церемоний регистрации и входа.
+webauthn-rs = "0.5"
+base64 = "0.22"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
