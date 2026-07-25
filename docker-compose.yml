@@ -43,6 +43,10 @@ services:
       context: ./apps/terminal
       dockerfile: Dockerfile
     container_name: exchange-terminal
+    environment:
+      # Кто может встраивать терминал в iframe (CSP frame-ancestors, ADR-023).
+      # Дефолт "*" = открыто (dev). Прод: список доменов сайтов платформы через .env.
+      FRAME_ANCESTORS: ${FRAME_ANCESTORS:-*}
     ports:
       - "8888:80"
     depends_on:

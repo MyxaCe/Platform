@@ -9,5 +9,10 @@ COPY --from=libs /libs/node_modules/lightweight-charts/dist/lightweight-charts.s
      /usr/share/nginx/html/vendor/lightweight-charts.js
 COPY --from=libs /libs/node_modules/cryptocurrency-icons/svg/color/ /usr/share/nginx/html/vendor/coins/
 COPY public/ /usr/share/nginx/html/
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Конфиг как шаблон: entrypoint nginx прогоняет его через envsubst на старте и кладёт
+# в conf.d/default.conf. Подставляем ТОЛЬКО FRAME_ANCESTORS (фильтр), чтобы не затронуть
+# рантайм-переменные nginx ($host/$uri/$http_upgrade). ADR-023, фаза Т1.
+COPY nginx.conf /etc/nginx/templates/default.conf.template
+ENV FRAME_ANCESTORS="*" \
+    NGINX_ENVSUBST_FILTER="FRAME_ANCESTORS"
 EXPOSE 80
