@@ -1,10 +1,12 @@
 ---
 tags: [adr, security]
-status: accepted
-updated: 2026-07-22
+status: superseded
+updated: 2026-07-25
 ---
 
 # ADR-021 — Вход через внешних провайдеров (OAuth 2.0)
+
+> **Superseded [[ADR-022-standalone-terminal-pivot]] (2026-07-25):** снят вместе со слоем входа.
 
 ## Статус
 

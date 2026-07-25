@@ -1,7 +1,7 @@
 //! # persistence
 //!
-//! Durable-хранилище изменяемого состояния платформы (ADR-016): счета брокера
-//! (баланс, позиции, отложенные ордера, история сделок) и реестр пользователей.
+//! Durable-хранилище изменяемого состояния терминала (ADR-016): счета брокера
+//! (баланс, позиции, отложенные ордера, история сделок).
 //!
 //! ## Роли
 //!
@@ -53,14 +53,6 @@ impl std::error::Error for StoreError {}
 /// Всё состояние, поднимаемое из хранилища на старте.
 #[derive(Debug, Default)]
 pub struct LoadedState {
-    /// Прежние dev-токены: токен → id. Уходят вместе с переездом терминала на сессии (ADR-018).
-    pub users: Vec<(UserId, String)>,
-    /// Учётные данные: id → (почта, PHC-хэш пароля). Сам пароль нигде не хранится.
-    pub credentials: Vec<(UserId, String, String)>,
-    /// Живые сессии: (хэш токена, чей, до какого времени в unix-секундах).
-    pub sessions: Vec<(String, UserId, i64)>,
-    /// Passkey-ключи: (чей, JSON публичного ключа). Приватный ключ у нас не хранится.
-    pub passkeys: Vec<(UserId, String)>,
     /// Счета брокера.
     pub accounts: Vec<(UserId, AccountSnapshot)>,
 }
@@ -77,30 +69,6 @@ pub trait Persistence: Send + Sync {
     /// Сохранить слепок счёта одной транзакцией: позиции и отложенные ордера
     /// переписываются целиком, история закрытых сделок дописывается.
     async fn save_account(&self, user: UserId, snap: &AccountSnapshot) -> Result<(), StoreError>;
-
-    /// Зарегистрировать пользователя (токен → id).
-    async fn save_user(&self, user: UserId, token: &str) -> Result<(), StoreError>;
-
-    /// Сохранить учётные данные пользователя (ADR-018). `password_hash` — PHC-строка Argon2id;
-    /// открытый пароль сюда не передаётся никогда.
-    async fn save_credentials(&self, _user: UserId, _email: &str, _password_hash: &str) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    /// Открыть сессию. Хранится **хэш** токена, а не сам токен.
-    async fn save_session(&self, _token_hash: &str, _user: UserId, _created: i64, _expires: i64) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    /// Закрыть сессию (выход).
-    async fn delete_session(&self, _token_hash: &str) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    /// Сохранить/обновить публичный Passkey-ключ (ADR-020). `data` — JSON `Passkey`.
-    async fn save_passkey(&self, _user: UserId, _cred_id: &str, _data: &str) -> Result<(), StoreError> {
-        Ok(())
-    }
 
     /// Проверка денежных инвариантов (красная линия №5). Возвращает список нарушений;
     /// пустой вектор — всё сходится. Вызывается на старте после загрузки.
@@ -123,9 +91,6 @@ impl Persistence for NoopStore {
         Ok(LoadedState::default())
     }
     async fn save_account(&self, _user: UserId, _snap: &AccountSnapshot) -> Result<(), StoreError> {
-        Ok(())
-    }
-    async fn save_user(&self, _user: UserId, _token: &str) -> Result<(), StoreError> {
         Ok(())
     }
 }

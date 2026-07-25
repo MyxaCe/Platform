@@ -7,7 +7,8 @@ const overlays = { sma: 0, ema: 0, wma: 0, supertrend: 0, psar: 0, ichimoku: 0, 
 let oscillator = '';
 let rawCandles = [], currentDeals = [];
 
-// Единственная точка доступа к REST (ADR-015). Авторизация — сессионной cookie.
+// Единственная точка доступа к REST (ADR-015). Терминал автономный: без логина,
+// один демо-счёт по умолчанию (пивот 2026-07-25).
 const api = Api.create();
 const pdec = (id) => (META[id]?.price_decimals ?? 2);
 const qdec = (id) => (META[id]?.qty_decimals ?? 3);
@@ -389,22 +390,7 @@ function computeSignals() {
 // Поиск, сортировка, избранное и клик по строке — внутри watchlist.js (ADR-015).
 
 // ============================ Start ========================================
-// Доступ и общая шапка (ADR-018/019): терминал — залогиненный продукт. Кто мы —
-// спрашиваем у сервера по сессионной cookie; не вошли → на страницу входа.
-const domainBase = location.host.replace(/^trade\./, '');
-document.getElementById('toCabinet').href = `${location.protocol}//my.${domainBase}/`;
-document.getElementById('logout').addEventListener('click', async () => {
-  try { await fetch('/auth/logout', { method: 'POST' }); } catch { /* всё равно уводим */ }
-  location.href = `${location.protocol}//accounts.${domainBase}/`;
-});
-async function boot() {
-  let me = null;
-  try { const r = await fetch('/auth/me'); if (r.ok) me = await r.json(); } catch { /* не вошли */ }
-  if (!me || !me.email) { location.href = `${location.protocol}//accounts.${domainBase}/`; return; }
-  document.getElementById('who').textContent = me.email;
-}
-boot();
-
+// Терминал автономный: без логина и общей шапки — открывается и работает сразу.
 renderIcons();
 applyLayout();
 initResizers();

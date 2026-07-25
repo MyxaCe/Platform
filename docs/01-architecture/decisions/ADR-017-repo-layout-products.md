@@ -1,10 +1,13 @@
 ---
 tags: [adr]
-status: accepted
-updated: 2026-07-21
+status: superseded
+updated: 2026-07-25
 ---
 
 # ADR-017 — Структура репозитория: продукты отдельно от ядра
+
+> **Superseded [[ADR-022-standalone-terminal-pivot]] (2026-07-25):** пивот на автономный терминал —
+> продукты `site/accounts/cabinet/edge` удалены, остался один терминал.
 
 ## Статус
 

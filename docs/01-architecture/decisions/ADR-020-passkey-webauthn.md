@@ -1,10 +1,12 @@
 ---
 tags: [adr, security]
-status: accepted
-updated: 2026-07-22
+status: superseded
+updated: 2026-07-25
 ---
 
 # ADR-020 — Passkey / WebAuthn
+
+> **Superseded [[ADR-022-standalone-terminal-pivot]] (2026-07-25):** снят вместе со слоем входа.
 
 ## Статус
 

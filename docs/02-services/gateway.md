@@ -1,115 +1,97 @@
 ---
 tags: [service, gateway]
 status: active
-updated: 2026-07-17
+updated: 2026-07-25
 ---
 
 # Gateway
 
 ## Назначение
 
-Сетевой шлюз биржи: REST для команд/чтения + WS для живой ленты событий, поверх [[orchestrator]]
-(ADR-010). Первый живой сервис в Docker. Крейт `gateway/` (lib + bin). Внешние зависимости:
-`tokio`, `axum`, `serde`. Доменные типы наружу не протекают — на границе локальные DTO.
+Сетевой шлюз терминала: REST для чтения данных и бумажной торговли + WS для живой ленты Binance.
+Крейт `backend/gateway/` (lib + bin). Внешние зависимости: `tokio`, `axum`, `serde`, `reqwest`
+(rustls), `tokio-tungstenite`. Доменные типы наружу не протекают — на границе локальные DTO.
+
+После пивота (2026-07-25, [[ADR-022-standalone-terminal-pivot]]) шлюз автономный: **без логина**,
+один счёт по умолчанию (`DEFAULT_USER = UserId(1)`, старт $100k). Слой аутентификации, matching и
+funding сняты — как внешний сайт/CMS будет авторизовать пользователя, решается позже.
 
 ## Запуск
 
 ```bash
-docker compose up --build        # поднять сервис
-# → http://localhost:8888  (внутри контейнера :8080; 8888 — т.к. 8080–8282 заняты WinNAT)
-docker compose down              # остановить
+docker compose up --build        # postgres + gateway + terminal
+# → http://localhost:8888  (терминал; внутри gateway слушает :8080)
+docker compose down --remove-orphans
 ```
 
-Демо-данные при старте (`seed_demo`): инструмент BTC-USDT (id 1, base=1/BTC, quote=2/USDT),
-пользователи с токенами `alice-token` / `bob-token` и депозитами.
+Демо-сида больше нет: счёт создаётся лениво при первой операции (или поднимается из БД на старте).
 
-## Эндпоинты
+## Эндпоинты (все без авторизации, один счёт)
 
-| Метод | Путь | Auth | Назначение |
-|---|---|---|---|
-| GET | `/health` | — | проверка живости |
-| POST | `/auth/register` | — | `{email, password}` → учётка + сессия в HttpOnly-cookie (ADR-018) |
-| POST | `/auth/login` | — | `{email, password}` → сессия |
-| POST | `/auth/logout` | cookie | закрыть сессию |
-| GET | `/auth/me` | cookie | `{user_id, email, verified}` |
-| POST | `/auth/passkey/{register,login}/{start,finish}` | — / cookie | Passkey (ADR-020) |
-| GET | `/auth/oauth/providers` | — | список настроенных OAuth-провайдеров |
-| GET | `/auth/oauth/{provider}/start` | — | редирект к провайдеру (ADR-021) |
-| GET | `/auth/oauth/{provider}/callback` | — | возврат: сессия → кабинет |
-| POST | `/admin/users` | — (dev) | создать пользователя `{token}` → `{user_id}` |
-| POST | `/admin/deposit` | — (dev) | пополнить счёт `{user_id, asset, amount}` |
-| GET | `/instruments` | — | список пар с `last/change/bid/ask/high/decimals` |
-| GET | `/candles/{instrument}?tf=SEC&limit=N` | — | свечи OHLCV таймфрейма |
-| GET | `/depth/{instrument}?limit=N` | — | стакан с Binance, кэш ~400мс по (инструмент, глубина); N округляется вверх до набора Binance (20/50/100/500/1000) |
-| GET | `/stats/{instrument}` | — | изменение (%) по таймфреймам 1m…1w, кэш ~3с |
-| POST | `/orders` | Bearer | разместить `{instrument, side, type, price?, qty, tif?}` → `{order_id, events}` |
-| DELETE | `/orders/{id}?instrument=N` | Bearer | отменить |
-| GET | `/book/{instrument}?depth=N` | — | снапшот стакана `{bids, asks}` |
-| GET | `/balance/{asset}` | Bearer | баланс `{available, held}` |
-| POST | `/deals` | Bearer | открыть сделку `{instrument, side, qty, sl?, tp?}` → позиция ([[broker]]) |
-| GET | `/deals` | Bearer | открытые позиции с live P&L |
-| POST | `/deals/{id}/close` | Bearer | закрыть позицию → realized P&L |
-| GET | `/deals/closed` | Bearer | история закрытых сделок |
-| POST | `/pending` | Bearer | лимитный ордер `{instrument, side, qty, price, sl?, tp?}` |
-| GET | `/pending` | Bearer | отложенные ордера |
-| DELETE | `/pending/{id}` | Bearer | отменить лимитный ордер |
-| GET | `/account` | cookie | `{balance, equity, used_margin, free_margin, open_pnl}` (центы) |
-| POST | `/account/deposit` | cookie | пополнить `{amount}` (центы, демо-деньги) → `{balance}` |
-| POST | `/account/withdraw` | cookie | вывести `{amount}` → `{balance}`; больше свободного → 402 |
+| Метод | Путь | Назначение |
+|---|---|---|
+| GET | `/health` | проверка живости |
+| GET | `/instruments` | список пар с `last/change/bid/ask/high/decimals` |
+| GET | `/candles/{instrument}?tf=SEC&limit=N` | свечи OHLCV таймфрейма |
+| GET | `/depth/{instrument}?limit=N` | стакан с Binance, кэш ~400мс; N округляется вверх до набора Binance (20/50/100/500/1000) |
+| GET | `/stats/{instrument}` | изменение (%) по таймфреймам 1m…1w, кэш ~3с |
+| POST | `/deals` | открыть сделку `{instrument, side, qty, sl?, tp?}` → позиция по рыночной цене ([[broker]]) |
+| GET | `/deals` | открытые позиции с live P&L |
+| POST | `/deals/{id}/close` | закрыть позицию → realized P&L |
+| GET | `/deals/closed` | история закрытых сделок |
+| POST | `/pending` | лимитный ордер `{instrument, side, qty, price, sl?, tp?}` |
+| GET | `/pending` | отложенные ордера |
+| DELETE | `/pending/{id}` | отменить лимитный ордер |
+| GET | `/account` | `{balance, equity, used_margin, free_margin, open_pnl}` (центы) |
+| WS | `/stream` | живая лента событий Binance (JSON) |
 
 Фоновый монитор (`spawn_monitor`) каждые 500мс триггерит лимитные ордера и SL/TP по ценам фида.
-| WS | `/stream` | — | живая лента событий (JSON) |
 
-> ⚠️ При добавлении нового REST-пути **обязательно** добавить его в регекс-прокси `apps/terminal/nginx.conf`
-> (иначе 405/SPA вместо API). См. [[bug-log]] BUG-004.
+> ⚠️ При добавлении нового REST-пути **обязательно** добавить его в регекс-прокси
+> `apps/terminal/nginx.conf` (иначе 405/SPA вместо API). См. [[bug-log]] BUG-004.
+
+Ошибки: недостаточно маржи → `402`, неизвестный инструмент/позиция → `404`, битые параметры →
+`400`, нет цены (фид ещё не прогрелся) → `503`, отказ хранилища → `503` (счёт откатывается).
 
 ## Market data — реальные с Binance (ADR-013)
 
 Симуляции **нет**. Данные реальные, публичный Binance без ключа (модуль `backend/gateway/src/feed.rs`):
-- `/candles` → REST `api/v3/klines` (реальный OHLCV), кэш ~2с; таймфреймы 1m..1d.
+- `/candles` → REST `api/v3/klines` (реальный OHLCV), кэш ~2с; таймфреймы 1m..1w.
 - `/instruments` → WS `@ticker` (last/change/high/bid/ask по 30 парам).
 - `/stream` (лента + live-цена) ← WS `@aggTrade` (реальные сделки).
 - Топ-30 крипто-пар; у каждой свои `price_decimals`/`qty_decimals` (строки Binance → целые raw).
-- Реконнект при обрыве. Проверено: ETH ≈ 1822 = Binance/TradingView.
+- Реконнект при обрыве.
 
 Не-крипто рынки (форекс/сырьё/акции/индексы) — требуют платного провайдера, в [[backlog]].
 
-Ошибки: `InsufficientFunds → 402`, `SelfTrade → 409`, `NotOwner → 403`, `Engine(reason) → 400`,
-нет/битый токен → `401`.
-
-## Аутентификация — в модуле `authn`
-
-Весь HTTP-слой входа собран в `backend/gateway/src/authn.rs` (реестр пользователей и сессий, cookie,
-парольный вход, коды, ограничитель попыток). Рядом `passkey.rs` (ADR-020) и `oauth.rs` (ADR-021) —
-быстрые входы поверх того же реестра. Чистая крипта — в крейте `auth`. `lib.rs` реэкспортит эти
-имена (`pub(crate) use authn::*`), поэтому роуты и соседние модули зовут их как крейт-уровневые.
-
 ## Состояние (`AppState`, за `Arc`)
 
-- `orch: Arc<Mutex<Orchestrator>>` — единственный писатель; запрос коротко берёт лок.
-- `users: Arc<Mutex<UserRegistry>>` — dev-реестр токен→UserId.
-- `order_seq: AtomicU64` — выдача уникальных OrderId (уникальность — ответственность границы).
+- `feed_instruments`, `tickers`, `klines_cache`, `depth_cache`, `stats_cache` — реальные данные Binance.
+- `broker: Arc<Mutex<Broker>>` — бумажный брокер, единственный писатель счёта.
+- `store: Arc<dyn Persistence>` — durable-хранилище счетов (ADR-016).
+- `acct_locks` — лок на счёт: сериализует «мутация → слепок → запись» (`with_account`).
 - `events_tx: broadcast::Sender<String>` — живая лента для WS.
+
+## Дисциплина записи (`with_account`, ADR-016)
+
+Мутация счёта: лок счёта на всё «мутация → слепок → запись»; `fsync`/сеть — уже без лока брокера;
+при отказе хранилища счёт откатывается к прежнему слепку и отдаётся `503`. Монитор пишет только
+реально изменившиеся счета.
 
 ## Связи
 
-- Использует [[orchestrator]] (`place_limit/place_market/cancel/deposit/register_instrument/snapshot/balance`).
-- `EventDto: From<&Event>` — конвертация событий [[matching-engine]] в JSON.
-- Основано на [[ADR-010-gateway-stack]].
+- Использует [[broker]] (`open/close/place_pending/cancel_pending/positions/snapshot/check/...`).
+- Хранилище — крейт `persistence` ([[ADR-016-persistence-postgres]]).
+- Стек — [[ADR-010-gateway-stack]] (matching-DTO из него сняты пивотом).
 
 ## Тесты
 
-`backend/gateway/tests/api.rs` — 7 тестов через `oneshot`: health, 401 без/с битым токеном, полный путь
-сделки с движением балансов, снапшот стакана, self-trade → 409, рыночная покупка. Плюс живой
-smoke-тест через `curl` (см. историю коммита).
+`backend/gateway/tests/api.rs` — 7 тестов через `oneshot` (без сети): health, дефолтный счёт $100k,
+открытие сделки без цены → 503, неизвестный инструмент → 404, битый side → 400, размещение/список
+отложенных, откат отложенного ордера при отказе хранилища → 503.
 
 ## Ограничения / TODO
 
-- **Auth (ADR-018):** пароли — Argon2id, сессии — непрозрачные токены (в БД хранится их SHA-256),
-  транспорт — HttpOnly-cookie, ограничитель попыток в памяти. `authed()` принимает cookie **или**
-  прежний `Bearer` — легаси для терминала, уйдёт с его переездом на сессии.
-- **Чего в auth ещё нет:** подтверждение почты, восстановление пароля, второй фактор, журнал входов.
-  Обязательно до реальных денег — [[backlog]].
-- Admin-эндпоинты без защиты (dev).
+- Один счёт (`DEFAULT_USER`). Мультипользовательность вернётся с интеграцией внешних сайтов/CMS.
 - Суммы в JSON — числами (большие `i128` теряют точность в JS). Кодировать строками — [[backlog]].
-- WS отдаёт все события всем; нет подписки по инструменту/приватным событиям пользователя — [[backlog]].
+- WS отдаёт все события всем; подписки по инструменту нет — [[backlog]].

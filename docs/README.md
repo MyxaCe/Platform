@@ -5,8 +5,14 @@ updated: 2026-07-21
 
 # 🏛️ Platform — База знаний проекта
 
-Это **Obsidian-хранилище** проекта «своя биржа/брокер». Здесь живёт вся документация:
-принципы, архитектурные решения, описания сервисов, баги, планы.
+Это **Obsidian-хранилище** проекта. Здесь живёт вся документация: принципы, архитектурные
+решения, описания сервисов, баги, планы.
+
+> [!warning] Пивот 2026-07-25 ([[ADR-022-standalone-terminal-pivot]])
+> Проект стал **автономным торговым терминалом** для встраивания во внешние сайты, а не
+> мультипродуктовой биржей. Часть ADR и сервис-доков ниже описывают снятый код (matching,
+> аутентификация, продукты `apps/`) — они помечены `superseded`/`retired` и остаются как
+> история. Актуальная картина — в [[STATUS]].
 
 > [!info] Как пользоваться
 > Открой эту папку (`docs/`) как vault в Obsidian. Навигация — по ссылкам ниже и по графу.
@@ -30,10 +36,10 @@ updated: 2026-07-21
   - [[ADR-003-event-sourcing-and-determinism]] — событийность и детерминизм · `accepted`
   - [[ADR-004-docker-rust-toolchain]] — тулчейн Rust через Docker · `accepted`
   - [[ADR-005-instrument-model]] — модель инструмента и мульти-инструментный матчинг · `accepted`
-  - [[ADR-006-ledger-double-entry]] — Ledger: счета, балансы, двойная запись · `accepted`
+  - [[ADR-006-ledger-double-entry]] — Ledger: счета, балансы, двойная запись · `retired` (ADR-022)
   - [[ADR-007-workspace-crate-structure]] — структура крейтов: общий `domain` · `accepted`
-  - [[ADR-008-orchestrator]] — путь ордера: резерв → матчинг → расчёт · `accepted`
-  - [[ADR-009-market-orders-and-stp]] — рыночные заявки и предотвращение self-trade · `accepted`
+  - [[ADR-008-orchestrator]] — путь ордера: резерв → матчинг → расчёт · `retired` (ADR-022)
+  - [[ADR-009-market-orders-and-stp]] — рыночные заявки и предотвращение self-trade · `retired` (ADR-022)
   - [[ADR-010-gateway-stack]] — стек сетевого шлюза (tokio + axum + serde) · `accepted`
   - [[ADR-011-web-ui]] — веб-интерфейс (живой стакан + график) · `accepted`
   - [[ADR-012-market-data-and-terminal-ui]] — свечи, несколько пар, терминальный UI · `accepted`
@@ -41,11 +47,12 @@ updated: 2026-07-21
   - [[ADR-014-paper-broker]] — бумажный брокер: позиции, маржа, P&L · `accepted`
   - [[ADR-015-reusable-frontend-modules]] — переиспользуемые фронтенд-модули · `accepted`
   - [[ADR-016-persistence-postgres]] — персистентность состояния: PostgreSQL · `accepted` (реализовано)
-  - [[ADR-017-repo-layout-products]] — структура репозитория: продукты в `apps/`, ядро в `backend/` · `accepted`
-  - [[ADR-018-authentication]] — аутентификация: Argon2id и серверные сессии · `accepted`
-  - [[ADR-019-subdomains-and-stepped-login]] — поддомены продуктов и пошаговый вход · `accepted`
-  - [[ADR-020-passkey-webauthn]] — Passkey / WebAuthn · `accepted`
-  - [[ADR-021-oauth-external-login]] — вход через внешних провайдеров (OAuth) · `accepted`
+  - [[ADR-017-repo-layout-products]] — структура репозитория: продукты в `apps/`, ядро в `backend/` · `superseded` (ADR-022)
+  - [[ADR-018-authentication]] — аутентификация: Argon2id и серверные сессии · `superseded` (ADR-022)
+  - [[ADR-019-subdomains-and-stepped-login]] — поддомены продуктов и пошаговый вход · `superseded` (ADR-022)
+  - [[ADR-020-passkey-webauthn]] — Passkey / WebAuthn · `superseded` (ADR-022)
+  - [[ADR-021-oauth-external-login]] — вход через внешних провайдеров (OAuth) · `superseded` (ADR-022)
+  - [[ADR-022-standalone-terminal-pivot]] — **пивот на автономный встраиваемый терминал** · `accepted`
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc
@@ -60,17 +67,15 @@ updated: 2026-07-21
 
 | | |
 |---|---|
-| Фаза | **2h — продукты** · терминал готов, состояние durable (PostgreSQL); 86 тестов + clippy |
-| Структура | `backend/` — ядро · `apps/`: edge, site, accounts, terminal, cabinet, shared (ADR-017/019) |
-| Стек | Rust: `domain`+`core`+`ledger`+`orchestrator`+`broker`+`persistence`+`gateway` (→Binance) · web: nginx + JS |
-| Запуск | `docker compose up --build` → **lvh.me:8888** · accounts / trade / my — поддомены |
-| Следующий шаг | Пополнение/вывод и KYC в [[cabinet]] · плечо/ликвидация · техдолг в [[backlog]] |
-| Дата | 2026-07-21 |
+| Продукт | **Автономный терминал** (ADR-022): реальные цены Binance + бумажные деньги, без логина |
+| Структура | `backend/`: `domain`+`broker`+`persistence`+`gateway` (→Binance) · `apps/terminal/`: nginx + JS |
+| Запуск | `docker compose up --build` → **http://localhost:8888** (postgres + gateway + terminal) |
+| Следующий шаг | Сайт платформы и CMS (отдельно) · интеграция терминала во внешние сайты · плечо/ликвидация |
+| Дата | 2026-07-25 |
 
-## 🗺️ Дорожная карта (фазы)
+## 🗺️ Дорожная карта
 
-1. **Фаза 1** ✅ — Matching Engine + Order Book + инструменты + снапшот
-2. **Фаза 2** ✅ — Ledger + оркестратор (путь ордера) + Gateway REST/WS (живой сервис в Docker)
-3. **Фаза 2h** — продуктовый контур: сайт брокера, личный кабинет, интеграция с CRM (MICA)
-4. **Фаза 3** — Журнал событий (Kafka/NATS) + распил на сервисы; настоящий auth
-5. **Фаза 4** — Реальное custody (безопасность + юр. проработка)
+1. **Ядро терминала** ✅ — данные Binance + бумажный брокер + durable-состояние (PostgreSQL)
+2. **Пивот на автономный терминал** ✅ (2026-07-25, ADR-022) — снят мультипродуктовый контур
+3. **Дальше** — сайт платформы и CMS (отдельные сущности); интеграция терминала во внешние сайты
+   (передача личности пользователя, изоляция счетов); плечо и ликвидация в [[broker]]

@@ -57,40 +57,17 @@ impl PgStore {
 
 /// Идемпотентный DDL. Полноценные версионируемые миграции появятся при первом
 /// изменении схемы на живых данных (ADR-016).
+///
+/// После пивота на автономный терминал (2026-07-25) учётные записи/сессии/passkey
+/// ушли — счёт хранится сам по себе, `user_id` больше не ссылается на `users`.
 const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS users (
-  id          BIGINT PRIMARY KEY,
-  token       TEXT NOT NULL UNIQUE,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
--- Учётные данные (ADR-018). Колонки добавляются отдельно: таблица users уже могла
--- быть создана прошлой версией. token становится необязательным — у пользователей,
--- зарегистрированных по почте, dev-токена нет.
-ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
-ALTER TABLE users ALTER COLUMN token DROP NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS users_email_uidx ON users (email);
-CREATE TABLE IF NOT EXISTS sessions (
-  token_hash  TEXT PRIMARY KEY,          -- SHA-256 от токена; сам токен не хранится
-  user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  created_at  BIGINT NOT NULL,           -- unix-секунды
-  expires_at  BIGINT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id);
-CREATE TABLE IF NOT EXISTS passkeys (
-  cred_id     TEXT PRIMARY KEY,          -- id учётных данных ключа (url-safe base64)
-  user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  data        TEXT NOT NULL,             -- JSON публичного ключа (webauthn Passkey)
-  created_at  BIGINT NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS passkeys_user_idx ON passkeys (user_id);
 CREATE TABLE IF NOT EXISTS accounts (
-  user_id     BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  user_id     BIGINT PRIMARY KEY,
   balance     NUMERIC(38,0) NOT NULL,
   next_id     BIGINT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS positions (
-  user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id     BIGINT NOT NULL,
   id          BIGINT NOT NULL,
   instrument  INTEGER NOT NULL,
   side        SMALLINT NOT NULL,
@@ -104,7 +81,7 @@ CREATE TABLE IF NOT EXISTS positions (
   PRIMARY KEY (user_id, id)
 );
 CREATE TABLE IF NOT EXISTS pendings (
-  user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id     BIGINT NOT NULL,
   id          BIGINT NOT NULL,
   instrument  INTEGER NOT NULL,
   side        SMALLINT NOT NULL,
@@ -117,7 +94,7 @@ CREATE TABLE IF NOT EXISTS pendings (
   PRIMARY KEY (user_id, id)
 );
 CREATE TABLE IF NOT EXISTS closed_deals (
-  user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id     BIGINT NOT NULL,
   idx         BIGINT NOT NULL,
   instrument  INTEGER NOT NULL,
   side        SMALLINT NOT NULL,
@@ -142,50 +119,16 @@ impl Persistence for PgStore {
     }
 
     async fn load_all(&self) -> Result<LoadedState, StoreError> {
-        let user_rows = sqlx::query("SELECT id, token, email, password_hash FROM users ORDER BY id")
+        // Счёт — самостоятельная сущность: перебираем то, что реально лежит в accounts.
+        let acc_rows = sqlx::query("SELECT user_id, balance, next_id FROM accounts ORDER BY user_id")
             .fetch_all(&self.pool)
             .await
             .map_err(db)?;
-        let mut users: Vec<(UserId, String)> = Vec::new();
-        let mut credentials = Vec::new();
-        let mut ids: Vec<UserId> = Vec::new();
-        for r in &user_rows {
-            let id = UserId(r.get::<i64, _>("id") as u64);
-            ids.push(id);
-            if let Some(tok) = r.get::<Option<String>, _>("token") {
-                users.push((id, tok));
-            }
-            if let (Some(email), Some(hash)) = (r.get::<Option<String>, _>("email"), r.get::<Option<String>, _>("password_hash")) {
-                credentials.push((id, email, hash));
-            }
-        }
-
-        let sessions = sqlx::query("SELECT token_hash, user_id, expires_at FROM sessions")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db)?
-            .iter()
-            .map(|r: &PgRow| (r.get::<String, _>("token_hash"), UserId(r.get::<i64, _>("user_id") as u64), r.get::<i64, _>("expires_at")))
-            .collect();
-
-        let passkeys = sqlx::query("SELECT user_id, data FROM passkeys")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db)?
-            .iter()
-            .map(|r: &PgRow| (UserId(r.get::<i64, _>("user_id") as u64), r.get::<String, _>("data")))
-            .collect();
 
         let mut accounts = Vec::new();
-        for uid in &ids {
+        for acc in &acc_rows {
+            let uid = UserId(acc.get::<i64, _>("user_id") as u64);
             let id_db = uid.0 as i64;
-
-            let acc = sqlx::query("SELECT balance, next_id FROM accounts WHERE user_id = $1")
-                .bind(id_db)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(db)?;
-            let Some(acc) = acc else { continue };
             let balance = from_numeric(&acc.get::<BigDecimal, _>("balance"))?;
             let next_id = acc.get::<i64, _>("next_id") as u64;
 
@@ -256,23 +199,15 @@ impl Persistence for PgStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
 
-            accounts.push((*uid, AccountSnapshot { balance, next_id, positions, pendings, closed }));
+            accounts.push((uid, AccountSnapshot { balance, next_id, positions, pendings, closed }));
         }
 
-        Ok(LoadedState { users, credentials, sessions, passkeys, accounts })
+        Ok(LoadedState { accounts })
     }
 
     async fn save_account(&self, user: UserId, snap: &AccountSnapshot) -> Result<(), StoreError> {
         let id_db = user.0 as i64;
         let mut tx = self.pool.begin().await.map_err(db)?;
-
-        // Счёт мог появиться раньше пользователя (демо-сид) — гарантируем строку users.
-        sqlx::query("INSERT INTO users (id, token) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING")
-            .bind(id_db)
-            .bind(format!("user-{}", user.0))
-            .execute(&mut *tx)
-            .await
-            .map_err(db)?;
 
         sqlx::query(
             "INSERT INTO accounts (user_id, balance, next_id) VALUES ($1, $2, $3)
@@ -331,73 +266,6 @@ impl Persistence for PgStore {
         }
 
         tx.commit().await.map_err(db)?;
-        Ok(())
-    }
-
-    async fn save_user(&self, user: UserId, token: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO users (id, token) VALUES ($1, $2)
-             ON CONFLICT (id) DO UPDATE SET token = EXCLUDED.token",
-        )
-        .bind(user.0 as i64)
-        .bind(token)
-        .execute(&self.pool)
-        .await
-        .map_err(db)?;
-        Ok(())
-    }
-
-    async fn save_credentials(&self, user: UserId, email: &str, password_hash: &str) -> Result<(), StoreError> {
-        // Уникальность почты держит индекс: проверка «занята ли» в приложении не спасает
-        // от гонки двух одновременных регистраций.
-        sqlx::query(
-            "INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)
-             ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, password_hash = EXCLUDED.password_hash",
-        )
-        .bind(user.0 as i64)
-        .bind(email)
-        .bind(password_hash)
-        .execute(&self.pool)
-        .await
-        .map_err(db)?;
-        Ok(())
-    }
-
-    async fn save_session(&self, token_hash: &str, user: UserId, created: i64, expires: i64) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)
-             ON CONFLICT (token_hash) DO NOTHING",
-        )
-        .bind(token_hash)
-        .bind(user.0 as i64)
-        .bind(created)
-        .bind(expires)
-        .execute(&self.pool)
-        .await
-        .map_err(db)?;
-        Ok(())
-    }
-
-    async fn delete_session(&self, token_hash: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
-            .bind(token_hash)
-            .execute(&self.pool)
-            .await
-            .map_err(db)?;
-        Ok(())
-    }
-
-    async fn save_passkey(&self, user: UserId, cred_id: &str, data: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO passkeys (cred_id, user_id, data) VALUES ($1, $2, $3)
-             ON CONFLICT (cred_id) DO UPDATE SET data = EXCLUDED.data",
-        )
-        .bind(cred_id)
-        .bind(user.0 as i64)
-        .bind(data)
-        .execute(&self.pool)
-        .await
-        .map_err(db)?;
         Ok(())
     }
 

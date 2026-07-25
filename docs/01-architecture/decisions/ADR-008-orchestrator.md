@@ -1,10 +1,13 @@
 ---
 tags: [adr]
-status: accepted
-updated: 2026-07-17
+status: retired
+updated: 2026-07-25
 ---
 
 # ADR-008 — Оркестратор: путь ордера (резерв → матчинг → расчёт)
+
+> **Снято с живого пути [[ADR-022-standalone-terminal-pivot]] (2026-07-25):** крейты `orchestrator`
+> и `core` (matching) удалены. Биржа-стакан может вернуться отдельным продуктом; код — в истории git.
 
 ## Статус
 

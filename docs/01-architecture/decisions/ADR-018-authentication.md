@@ -1,10 +1,13 @@
 ---
 tags: [adr, security]
-status: accepted
-updated: 2026-07-21
+status: superseded
+updated: 2026-07-25
 ---
 
 # ADR-018 — Аутентификация: пароли Argon2id и серверные сессии
+
+> **Superseded [[ADR-022-standalone-terminal-pivot]] (2026-07-25):** терминал стал автономным без
+> логина; слой аутентификации (крейт `auth`, модуль `authn`) снят. Код — в истории git.
 
 ## Статус
 

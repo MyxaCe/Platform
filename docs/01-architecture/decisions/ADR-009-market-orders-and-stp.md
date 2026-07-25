@@ -1,10 +1,12 @@
 ---
 tags: [adr]
-status: accepted
-updated: 2026-07-17
+status: retired
+updated: 2026-07-25
 ---
 
 # ADR-009 — Рыночные заявки и предотвращение self-trade
+
+> **Снято с живого пути [[ADR-022-standalone-terminal-pivot]] (2026-07-25):** matching-ядро удалено.
 
 ## Статус
 

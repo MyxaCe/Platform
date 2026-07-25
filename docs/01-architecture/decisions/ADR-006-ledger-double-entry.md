@@ -1,10 +1,13 @@
 ---
 tags: [adr]
-status: accepted
-updated: 2026-07-17
+status: retired
+updated: 2026-07-25
 ---
 
 # ADR-006 — Ledger: счета, балансы и двойная запись
+
+> **Снято с живого пути [[ADR-022-standalone-terminal-pivot]] (2026-07-25):** крейт `ledger` удалён.
+> Бухгалтерия вернётся с реальными деньгами; код — в истории git.
 
 ## Статус
 

@@ -1,6 +1,6 @@
-# Cargo workspace — корень проекта.
-# domain — общий словарь; core — matching-ядро; ledger — счета/балансы;
-# orchestrator — путь ордера; marketdata — свечи; broker — бумажный брокер; gateway — сетевой шлюз.
+# Cargo workspace — бэкенд терминала.
+# domain — общий словарь; broker — бумажный брокер (позиции/маржа/P&L на данных Binance);
+# persistence — durable-хранилище счетов; gateway — сетевой шлюз (REST/WS + фид Binance).
 [workspace]
 resolver = "2"
-members = ["domain", "core", "ledger", "orchestrator", "marketdata", "broker", "auth", "persistence", "gateway"]
+members = ["domain", "broker", "persistence", "gateway"]

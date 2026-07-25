@@ -1,11 +1,9 @@
-# Платформа целиком: postgres (состояние) + gateway (REST+WS, внутренний) +
-# terminal (торговый терминал) + site (сайт брокера).
-# Наружу торчит только edge (:8888) и маршрутизирует по поддоменам, как в проде:
-#   lvh.me:8888 — сайт · accounts.lvh.me:8888 — вход
-#   trade.lvh.me:8888 — терминал · my.lvh.me:8888 — кабинет
-# lvh.me — публичное DNS-имя в 127.0.0.1: правки hosts не нужны, а для браузера это
-# обычный домен, поэтому единая cookie на поддомены работает (с localhost — нет).
+# Автономный терминал: postgres (состояние) + gateway (REST+WS, внутренний) +
+# terminal (nginx: статика + прокси на gateway). Наружу торчит только terminal :8888.
 # (8888 — потому что диапазон 8080–8282 занят WinNAT на dev-машине.)
+#
+# Пивот 2026-07-25: терминал стал самодостаточным продуктом для встраивания в чужие
+# сайты. Логина/сессий/поддоменов/edge больше нет — один демо-счёт по умолчанию.
 services:
   postgres:
     image: postgres:16-alpine
@@ -35,18 +33,6 @@ services:
     environment:
       # Задан → PgStore (ADR-016). Убрать переменную → всё в памяти, как раньше.
       DATABASE_URL: postgres://${POSTGRES_USER:-platform}:${POSTGRES_PASSWORD:-platform}@postgres:5432/${POSTGRES_DB:-platform}
-      # Сессия должна действовать на всех поддоменах (accounts/trade/my), а не только
-      # там, где выполнен вход (ADR-019). В проде — .вашдомен.
-      # Локально нельзя писать localhost: браузер ОТБРАСЫВАЕТ cookie с Domain=localhost
-      # целиком (проверено — вход переставал работать). Поэтому lvh.me: это публичное
-      # DNS-имя, которое резолвится в 127.0.0.1, и для браузера оно обычный домен.
-      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-.meriom.com}
-      COOKIE_SECURE: ${COOKIE_SECURE:-1}
-      # OAuth-провайдеры (ADR-021): секреты только из .env, в git не попадают.
-      YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID:-}
-      YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET:-}
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,54 +43,9 @@ services:
       context: ./apps/terminal
       dockerfile: Dockerfile
     container_name: exchange-terminal
-    depends_on:
-      - gateway
-    restart: unless-stopped
-
-  site:
-    build:
-      context: ./apps
-      dockerfile: site/Dockerfile
-    container_name: exchange-site
-    depends_on:
-      - gateway          # лендинг берёт живые котировки через прокси на шлюз
-    restart: unless-stopped
-
-  cabinet:
-    build:
-      context: ./apps
-      dockerfile: cabinet/Dockerfile
-    container_name: exchange-cabinet
-    depends_on:
-      - gateway          # кабинет показывает счёт и сделки через прокси на шлюз
-    restart: unless-stopped
-
-  accounts:
-    build:
-      context: ./apps
-      dockerfile: accounts/Dockerfile
-    container_name: exchange-accounts
-    depends_on:
-      - gateway
-    restart: unless-stopped
-
-  edge:
-    build:
-      context: ./apps
-      dockerfile: edge/Dockerfile
-    container_name: exchange-edge
     ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      # Сертификат монтируется, а не копируется в образ: приватный ключ не должен
-      # попасть ни в образ, ни в git (машинно-зависимый, лежит в apps/edge/certs).
-      - ./apps/edge/certs:/etc/nginx/certs:ro
+      - "8888:80"
     depends_on:
-      - site
-      - accounts
-      - terminal
-      - cabinet
       - gateway
     restart: unless-stopped
 

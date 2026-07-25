@@ -1,10 +1,13 @@
 ---
 tags: [adr, security]
-status: accepted
-updated: 2026-07-21
+status: superseded
+updated: 2026-07-25
 ---
 
 # ADR-019 — Поддомены продуктов и пошаговый вход
+
+> **Superseded [[ADR-022-standalone-terminal-pivot]] (2026-07-25):** поддомены/edge/HTTPS сняты,
+> терминал работает автономно на :8888.
 
 ## Статус
 
