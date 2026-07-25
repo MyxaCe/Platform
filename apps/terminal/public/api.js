@@ -61,6 +61,17 @@
       }
     }
 
+    // В embedded-режиме (задан origin кабинета, ADR-023) без сессии торговые ручки
+    // отдают 401 — не долбим их и не шумим в консоли, пока не пришёл handoff-токен.
+    // В standalone (origin кабинета не задан) — гоняем как есть (сервер на счёте по умолчанию).
+    function tradingBlocked() {
+      const embedded = ((window.TERMINAL_CONFIG || {}).cabinetOrigins || []).some(Boolean);
+      return embedded && !(window.Sso && window.Sso.token());
+    }
+    const authedRead = (url) => (tradingBlocked() ? Promise.resolve(null) : read(url));
+    const authedMutate = (url, method, body) =>
+      (tradingBlocked() ? Promise.resolve({ ok: false, status: 401, data: null }) : mutate(url, method, body));
+
     return {
       // ---- Публичные данные (без авторизации) ----------------------------
       instruments: () => read('/instruments'),
@@ -68,19 +79,19 @@
       depth: (id, limit) => read(`/depth/${id}${limit ? `?limit=${limit}` : ''}`),
       stats: (id) => read(`/stats/${id}`),
 
-      // ---- Счёт пользователя ---------------------------------------------
-      account: () => read('/account'),
+      // ---- Счёт пользователя (требует сессию) ----------------------------
+      account: () => authedRead('/account'),
 
-      // ---- Позиции ---------------------------------------------------------
-      deals: () => read('/deals'),
-      openDeal: (body) => mutate('/deals', 'POST', body),
-      closeDeal: (id) => mutate(`/deals/${id}/close`, 'POST'),
-      closedDeals: () => read('/deals/closed'),
+      // ---- Позиции (требуют сессию) ---------------------------------------
+      deals: () => authedRead('/deals'),
+      openDeal: (body) => authedMutate('/deals', 'POST', body),
+      closeDeal: (id) => authedMutate(`/deals/${id}/close`, 'POST'),
+      closedDeals: () => authedRead('/deals/closed'),
 
-      // ---- Отложенные (лимитные) ордера -----------------------------------
-      pending: () => read('/pending'),
-      placePending: (body) => mutate('/pending', 'POST', body),
-      cancelPending: (id) => mutate(`/pending/${id}`, 'DELETE'),
+      // ---- Отложенные (лимитные) ордера (требуют сессию) ------------------
+      pending: () => authedRead('/pending'),
+      placePending: (body) => authedMutate('/pending', 'POST', body),
+      cancelPending: (id) => authedMutate(`/pending/${id}`, 'DELETE'),
     };
   }
 

@@ -36,9 +36,10 @@ services:
       # SSO платформы (ADR-023, Т2). CABINET_URL → JWKS {CABINET_URL}/api/sso/jwks.
       # Из контейнера кабинет на хосте доступен как host.docker.internal.
       CABINET_URL: ${CABINET_URL:-http://host.docker.internal:3002}
-      # SSO_DISABLED=1 (dev по умолчанию): торговые ручки НЕ требуют сессию (счёт по
-      # умолчанию), но /v1/session валидирует токены против живого JWKS. Прод: 0.
-      SSO_DISABLED: ${SSO_DISABLED:-1}
+      # SSO включён (интеграция с кабинетом идёт): торговые ручки требуют bearer-сессию,
+      # выданную через /v1/session по handoff-JWT. SSO_DISABLED=1 вернёт standalone-режим
+      # (торговля на счёте по умолчанию без токена) — для локальной отладки терминала.
+      SSO_DISABLED: ${SSO_DISABLED:-0}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
