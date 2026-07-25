@@ -30,19 +30,19 @@
 .watch__search { padding: 8px; }
 .watch__search input { width: 100%; background: var(--panel2,#151a25); border: 1px solid var(--border,#1f2735); color: var(--text,#d7dce5);
   border-radius: 6px; padding: 7px 10px; }
-.watch__title { padding: 6px 12px; color: var(--accent,#f0b90b); font-weight: 700; font-size: 11px; letter-spacing: .5px; }
+.watch__title { padding: 6px 12px; color: var(--brand,#f0b90b); font-weight: 700; font-size: 11px; letter-spacing: .5px; }
 .watch__head, .irow { display: grid; grid-template-columns: 20px 1.25fr .78fr .82fr .82fr .62fr .82fr; gap: 4px; padding: 5px 10px; align-items: center; }
 .star { color: #384253; cursor: pointer; display: inline-flex; }
 .star svg { width: 13px; height: 13px; }
 .star:hover { color: #7d8aa0; }
-.star.on { color: var(--accent,#f0b90b); }
+.star.on { color: var(--brand,#f0b90b); }
 .star.on svg { fill: currentColor; }
 .irow .high { text-align: right; color: var(--muted,#6b7688); }
 .watch__head { color: var(--muted,#6b7688); font-size: 10px; border-bottom: 1px solid var(--border,#1f2735); background: var(--panel2,#151a25); }
 .watch__rows { overflow-y: auto; }
 .irow { border-bottom: 1px solid rgba(31,39,53,.5); cursor: pointer; font-variant-numeric: tabular-nums; }
 .irow:hover { background: var(--panel2,#151a25); }
-.irow.active { background: var(--panel3,#1a2130); box-shadow: inset 3px 0 0 var(--accent,#f0b90b); }
+.irow.active { background: var(--panel3,#1a2130); box-shadow: inset 3px 0 0 var(--brand,#f0b90b); }
 .irow .sym { font-weight: 600; } .irow .sym small { color: var(--muted,#6b7688); font-weight: 400; display: block; font-size: 10px; }
 .irow .chg.up { color: var(--up,#26a69a); } .irow .chg.down { color: var(--down,#ef5350); }
 .irow .sell { color: var(--down,#ef5350); } .irow .buy { color: var(--up,#26a69a); }
@@ -51,8 +51,8 @@
 .watch__head span { color: var(--muted,#6b7688); }
 .sortable { cursor: pointer; user-select: none; display: inline-flex; align-items: center; gap: 3px; }
 .sortable:hover { color: var(--text,#d7dce5); }
-.sortable.asc i { border-left: 3px solid transparent; border-right: 3px solid transparent; border-bottom: 4px solid var(--accent,#f0b90b); }
-.sortable.desc i { border-left: 3px solid transparent; border-right: 3px solid transparent; border-top: 4px solid var(--accent,#f0b90b); }
+.sortable.asc i { border-left: 3px solid transparent; border-right: 3px solid transparent; border-bottom: 4px solid var(--brand,#f0b90b); }
+.sortable.desc i { border-left: 3px solid transparent; border-right: 3px solid transparent; border-top: 4px solid var(--brand,#f0b90b); }
 .irow { font-variant-numeric: tabular-nums; }
 /* Ячейки не должны налезать на соседние колонки: при узкой панели длинные цены
    выходили за свой трек и сливались с соседями в кашу (BUG-009). */

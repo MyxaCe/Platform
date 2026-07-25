@@ -33,7 +33,7 @@
 .drawbtn { width: 27px; height: 27px; display: flex; align-items: center; justify-content: center;
   background: transparent; border: none; border-radius: 6px; color: var(--muted,#6b7688); cursor: pointer; position: relative; }
 .drawbtn:hover { background: var(--panel2,#151a25); color: var(--text,#d7dce5); }
-.drawbtn.active { background: var(--accent,#f0b90b); color: #000; }
+.drawbtn.active { background: var(--brand,#f0b90b); color: #000; }
 .drawsep { height: 1px; background: var(--border,#1f2735); margin: 3px 2px; }
 .drawbtn::after { content: attr(data-tip); position: absolute; left: 34px; top: 50%; transform: translateY(-50%);
   white-space: nowrap; background: #0b0f17; color: var(--text,#d7dce5); border: 1px solid var(--border,#1f2735);

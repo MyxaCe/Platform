@@ -4,12 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Exchange Terminal</title>
+  <!-- Дизайн-токены платформы (theming-pack v1) — подключаются ПЕРВЫМИ: style.css
+       строит семантические цвета терминала поверх них (ADR-023, фаза Т1). -->
+  <link rel="stylesheet" href="/tokens.v1.css" />
   <link rel="stylesheet" href="/style.css" />
   <script src="/vendor/lightweight-charts.js"></script>
 </head>
 <body>
   <header class="top">
-    <div class="logo"><span class="logo__mark">E</span> Exchange<span class="muted">Pro · Binance LIVE</span></div>
+    <div class="logo"><span class="logo__mark">E</span> <span id="brandName">Exchange</span><span class="muted">Pro · Binance LIVE</span></div>
     <div class="metrics">
       <div class="metric"><span class="metric__l">BALANCE</span><span id="mBalance" class="metric__v">$0</span></div>
       <div class="metric"><span class="metric__l">CREDIT</span><span class="metric__v">$0</span></div>
@@ -19,6 +22,7 @@
       <div class="metric"><span class="metric__l">OPEN P&amp;L</span><span id="mPnl" class="metric__v">$0</span></div>
     </div>
     <div class="top__right">
+      <button class="btn" id="themeToggle" data-tip="Light / Dark" title="Light / Dark">◐</button>
       <span id="status" class="status status--off">●</span>
     </div>
   </header>
@@ -200,6 +204,7 @@
   </div>
 
   <div id="tip" class="tip hidden"></div>
+  <script src="/theming.js"></script>
   <script src="/api.js"></script>
   <script src="/indicators.js"></script>
   <script src="/orderbook.js"></script>

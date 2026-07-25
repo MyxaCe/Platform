@@ -22,7 +22,7 @@
 .trades__tabs { display: flex; height: 30px; align-items: stretch; border-bottom: 1px solid var(--border,#1f2735); }
 .trades__tabs button { flex: 1; background: transparent; border: none; border-bottom: 2px solid transparent;
   color: var(--muted,#6b7688); font-weight: 700; font-size: 10px; letter-spacing: .5px; cursor: pointer; font-family: inherit; }
-.trades__tabs button.active { color: var(--accent,#f0b90b); border-bottom-color: var(--accent,#f0b90b); }
+.trades__tabs button.active { color: var(--brand,#f0b90b); border-bottom-color: var(--brand,#f0b90b); }
 .trades__head, .trow { display: grid; grid-template-columns: 1fr 1fr .8fr; gap: 4px; padding: 3px 10px;
   font-size: 11px; font-variant-numeric: tabular-nums; }
 .trades__head { color: var(--muted,#6b7688); font-size: 10px; border-bottom: 1px solid var(--border,#1f2735); }

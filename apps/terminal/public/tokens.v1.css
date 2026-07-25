@@ -1,0 +1,47 @@
+/*
+ * Дизайн-токены платформы. Единственный источник цвета.
+ * Значения — RGB-каналы (без rgb()), чтобы Tailwind мог
+ * применять модификаторы прозрачности: bg-accent/10.
+ * Тёмная тема — по умолчанию.
+ */
+
+:root,
+[data-theme='dark'] {
+  --bg-base: 8 9 12;
+  --bg-elevated: 16 18 24;
+  --bg-card: 20 22 30;
+
+  --accent: 212 164 55;
+  --accent-hover: 230 188 85;
+  --royal: 31 58 109;
+
+  --text-primary: 245 246 248;
+  --text-secondary: 154 161 173;
+
+  --positive: 46 189 133;
+  --negative: 240 97 109;
+
+  --border: rgb(255 255 255 / 0.08);
+
+  color-scheme: dark;
+}
+
+[data-theme='light'] {
+  --bg-base: 247 248 250;
+  --bg-elevated: 255 255 255;
+  --bg-card: 255 255 255;
+
+  --accent: 176 130 25;
+  --accent-hover: 148 108 16;
+  --royal: 31 58 109;
+
+  --text-primary: 16 18 24;
+  --text-secondary: 90 98 110;
+
+  --positive: 16 145 98;
+  --negative: 214 62 75;
+
+  --border: rgb(10 12 18 / 0.1);
+
+  color-scheme: light;
+}

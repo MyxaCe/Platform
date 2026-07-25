@@ -20,7 +20,7 @@
   const CSS = `
 .bottom__tabs { padding: 0 12px; height: 32px; display: flex; align-items: center; gap: 18px; border-bottom: 1px solid var(--border,#1f2735); }
 .bottom__tabs span { color: var(--muted,#6b7688); font-weight: 700; font-size: 11px; letter-spacing: .5px; padding: 8px 0; cursor: pointer; border-bottom: 2px solid transparent; }
-.bottom__tabs span.active { color: var(--accent,#f0b90b); border-bottom-color: var(--accent,#f0b90b); }
+.bottom__tabs span.active { color: var(--brand,#f0b90b); border-bottom-color: var(--brand,#f0b90b); }
 .pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .pane.hidden { display: none; }
 .rows { overflow-y: auto; flex: 1; }

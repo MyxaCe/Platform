@@ -34,7 +34,7 @@
 .ob__opt { display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 5px 4px; font-size: 12px; cursor: pointer; border-radius: 5px; }
 .ob__opt:hover { background: var(--panel3,#1a2130); }
-.ob__opt input { accent-color: var(--accent,#f0b90b); cursor: pointer; }
+.ob__opt input { accent-color: var(--brand,#f0b90b); cursor: pointer; }
 
 /* Режимы показа + группировка */
 .ob__ctl { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px;
@@ -43,7 +43,7 @@
 .ob__mode { width: 22px; height: 22px; padding: 0; display: flex; align-items: center; justify-content: center;
   background: transparent; border: 1px solid transparent; border-radius: 4px; cursor: pointer; }
 .ob__mode:hover { background: var(--panel2,#151a25); }
-.ob__mode.active { border-color: var(--accent,#f0b90b); }
+.ob__mode.active { border-color: var(--brand,#f0b90b); }
 .ob__mode i { display: block; width: 12px; height: 12px; position: relative; }
 .ob__mode i::before, .ob__mode i::after { content: ''; position: absolute; left: 0; right: 0; height: 5px; border-radius: 1px; }
 .ob__mode i::before { top: 0; background: var(--down,#ef5350); }
@@ -75,7 +75,7 @@
 .brow span:nth-child(n+3) { text-align: right; }
 .brow .bq { text-align: right; }
 /* Маркер средней суммы: вертикальная риска на полосах */
-.ob__avg { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent,#f0b90b);
+.ob__avg { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--brand,#f0b90b);
   opacity: .5; pointer-events: none; z-index: 2; }
 
 .ob__mid { display: flex; align-items: center; gap: 8px; padding: 7px 10px; font-variant-numeric: tabular-nums;

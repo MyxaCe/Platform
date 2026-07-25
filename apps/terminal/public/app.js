@@ -14,6 +14,14 @@ const pdec = (id) => (META[id]?.price_decimals ?? 2);
 const qdec = (id) => (META[id]?.qty_decimals ?? 3);
 const pscale = (id) => 10 ** pdec(id);
 const qscale = (id) => 10 ** qdec(id);
+
+// Цвета графика берём из CSS-токенов платформы (theming-pack, ADR-023), чтобы график
+// следовал теме и бренду. Токены — RGB-каналы ("212 164 55"), см. tokens.v1.css.
+// Lightweight Charts не понимает современный синтаксис rgb(r g b / a) — собираем
+// легаси rgb()/rgba() с запятыми из каналов.
+const cssChan = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const rgbT = (n) => { const [r, g, b] = cssChan(n).split(/\s+/); return `rgb(${r}, ${g}, ${b})`; };
+const rgbaT = (n, a) => { const [r, g, b] = cssChan(n).split(/\s+/); return `rgba(${r}, ${g}, ${b}, ${a})`; };
 const fmtP = (id, raw) => (raw / pscale(id)).toLocaleString('en-US', { minimumFractionDigits: pdec(id), maximumFractionDigits: pdec(id) });
 const fmtQ = (id, raw) => (raw / qscale(id)).toFixed(qdec(id));
 // Знак перед валютой: «$-0.06» читается как опечатка, правильно «-$0.06».
@@ -88,16 +96,16 @@ const OSC = {
 // ============================ Chart ========================================
 const chartEl = document.getElementById('chart');
 const chart = LightweightCharts.createChart(chartEl, {
-  layout: { background: { color: '#0b0e14' }, textColor: '#6b7688', attributionLogo: false },
+  layout: { background: { color: rgbT('--bg-base') }, textColor: rgbT('--text-secondary'), attributionLogo: false },
   // Локаль задаём явно: иначе библиотека берёт navigator.language, и подписи оси времени
   // зависят от настроек ОС клиента (а в окружении без локали — падают с RangeError). BUG-008.
   localization: { locale: 'en-US' },
-  grid: { vertLines: { color: 'rgba(31,39,53,.4)' }, horzLines: { color: 'rgba(31,39,53,.4)' } },
-  rightPriceScale: { borderColor: '#1f2735' },
-  timeScale: { borderColor: '#1f2735', timeVisible: true, secondsVisible: false },
+  grid: { vertLines: { color: rgbaT('--text-secondary', '.10') }, horzLines: { color: rgbaT('--text-secondary', '.10') } },
+  rightPriceScale: { borderColor: rgbaT('--text-secondary', '.25') },
+  timeScale: { borderColor: rgbaT('--text-secondary', '.25'), timeVisible: true, secondsVisible: false },
   crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
 });
-const volume = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: '', color: '#2b3648' });
+const volume = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: '', color: rgbaT('--text-secondary', '.30') });
 volume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 // Хуки для модуля рисования (drawings.js подключается после app.js).
 // Инструменты рисования — виджет по ADR-015: сам создаёт canvas и панель внутри .chartwrap.
@@ -105,20 +113,21 @@ const draw = Drawings.mount(chartEl.parentElement, { chart, series: () => mainSe
 
 let mainSeries = null, overlaySeries = [], oscSeriesList = [], priceLines = [];
 let lastBarTime = 0, formingRaw = null;
-const volColor = (c) => (c.close >= c.open ? 'rgba(38,166,154,.4)' : 'rgba(239,83,80,.4)');
+const volColor = (c) => (c.close >= c.open ? rgbaT('--positive', '.4') : rgbaT('--negative', '.4'));
 const isLineType = () => (chartType === 'line' || chartType === 'area');
 
 function candleColors() {
   const wick = (def) => (settings.shadows ? (settings.shadowCustom ? settings.shadowColor : def) : 'rgba(0,0,0,0)');
-  if (chartType === 'hollow') return { upColor: 'rgba(0,0,0,0)', downColor: 'rgba(0,0,0,0)', borderUpColor: settings.hollowColor, borderDownColor: '#ef5350', wickUpColor: wick(settings.hollowColor), wickDownColor: wick('#ef5350') };
-  return { upColor: '#26a69a', downColor: '#ef5350', borderUpColor: '#26a69a', borderDownColor: '#ef5350', wickUpColor: wick('#26a69a'), wickDownColor: wick('#ef5350') };
+  const up = rgbT('--positive'), dn = rgbT('--negative');
+  if (chartType === 'hollow') return { upColor: 'rgba(0,0,0,0)', downColor: 'rgba(0,0,0,0)', borderUpColor: settings.hollowColor, borderDownColor: dn, wickUpColor: wick(settings.hollowColor), wickDownColor: wick(dn) };
+  return { upColor: up, downColor: dn, borderUpColor: up, borderDownColor: dn, wickUpColor: wick(up), wickDownColor: wick(dn) };
 }
 function makeMainSeries() {
   if (mainSeries) chart.removeSeries(mainSeries);
   if (chartType === 'candles' || chartType === 'hollow' || chartType === 'heikin') mainSeries = chart.addCandlestickSeries(candleColors());
-  else if (chartType === 'bars') mainSeries = chart.addBarSeries({ upColor: '#26a69a', downColor: '#ef5350' });
-  else if (chartType === 'line') mainSeries = chart.addLineSeries({ color: '#f0b90b', lineWidth: 2 });
-  else mainSeries = chart.addAreaSeries({ lineColor: '#f0b90b', topColor: 'rgba(240,185,11,.25)', bottomColor: 'rgba(240,185,11,.02)' });
+  else if (chartType === 'bars') mainSeries = chart.addBarSeries({ upColor: rgbT('--positive'), downColor: rgbT('--negative') });
+  else if (chartType === 'line') mainSeries = chart.addLineSeries({ color: rgbT('--accent'), lineWidth: 2 });
+  else mainSeries = chart.addAreaSeries({ lineColor: rgbT('--accent'), topColor: rgbaT('--accent', '.25'), bottomColor: rgbaT('--accent', '.02') });
   applySettings();
 }
 function applySettings() {
@@ -155,10 +164,10 @@ function redrawPriceLines() {
   const s = pscale(selected);
   if (showSLTP) for (const d of currentDeals) {
     priceLines.push(mainSeries.createPriceLine({ price: d.entry / s, color: '#8899aa', lineStyle: 2, lineWidth: 1, title: d.side === 'buy' ? 'L' : 'S' }));
-    if (d.sl != null) priceLines.push(mainSeries.createPriceLine({ price: d.sl / s, color: '#ef5350', lineWidth: 1, title: 'SL' }));
-    if (d.tp != null) priceLines.push(mainSeries.createPriceLine({ price: d.tp / s, color: '#26a69a', lineWidth: 1, title: 'TP' }));
+    if (d.sl != null) priceLines.push(mainSeries.createPriceLine({ price: d.sl / s, color: rgbT('--negative'), lineWidth: 1, title: 'SL' }));
+    if (d.tp != null) priceLines.push(mainSeries.createPriceLine({ price: d.tp / s, color: rgbT('--positive'), lineWidth: 1, title: 'TP' }));
   }
-  if (settings.addLine && rawCandles.length > 1) priceLines.push(mainSeries.createPriceLine({ price: rawCandles[rawCandles.length - 2].close, color: '#f0b90b', lineStyle: 3, lineWidth: Math.max(1, settings.addLineWidth || 1), title: 'ref' }));
+  if (settings.addLine && rawCandles.length > 1) priceLines.push(mainSeries.createPriceLine({ price: rawCandles[rawCandles.length - 2].close, color: rgbT('--accent'), lineStyle: 3, lineWidth: Math.max(1, settings.addLineWidth || 1), title: 'ref' }));
 }
 
 new ResizeObserver(() => chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight })).observe(chartEl);
@@ -389,11 +398,36 @@ function computeSignals() {
 }
 // Поиск, сортировка, избранное и клик по строке — внутри watchlist.js (ADR-015).
 
+// Перетемизация графика при смене темы/бренда (theming-pack, ADR-023): структурные
+// цвета + пересбор серии (её цвета читаются из токенов при создании) + перекраска
+// объёмов. Тема-каналы уже применены на :root к моменту события.
+function applyChartTheme() {
+  chart.applyOptions({
+    layout: { background: { color: rgbT('--bg-base') }, textColor: rgbT('--text-secondary') },
+    grid: { vertLines: { color: rgbaT('--text-secondary', '.10') }, horzLines: { color: rgbaT('--text-secondary', '.10') } },
+    rightPriceScale: { borderColor: rgbaT('--text-secondary', '.25') },
+    timeScale: { borderColor: rgbaT('--text-secondary', '.25') },
+  });
+  volume.applyOptions({ color: rgbaT('--text-secondary', '.30') });
+  if (selected != null && rawCandles.length) {
+    makeMainSeries();
+    mainSeries.setData(mainData());
+    applyIndicators();
+    redrawPriceLines();
+    volume.setData(rawCandles.map((c) => ({ time: c.time, value: c.volume, color: volColor(c) })));
+  }
+}
+document.addEventListener('themechange', applyChartTheme);
+
 // ============================ Start ========================================
 // Терминал автономный: без логина и общей шапки — открывается и работает сразу.
 renderIcons();
 applyLayout();
 initResizers();
+// Тема и бренд сайта (theming-pack v1, ADR-023 фаза Т1). Без CMS остаёмся на палитре
+// платформы; кнопка ◐ переключает тёмную/светлую.
+document.getElementById('themeToggle')?.addEventListener('click', () => window.Theming.toggleTheme());
+window.Theming.init();
 setInterval(syncLast, 2000);
 setInterval(pollAccount, 1000);
 connectWS();

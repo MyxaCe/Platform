@@ -53,6 +53,7 @@ updated: 2026-07-21
   - [[ADR-020-passkey-webauthn]] — Passkey / WebAuthn · `superseded` (ADR-022)
   - [[ADR-021-oauth-external-login]] — вход через внешних провайдеров (OAuth) · `superseded` (ADR-022)
   - [[ADR-022-standalone-terminal-pivot]] — **пивот на автономный встраиваемый терминал** · `accepted`
+  - [[ADR-023-white-label-integration]] — интеграция как White Label-страница (бренд/SSO/события) · `accepted` (Т1 сделано)
 
 ### Сервисы и модули
 - [[services-index]] — список всех сервисов, у каждого свой doc
