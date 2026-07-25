@@ -61,6 +61,16 @@ impl PgStore {
 /// После пивота на автономный терминал (2026-07-25) учётные записи/сессии/passkey
 /// ушли — счёт хранится сам по себе, `user_id` больше не ссылается на `users`.
 const SCHEMA: &str = r#"
+-- Внешняя личность SSO (tenant, sub) → внутренний user_id (ADR-023, Т2).
+-- Последовательность стартует с 1000, чтобы не пересечься с легаси-счетами.
+CREATE SEQUENCE IF NOT EXISTS identity_seq START 1000;
+CREATE TABLE IF NOT EXISTS identities (
+  user_id     BIGINT PRIMARY KEY DEFAULT nextval('identity_seq'),
+  tenant      TEXT NOT NULL,
+  sub         TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (tenant, sub)
+);
 CREATE TABLE IF NOT EXISTS accounts (
   user_id     BIGINT PRIMARY KEY,
   balance     NUMERIC(38,0) NOT NULL,
@@ -267,6 +277,22 @@ impl Persistence for PgStore {
 
         tx.commit().await.map_err(db)?;
         Ok(())
+    }
+
+    async fn resolve_identity(&self, tenant: &str, sub: &str) -> Result<UserId, StoreError> {
+        // Найти-или-создать одним запросом: конфликт по (tenant, sub) => RETURNING
+        // существующего user_id (DO UPDATE фиктивный, чтобы RETURNING сработал).
+        let row = sqlx::query(
+            "INSERT INTO identities (tenant, sub) VALUES ($1, $2)
+             ON CONFLICT (tenant, sub) DO UPDATE SET tenant = EXCLUDED.tenant
+             RETURNING user_id",
+        )
+        .bind(tenant)
+        .bind(sub)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(UserId(row.get::<i64, _>("user_id") as u64))
     }
 
     async fn check_invariants(&self) -> Result<Vec<String>, StoreError> {

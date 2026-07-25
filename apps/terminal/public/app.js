@@ -428,6 +428,10 @@ initResizers();
 // платформы; кнопка ◐ переключает тёмную/светлую.
 document.getElementById('themeToggle')?.addEventListener('click', () => window.Theming.toggleTheme());
 window.Theming.init();
+// Вход по handoff-токену платформы (ADR-023 фаза Т2). Без родителя-кабинета токен не
+// придёт — терминал работает на счёте по умолчанию (dev/standalone). При смене сессии
+// сразу обновляем сводку счёта.
+window.Sso.init().onChange(() => pollAccount());
 setInterval(syncLast, 2000);
 setInterval(pollAccount, 1000);
 connectWS();

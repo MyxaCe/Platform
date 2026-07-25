@@ -70,6 +70,13 @@ pub trait Persistence: Send + Sync {
     /// переписываются целиком, история закрытых сделок дописывается.
     async fn save_account(&self, user: UserId, snap: &AccountSnapshot) -> Result<(), StoreError>;
 
+    /// Найти или создать внутренний `UserId` по внешней личности `(tenant, sub)` из
+    /// провалидированного SSO-токена (ADR-023, фаза Т2). Маппинг стабилен между
+    /// рестартами — иначе после перезапуска пользователь получил бы новый пустой счёт.
+    async fn resolve_identity(&self, _tenant: &str, _sub: &str) -> Result<UserId, StoreError> {
+        Err(StoreError("identity mapping requires a database".into()))
+    }
+
     /// Проверка денежных инвариантов (красная линия №5). Возвращает список нарушений;
     /// пустой вектор — всё сходится. Вызывается на старте после загрузки.
     async fn check_invariants(&self) -> Result<Vec<String>, StoreError> {

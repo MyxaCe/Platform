@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "n": "sGSxmuUt9pN-Zq_90le5ilc7YC_fhZtOE7S9fSp5X69xZaQfx3LTpw4E6re-J2cFQxXRNX-cEYJX4Slbr6fxW02bouMTiuBfT0GV5-oZhN8T4Yxgo0yNjeKCtk2nII2ECyobQfSv2yINpQ_1U-NPrUiwY3ZkYI6_g-xpgHhoKbLMWcf_muE37St5hqX_mrAHj3983jlAdq2BnNhSrvUg9KM3SAXkQg6cTiXYZfAYyDaEiP02DIJTgfpB84Bd1lvI05jQ8ltzKKkU_uowiNhW_qy5K9xp_oIFGs0gpRi6dNxMIJvwteBbtbBS0LpJY4jqeU5mv63ZtFVpOXhFS5XfXQ",
+      "e": "AQAB",
+      "kid": "platform-sso-1",
+      "alg": "RS256",
+      "use": "sig"
+    }
+  ]
+}

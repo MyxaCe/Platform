@@ -8,6 +8,7 @@
 //! сайтов/CMS — отдельное решение (пивот 2026-07-25, см. STATUS). Доменные типы наружу не протекают.
 
 pub mod feed;
+mod sso;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -61,6 +62,10 @@ pub struct AppState {
     store: Arc<dyn Persistence>,
     /// Лок на счёт: сериализует «мутация → слепок → запись» по одному счёту.
     acct_locks: Arc<Mutex<HashMap<UserId, Arc<Mutex<()>>>>>,
+    // SSO платформы (ADR-023, Т2): вход по handoff-JWT, сессии терминала.
+    sso: Arc<sso::Sso>,
+    /// Требовать ли сессию на торговых ручках. Выкл (dev/standalone) → счёт по умолчанию.
+    sso_enabled: bool,
 }
 
 pub fn build_state() -> AppState {
@@ -70,6 +75,17 @@ pub fn build_state() -> AppState {
 /// Собрать состояние с конкретным хранилищем. `NoopStore` = всё в памяти (тесты, запуск без БД).
 pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
     let (events_tx, _rx) = broadcast::channel(4096);
+    // SSO: JWKS платформы = {CABINET_URL}/api/sso/jwks. Без CABINET_URL SSO выключен
+    // (терминал на счёте по умолчанию — dev/standalone). SSO_DISABLED=1 выключает даже
+    // при заданном CABINET_URL (стек/тесты работают без реальных токенов).
+    let jwks_url = std::env::var("CABINET_URL")
+        .ok()
+        .map(|b| b.trim_end_matches('/').to_string())
+        .filter(|b| !b.is_empty())
+        .map(|b| format!("{b}/api/sso/jwks"))
+        .unwrap_or_default();
+    let sso = Arc::new(sso::Sso::new(jwks_url));
+    let sso_enabled = sso.enabled() && std::env::var("SSO_DISABLED").ok().as_deref() != Some("1");
     AppState {
         events_tx,
         feed_instruments: Arc::new(feed::instruments()),
@@ -80,6 +96,8 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         broker: Arc::new(Mutex::new(Broker::new(10_000_000, 1))), // старт $100k, leverage 1
         store,
         acct_locks: Arc::new(Mutex::new(HashMap::new())),
+        sso,
+        sso_enabled,
     }
 }
 
@@ -141,6 +159,21 @@ fn feed_by_id(st: &AppState, id: u32) -> Option<feed::FeedInstrument> {
     st.feed_instruments.iter().find(|f| f.id == id).cloned()
 }
 
+/// `Authorization: Bearer <token>` → сам токен.
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers.get("authorization")?.to_str().ok()?.strip_prefix("Bearer ")
+}
+
+/// Пользователь запроса (ADR-023, Т2). SSO включён — из bearer-сессии, иначе `401`;
+/// SSO выключен (dev/standalone) — счёт по умолчанию.
+async fn require_user(st: &AppState, headers: &HeaderMap) -> Result<UserId, ApiErr> {
+    if !st.sso_enabled {
+        return Ok(DEFAULT_USER);
+    }
+    let token = bearer(headers).ok_or_else(|| err(StatusCode::UNAUTHORIZED, "missing session"))?;
+    st.sso.resolve(token).await.ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid session"))
+}
+
 // ============================ Роутер =======================================
 
 pub fn router(state: AppState) -> Router {
@@ -157,6 +190,9 @@ pub fn router(state: AppState) -> Router {
         .route("/pending/:id", delete(cancel_pending))
         .route("/account", get(account))
         .route("/stream", get(ws_stream))
+        // SSO платформы (ADR-023, Т2): обмен handoff-JWT на сессию терминала и логаут.
+        .route("/v1/session", post(session_create))
+        .route("/v1/session/logout", post(session_logout))
         .with_state(state)
 }
 
@@ -393,8 +429,8 @@ async fn get_stats(State(st): State<AppState>, Path(id): Path<u32>) -> Json<Vec<
 }
 
 /// Открыть сделку по текущей рыночной цене (buy=ask, sell=bid).
-async fn open_deal(State(st): State<AppState>, Json(req): Json<DealReq>) -> Result<Json<DealDto>, ApiErr> {
-    let user = DEFAULT_USER;
+async fn open_deal(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<DealReq>) -> Result<Json<DealDto>, ApiErr> {
+    let user = require_user(&st, &headers).await?;
     let side = match req.side.as_str() {
         "buy" => PosSide::Long,
         "sell" => PosSide::Short,
@@ -421,8 +457,8 @@ async fn open_deal(State(st): State<AppState>, Json(req): Json<DealReq>) -> Resu
 }
 
 /// Разместить лимитный (отложенный) ордер.
-async fn place_pending(State(st): State<AppState>, Json(req): Json<PendingReq>) -> Result<Json<PendingDto>, ApiErr> {
-    let user = DEFAULT_USER;
+async fn place_pending(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<PendingReq>) -> Result<Json<PendingDto>, ApiErr> {
+    let user = require_user(&st, &headers).await?;
     let side = match req.side.as_str() {
         "buy" => PosSide::Long,
         "sell" => PosSide::Short,
@@ -442,8 +478,8 @@ async fn place_pending(State(st): State<AppState>, Json(req): Json<PendingReq>) 
     }))
 }
 
-async fn list_pending(State(st): State<AppState>) -> Json<Vec<PendingDto>> {
-    let user = DEFAULT_USER;
+async fn list_pending(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<PendingDto>>, ApiErr> {
+    let user = require_user(&st, &headers).await?;
     let b = st.broker.lock().await;
     let out = b
         .pendings(user)
@@ -454,11 +490,11 @@ async fn list_pending(State(st): State<AppState>) -> Json<Vec<PendingDto>> {
             qty: p.qty, price: p.price, sl: p.sl, tp: p.tp, price_decimals: p.pd, qty_decimals: p.qd,
         })
         .collect();
-    Json(out)
+    Ok(Json(out))
 }
 
-async fn cancel_pending(State(st): State<AppState>, Path(id): Path<u64>) -> Result<StatusCode, ApiErr> {
-    let user = DEFAULT_USER;
+async fn cancel_pending(State(st): State<AppState>, headers: HeaderMap, Path(id): Path<u64>) -> Result<StatusCode, ApiErr> {
+    let user = require_user(&st, &headers).await?;
     with_account(&st, user, |b| {
         b.cancel_pending(user, id).map_err(|_| err(StatusCode::NOT_FOUND, "unknown pending"))
     })
@@ -466,8 +502,8 @@ async fn cancel_pending(State(st): State<AppState>, Path(id): Path<u64>) -> Resu
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list_closed(State(st): State<AppState>) -> Json<Vec<ClosedDto>> {
-    let user = DEFAULT_USER;
+async fn list_closed(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<ClosedDto>>, ApiErr> {
+    let user = require_user(&st, &headers).await?;
     let b = st.broker.lock().await;
     let out = b
         .closed_deals(user)
@@ -479,12 +515,12 @@ async fn list_closed(State(st): State<AppState>) -> Json<Vec<ClosedDto>> {
             qty: d.qty, entry: d.entry, exit: d.exit, pnl: d.pnl, price_decimals: d.pd, qty_decimals: d.qd,
         })
         .collect();
-    Json(out)
+    Ok(Json(out))
 }
 
 /// Список открытых позиций с live P&L.
-async fn list_deals(State(st): State<AppState>) -> Json<Vec<DealDto>> {
-    let user = DEFAULT_USER;
+async fn list_deals(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<DealDto>>, ApiErr> {
+    let user = require_user(&st, &headers).await?;
     let m = marks(&st).await;
     let b = st.broker.lock().await;
     let out = b
@@ -501,12 +537,12 @@ async fn list_deals(State(st): State<AppState>) -> Json<Vec<DealDto>> {
             }
         })
         .collect();
-    Json(out)
+    Ok(Json(out))
 }
 
 /// Закрыть позицию по текущей цене (last).
-async fn close_deal(State(st): State<AppState>, Path(id): Path<u64>) -> Result<Json<serde_json::Value>, ApiErr> {
-    let user = DEFAULT_USER;
+async fn close_deal(State(st): State<AppState>, headers: HeaderMap, Path(id): Path<u64>) -> Result<Json<serde_json::Value>, ApiErr> {
+    let user = require_user(&st, &headers).await?;
     let m = marks(&st).await;
     let (pnl, mark) = with_account(&st, user, |b| {
         let inst = b
@@ -524,15 +560,60 @@ async fn close_deal(State(st): State<AppState>, Path(id): Path<u64>) -> Result<J
 }
 
 /// Сводка счёта: баланс/equity/маржа/free/open P&L (в центах).
-async fn account(State(st): State<AppState>) -> Json<AccountDto> {
-    let user = DEFAULT_USER;
+async fn account(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<AccountDto>, ApiErr> {
+    let user = require_user(&st, &headers).await?;
     let m = marks(&st).await;
     let b = st.broker.lock().await;
     let balance = b.balance(user);
     let open_pnl = b.open_pnl(user, &m);
     let used = b.used_margin(user);
     let equity = balance + open_pnl;
-    Json(AccountDto { balance, equity, used_margin: used, free_margin: equity - used, open_pnl })
+    Ok(Json(AccountDto { balance, equity, used_margin: used, free_margin: equity - used, open_pnl }))
+}
+
+// ---- SSO: обмен handoff-JWT на сессию терминала (ADR-023, Т2) --------------
+
+#[derive(Deserialize)]
+struct SessionReq {
+    /// handoff-JWT платформы, полученный фронтом через postMessage.
+    token: String,
+    /// Сайт из `?site=` терминала — должен совпасть с `tenant` токена.
+    site: String,
+}
+#[derive(Serialize)]
+struct SessionResp {
+    token: String,
+    expires_in: u64,
+}
+
+/// Обменять валидный handoff-JWT на сессию терминала. Счёт — по `(tenant, sub)`.
+async fn session_create(State(st): State<AppState>, Json(req): Json<SessionReq>) -> Result<Json<SessionResp>, ApiErr> {
+    let claims = st.sso.validate(&req.token, &req.site).await.map_err(sso_err)?;
+    let user = st
+        .store
+        .resolve_identity(&claims.tenant, &claims.sub)
+        .await
+        .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "identity store unavailable"))?;
+    let expires_in = st.sso.mint(claims.jti.clone(), user).await;
+    Ok(Json(SessionResp { token: claims.jti, expires_in }))
+}
+
+/// Погасить сессию терминала (логаут из кабинета).
+async fn session_logout(State(st): State<AppState>, headers: HeaderMap) -> StatusCode {
+    if let Some(t) = bearer(&headers) {
+        st.sso.logout(t).await;
+    }
+    StatusCode::NO_CONTENT
+}
+
+fn sso_err(e: sso::SsoError) -> ApiErr {
+    let code = match e {
+        sso::SsoError::TenantMismatch => StatusCode::FORBIDDEN,
+        sso::SsoError::NoKeys => StatusCode::SERVICE_UNAVAILABLE,
+        sso::SsoError::Disabled => StatusCode::NOT_IMPLEMENTED,
+        sso::SsoError::BadToken | sso::SsoError::Replay => StatusCode::UNAUTHORIZED,
+    };
+    err(code, e.as_str())
 }
 
 /// Фоновый монитор: триггеры лимитных ордеров и SL/TP по текущим ценам (ADR-016).

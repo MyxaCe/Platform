@@ -33,6 +33,14 @@ services:
     environment:
       # Задан → PgStore (ADR-016). Убрать переменную → всё в памяти, как раньше.
       DATABASE_URL: postgres://${POSTGRES_USER:-platform}:${POSTGRES_PASSWORD:-platform}@postgres:5432/${POSTGRES_DB:-platform}
+      # SSO платформы (ADR-023, Т2). CABINET_URL → JWKS {CABINET_URL}/api/sso/jwks.
+      # Из контейнера кабинет на хосте доступен как host.docker.internal.
+      CABINET_URL: ${CABINET_URL:-http://host.docker.internal:3002}
+      # SSO_DISABLED=1 (dev по умолчанию): торговые ручки НЕ требуют сессию (счёт по
+      # умолчанию), но /v1/session валидирует токены против живого JWKS. Прод: 0.
+      SSO_DISABLED: ${SSO_DISABLED:-1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy

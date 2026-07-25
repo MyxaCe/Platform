@@ -83,9 +83,12 @@ CMS платформы; терминал — ведомый. Согласова�
   `style.css` (семантика терминала поверх токенов; акцент переименован `--accent`→`--brand`) +
   график читает цвета из токенов. Без CMS — палитра платформы. Проверено headless: обе темы,
   применение бренда перекрашивает акцент/имя, ноль ошибок.
-- **Т2 — SSO + тенанты (контракт принят, ждёт Auth-сервис).** handoff-JWT (RS256/JWKS), терминал
-  чеканит свою сессию ≤15 мин; `?site=` обязателен, `token.tenant==site`; счёт по `(tenant, sub)`;
-  postMessage-логаут. Пакет — `sso-pack/`.
+- **Т2 — SSO + тенанты · РЕАЛИЗОВАНО (ждёт e2e с реальным токеном).** handoff-JWT (RS256/JWKS),
+  терминал чеканит свою сессию ≤15 мин (bearer в памяти iframe, не cookie); `?site=` обязателен,
+  `token.tenant==site`; счёт по `(tenant, sub)` персистентно; postMessage (`sso.token`/
+  `token.refresh.request`/`sso.logout`). Gateway `sso.rs` + `/v1/session`; фронт `sso.js`; dev-тумблер
+  `SSO_DISABLED`. Проверено: юнит-тесты против реального ключа платформы + `/v1/session` валидирует
+  против живого JWKS кабинета (:3002). Пакет — `sso-pack/`.
 - **Т3 — события + инструменты.** Terminal → outbox (в транзакцию `with_account`) → RabbitMQ
   `platform.events`; кабинет/CRM — проекции. Allow-list per-tenant. Параллельно i18n.
 

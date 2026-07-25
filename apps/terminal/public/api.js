@@ -22,10 +22,17 @@
   /** Создать клиента. Терминал автономный (пивот 2026-07-25): логина нет, все запросы
    *  идут на тот же origin к одному демо-счёту по умолчанию. */
   function create() {
+    /** Заголовок сессии терминала (ADR-023, Т2): bearer в памяти, если вошли. Для
+     *  публичных данных безвреден, для торговых ручек обязателен. */
+    function authHeaders() {
+      const t = window.Sso && window.Sso.token && window.Sso.token();
+      return t ? { Authorization: 'Bearer ' + t } : {};
+    }
+
     /** GET с разбором JSON. Возвращает данные либо null (ошибка сети / не-2xx). */
     async function read(url) {
       try {
-        const r = await fetch(url);
+        const r = await fetch(url, { headers: authHeaders() });
         if (!r.ok) return null;
         return await r.json();
       } catch {
@@ -35,7 +42,7 @@
 
     /** POST/DELETE с телом. Возвращает { ok, status, data }; data может быть null. */
     async function mutate(url, method, body) {
-      const opts = { method, headers: {} };
+      const opts = { method, headers: authHeaders() };
       if (body !== undefined) {
         opts.headers['Content-Type'] = 'application/json';
         opts.body = JSON.stringify(body);

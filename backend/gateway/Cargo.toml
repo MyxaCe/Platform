@@ -24,6 +24,9 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
+# SSO: валидация handoff-JWT платформы по JWKS (RS256). Без use_pem — ключи строим
+# из RSA-компонент (n,e) JWKS, PEM не нужен (ADR-023, фаза Т2).
+jsonwebtoken = { version = "9", default-features = false }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

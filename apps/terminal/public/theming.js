@@ -129,24 +129,31 @@
     } catch { /* нет валидного кеша — остаёмся на палитре платформы */ }
   }
   async function fetchBrand(cfg) {
-    if (!cfg.cmsUrl) return; // без CMS работаем на дефолтном бренде платформы
-    const url = `${cfg.cmsUrl.replace(/\/$/, '')}/v1/cms/brand?locale=${encodeURIComponent(cfg.locale || 'en')}`;
+    if (!cfg.brandUrl) return; // без прокси работаем на дефолтном бренде платформы
+    // Тенант приходит из ?site= (обязателен, ADR-023). CMS-ключ в браузер НЕ кладём:
+    // brand запрашивается через gateway-прокси платформы, ключ у него server-side.
+    const site = cfg.site || new URLSearchParams(location.search).get('site') || '';
+    const qs = new URLSearchParams();
+    if (site) qs.set('site', site);
+    qs.set('locale', cfg.locale || 'en');
+    const url = `${cfg.brandUrl.replace(/\/$/, '')}?${qs}`;
     try {
-      const headers = cfg.apiKey ? { 'X-API-Key': cfg.apiKey } : {};
-      const r = await fetch(url, { headers });
+      const r = await fetch(url, { credentials: 'omit' });
       if (!r.ok) return;
       const brand = await r.json();
       if (applyBrand(brand)) cacheBrand(brand); // кешируем только валидный (last-good)
-    } catch { /* сеть/CMS недоступна — держим текущий бренд */ }
+    } catch { /* прокси/сеть недоступны — держим текущий бренд */ }
   }
 
   // ---- Инициализация -------------------------------------------------------
   let timer = null;
   function init(overrides) {
-    const cfg = Object.assign({ cmsUrl: '', apiKey: '', locale: 'en' }, window.TERMINAL_CONFIG || {}, overrides || {});
+    // brandUrl — полный путь к brand-прокси платформы (напр. http://localhost:3002/v1/cms/brand).
+    // Ключа CMS здесь нет и быть не должно — он живёт на стороне прокси (server-side).
+    const cfg = Object.assign({ brandUrl: '', site: '', locale: 'en' }, window.TERMINAL_CONFIG || {}, overrides || {});
     loadCached();              // мгновенно показать прошлый валидный бренд
-    fetchBrand(cfg);           // и обновить из CMS
-    if (cfg.cmsUrl) {
+    fetchBrand(cfg);           // и обновить из CMS через прокси платформы
+    if (cfg.brandUrl) {
       if (timer) clearInterval(timer);
       timer = setInterval(() => fetchBrand(cfg), REFRESH_MS);
     }
