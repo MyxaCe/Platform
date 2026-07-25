@@ -55,6 +55,10 @@ services:
       # Кто может встраивать терминал в iframe (CSP frame-ancestors, ADR-023).
       # Дефолт "*" = открыто (dev). Прод: список доменов сайтов платформы через .env.
       FRAME_ANCESTORS: ${FRAME_ANCESTORS:-*}
+      # Рантайм-конфиг фронта (ADR-023). URL для БРАУЗЕРА пользователя (не для контейнера):
+      # публичный brand-эндпоинт CMS и origin кабинета для postMessage/SSO.
+      BRAND_URL: ${BRAND_URL:-http://localhost:3001/v1/cms/brand}
+      CABINET_ORIGIN: ${CABINET_ORIGIN:-http://localhost:3002}
     ports:
       - "8888:80"
     depends_on:

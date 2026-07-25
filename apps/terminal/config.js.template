@@ -1,0 +1,10 @@
+// Рантайм-конфиг терминала (ADR-023). Рендерится envsubst при старте контейнера из env:
+//   BRAND_URL       — публичный brand-эндпоинт CMS платформы (напр.
+//                     http://localhost:3001/v1/cms/brand); пусто → бренд не грузим.
+//   CABINET_ORIGIN  — origin кабинета-родителя для postMessage/SSO (напр.
+//                     http://localhost:3002).
+// Тенант (?site=) терминал берёт из своего URL. Секретов здесь нет и быть не должно.
+window.TERMINAL_CONFIG = {
+  brandUrl: "${BRAND_URL}",
+  cabinetOrigins: ["${CABINET_ORIGIN}"]
+};

@@ -13,6 +13,12 @@ COPY public/ /usr/share/nginx/html/
 # в conf.d/default.conf. Подставляем ТОЛЬКО FRAME_ANCESTORS (фильтр), чтобы не затронуть
 # рантайм-переменные nginx ($host/$uri/$http_upgrade). ADR-023, фаза Т1.
 COPY nginx.conf /etc/nginx/templates/default.conf.template
+# Рантайм-конфиг фронта (brand-URL, origin кабинета) рендерится из env при старте
+# (ADR-023). Дефолты пустые — образ окружение-агностичен; dev-значения даёт compose.
+COPY config.js.template /config.js.template
+COPY docker-entrypoint.d/40-terminal-config.sh /docker-entrypoint.d/40-terminal-config.sh
 ENV FRAME_ANCESTORS="*" \
-    NGINX_ENVSUBST_FILTER="FRAME_ANCESTORS"
+    NGINX_ENVSUBST_FILTER="FRAME_ANCESTORS" \
+    BRAND_URL="" \
+    CABINET_ORIGIN=""
 EXPOSE 80
