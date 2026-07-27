@@ -40,6 +40,9 @@ services:
       # выданную через /v1/session по handoff-JWT. SSO_DISABLED=1 вернёт standalone-режим
       # (торговля на счёте по умолчанию без токена) — для локальной отладки терминала.
       SSO_DISABLED: ${SSO_DISABLED:-0}
+      # Стартовый баланс демо-счёта (центы). Dev выровнен под apex-ru = $10k, чтобы «Обзор»
+      # кабинета сходился. Целевое — per-tenant demoStartBalanceCents из CMS (ADR-023).
+      DEMO_START_BALANCE_CENTS: ${DEMO_START_BALANCE_CENTS:-1000000}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

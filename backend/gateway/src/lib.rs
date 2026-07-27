@@ -86,6 +86,14 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         .unwrap_or_default();
     let sso = Arc::new(sso::Sso::new(jwks_url));
     let sso_enabled = sso.enabled() && std::env::var("SSO_DISABLED").ok().as_deref() != Some("1");
+    // Стартовый баланс демо-счёта. Дефолт $100k; в интеграции с платформой выравнивается
+    // под сайт (env DEMO_START_BALANCE_CENTS; целевое — per-tenant demoStartBalanceCents из
+    // CMS, когда появится server-side ключ, ADR-023).
+    let start_cents = std::env::var("DEMO_START_BALANCE_CENTS")
+        .ok()
+        .and_then(|s| s.parse::<i128>().ok())
+        .filter(|c| *c > 0)
+        .unwrap_or(10_000_000);
     AppState {
         events_tx,
         feed_instruments: Arc::new(feed::instruments()),
@@ -93,7 +101,7 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         klines_cache: Arc::new(Mutex::new(HashMap::new())),
         depth_cache: Arc::new(Mutex::new(HashMap::new())),
         stats_cache: Arc::new(Mutex::new(HashMap::new())),
-        broker: Arc::new(Mutex::new(Broker::new(10_000_000, 1))), // старт $100k, leverage 1
+        broker: Arc::new(Mutex::new(Broker::new(start_cents, 1))), // старт из env, leverage 1
         store,
         acct_locks: Arc::new(Mutex::new(HashMap::new())),
         sso,
