@@ -72,6 +72,13 @@ pub struct Sso {
     jwks: Mutex<Option<JwksCache>>,
     seen_jti: Mutex<HashMap<String, Instant>>,
     sessions: Mutex<HashMap<String, Session>>,
+    /// Проверять ли `exp`. **Существует только в тестовой сборке** и только для того,
+    /// чтобы остальные пункты чеклиста (tenant, one-shot jti) проверялись на настоящем
+    /// токене платформы: живой токен из `sso-pack` истёк, а переподписать его нечем —
+    /// приватного ключа платформы у нас нет и быть не должно. В рабочей сборке этого
+    /// поля нет вовсе, поэтому `exp` проверяется всегда.
+    #[cfg(test)]
+    check_exp: bool,
 }
 
 impl Sso {
@@ -81,6 +88,8 @@ impl Sso {
             jwks: Mutex::new(None),
             seen_jti: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            check_exp: true,
         }
     }
 
@@ -142,6 +151,10 @@ impl Sso {
         let key = self.key_for(&kid).await?;
 
         let mut v = Validation::new(Algorithm::RS256);
+        #[cfg(test)]
+        {
+            v.validate_exp = self.check_exp;
+        }
         v.leeway = LEEWAY_SECS;
         v.set_issuer(&["platform-auth"]);
         v.set_audience(&["terminal"]);
@@ -203,6 +216,14 @@ struct Jwk {
 
 #[cfg(test)]
 impl Sso {
+    /// Тот же сервис, но без проверки `exp` — чтобы дойти до проверок tenant и jti
+    /// на настоящем (истёкшем) токене платформы. Подпись при этом проверяется
+    /// по-настоящему, реальным ключом: ослаблен ровно один пункт чеклиста, и он
+    /// закрыт отдельным тестом `validate_rejects_expired`.
+    fn new_ignoring_exp(jwks_url: String) -> Self {
+        Self { check_exp: false, ..Self::new(jwks_url) }
+    }
+
     /// Тестовый шов: посадить ключ в кэш JWKS, чтобы `validate` не ходил в сеть.
     async fn seed_key(&self, kid: &str, n: &str, e: &str) {
         let key = DecodingKey::from_rsa_components(n, e).unwrap();
@@ -259,6 +280,102 @@ mod tests {
         let sso = Sso::new(String::new());
         assert!(!sso.enabled());
         assert!(matches!(sso.validate(TOKEN, "apex-ru").await, Err(SsoError::Disabled)));
+    }
+
+    // ==================== Чеклист sso-pack: сценарии ОТКАЗА ====================
+    //
+    // Пункты чеклиста (`sso-pack/README.md`): 1 — только RS256, 2 — iss/aud,
+    // 3 — exp, 4 — one-shot jti, 5 — tenant == ?site=.
+    //
+    // Все тесты ниже идут против **настоящего ключа платформы** и настоящего токена.
+    // Подделать токен нечем: приватного ключа платформы у нас нет, и это правильно.
+    // Поэтому там, где нужен токен, доживший до проверки claims, отключается ровно
+    // одна проверка — `exp` (`new_ignoring_exp`, существует только в тестовой сборке).
+    //
+    // Пункт 2 (iss/aud) юнит-тестом на отказ **не покрывается**: чтобы получить токен
+    // с чужим `iss`, его надо подписать ключом платформы. Подпись проверяется до
+    // claims, поэтому подмена payload'а падает раньше — на подписи, и тест доказывал
+    // бы не то. Этот пункт закрывается живым прогоном TRM-04.
+
+    /// Пункт 1: заголовок с `alg: HS256` — классическая подмена алгоритма, при которой
+    /// публичный ключ пытаются использовать как HMAC-секрет. Отказ обязан наступить
+    /// до любой работы с ключом.
+    #[tokio::test]
+    async fn rejects_alg_substitution_hs256() {
+        let sso = Sso::new_ignoring_exp("http://x/jwks".into());
+        sso.seed_key(KID, N, E).await;
+        let parts: Vec<&str> = TOKEN.split('.').collect();
+        let forged = format!("eyJhbGciOiJIUzI1NiIsImtpZCI6InBsYXRmb3JtLXNzby0xIiwidHlwIjoiSldUIn0.{}.{}", parts[1], parts[2]);
+        assert!(matches!(sso.validate(&forged, "apex-ru").await, Err(SsoError::BadToken)));
+    }
+
+    /// Пункт 1: `alg: none` — токен «без подписи».
+    #[tokio::test]
+    async fn rejects_alg_none() {
+        let sso = Sso::new_ignoring_exp("http://x/jwks".into());
+        sso.seed_key(KID, N, E).await;
+        let parts: Vec<&str> = TOKEN.split('.').collect();
+        let forged = format!("eyJhbGciOiJub25lIiwia2lkIjoicGxhdGZvcm0tc3NvLTEiLCJ0eXAiOiJKV1QifQ.{}.", parts[1]);
+        assert!(matches!(sso.validate(&forged, "apex-ru").await, Err(SsoError::BadToken)));
+    }
+
+    /// Пункт 1: другой RSA-алгоритм (RS512) тоже не принимаем — принимаем ТОЛЬКО RS256.
+    #[tokio::test]
+    async fn rejects_other_rsa_alg() {
+        let sso = Sso::new_ignoring_exp("http://x/jwks".into());
+        sso.seed_key(KID, N, E).await;
+        let parts: Vec<&str> = TOKEN.split('.').collect();
+        let forged = format!("eyJhbGciOiJSUzUxMiIsImtpZCI6InBsYXRmb3JtLXNzby0xIiwidHlwIjoiSldUIn0.{}.{}", parts[1], parts[2]);
+        assert!(matches!(sso.validate(&forged, "apex-ru").await, Err(SsoError::BadToken)));
+    }
+
+    /// Пункт 1, отдельно: явная проверка `alg` обязана срабатывать **до** обращения к
+    /// ключам. Мутационный прогон показал, что три теста выше остаются зелёными и без
+    /// неё — `Validation::new(RS256)` библиотеки отвергает чужой алгоритм сама. То есть
+    /// они проверяют свойство (отказ), а не наш барьер. Этот проверяет барьер: JWKS не
+    /// посажен и недостижим, поэтому «дошли до ключей» видно по коду ошибки — `NoKeys`
+    /// вместо `BadToken`.
+    #[tokio::test]
+    async fn rejects_alg_before_touching_keys() {
+        let sso = Sso::new_ignoring_exp("http://127.0.0.1:9/jwks".into()); // порт-заглушка
+        let parts: Vec<&str> = TOKEN.split('.').collect();
+        let forged = format!("eyJhbGciOiJIUzI1NiIsImtpZCI6InBsYXRmb3JtLXNzby0xIiwidHlwIjoiSldUIn0.{}.{}", parts[1], parts[2]);
+        // Разбираем вручную, а не через expect_err: тот требует Debug на Claims, а
+        // печатать содержимое токена (sub/tenant/jti) в панике мы не хотим.
+        match sso.validate(&forged, "apex-ru").await {
+            Err(SsoError::BadToken) => {}
+            Err(other) => panic!("ожидали BadToken до похода за ключами, получили {other:?}"),
+            Ok(_) => panic!("подмена alg обязана быть отвергнута"),
+        }
+    }
+
+    /// Пункт 5: `tenant` токена не совпадает с запрошенным сайтом → 403.
+    /// Это защита от подмены сайта: токен apex-ru не должен открывать счёт на другом сайте.
+    #[tokio::test]
+    async fn rejects_tenant_mismatch() {
+        let sso = Sso::new_ignoring_exp("http://x/jwks".into());
+        sso.seed_key(KID, N, E).await;
+        assert!(matches!(sso.validate(TOKEN, "other-site").await, Err(SsoError::TenantMismatch)));
+    }
+
+    /// Пункт 4: повторно предъявленный `jti` — one-shot. Первый раз проходит, второй нет.
+    #[tokio::test]
+    async fn rejects_replayed_jti() {
+        let sso = Sso::new_ignoring_exp("http://x/jwks".into());
+        sso.seed_key(KID, N, E).await;
+        assert!(sso.validate(TOKEN, "apex-ru").await.is_ok(), "первое предъявление должно проходить");
+        assert!(matches!(sso.validate(TOKEN, "apex-ru").await, Err(SsoError::Replay)));
+    }
+
+    /// Пункт 4, тонкое место: `jti` гасится ТОЛЬКО при полном успехе. Иначе чужой
+    /// сайт, предъявив токен не туда, сжигал бы его — и настоящий вход ломался бы
+    /// отказом «уже использован». Проверяем, что отказ по tenant не съедает jti.
+    #[tokio::test]
+    async fn failed_validation_does_not_consume_jti() {
+        let sso = Sso::new_ignoring_exp("http://x/jwks".into());
+        sso.seed_key(KID, N, E).await;
+        assert!(matches!(sso.validate(TOKEN, "other-site").await, Err(SsoError::TenantMismatch)));
+        assert!(sso.validate(TOKEN, "apex-ru").await.is_ok(), "неудачная попытка не должна гасить jti");
     }
 
     /// Сессия: выпуск → разрешение → логаут.
