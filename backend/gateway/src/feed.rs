@@ -92,8 +92,18 @@ pub fn interval(tf: u32) -> &'static str {
     }
 }
 
-fn to_raw(s: &str, dec: u8) -> i64 {
-    (s.parse::<f64>().unwrap_or(0.0) * 10f64.powi(dec as i32)).round() as i64
+/// Строка-цена/объём Binance → целые raw-единицы.
+///
+/// `None` — строку разобрать не удалось. Раньше здесь стоял `unwrap_or(0.0)`, и
+/// неразобранная цена превращалась в **цену 0**, неотличимую от котировки: отказ
+/// уезжал в тикеры, свечи и стакан под видом данных (BUG-011). Ноль — правдоподобное
+/// значение, поэтому отказ обязан выходить наружу отказом.
+fn to_raw(s: &str, dec: u8) -> Option<i64> {
+    let v: f64 = s.parse().ok()?;
+    if !v.is_finite() {
+        return None;
+    }
+    Some((v * 10f64.powi(dec as i32)).round() as i64)
 }
 
 /// Стакан (bids/asks) в raw-единицах.
@@ -111,20 +121,40 @@ pub async fn fetch_depth(binance: &str, limit: usize, pd: u8, qd: u8) -> Result<
         return Err(format!("binance {}", resp.status()));
     }
     let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-    let parse = |side: &Value| -> Vec<(i64, i64)> {
+    let (depth, skipped) = depth_from_json(&v, pd, qd);
+    if skipped > 0 {
+        eprintln!("[feed] {binance}: пропущено уровней стакана с неразобранными числами: {skipped}");
+    }
+    Ok(depth)
+}
+
+/// Разобрать стакан из ответа Binance. Возвращает `(стакан, сколько уровней пропущено)`.
+///
+/// Уровень с неразобранными числами пропускаем, но счётчик отдаём наружу: молчаливый
+/// пропуск искажает стакан, а знать об этом надо (BUG-011).
+fn depth_from_json(v: &Value, pd: u8, qd: u8) -> (Depth, usize) {
+    let mut skipped = 0usize;
+    let mut parse = |side: &Value| -> Vec<(i64, i64)> {
         side.as_array()
             .map(|a| {
                 a.iter()
                     .filter_map(|lvl| {
-                        let p = lvl.get(0)?.as_str()?;
-                        let q = lvl.get(1)?.as_str()?;
-                        Some((to_raw(p, pd), to_raw(q, qd)))
+                        let row = (|| {
+                            let p = lvl.get(0)?.as_str()?;
+                            let q = lvl.get(1)?.as_str()?;
+                            Some((to_raw(p, pd)?, to_raw(q, qd)?))
+                        })();
+                        if row.is_none() {
+                            skipped += 1;
+                        }
+                        row
                     })
                     .collect()
             })
             .unwrap_or_default()
     };
-    Ok(Depth { bids: parse(&v["bids"]), asks: parse(&v["asks"]) })
+    let depth = Depth { bids: parse(&v["bids"]), asks: parse(&v["asks"]) };
+    (depth, skipped)
 }
 
 /// Изменение цены за текущую свечу таймфрейма (в процентах). Для статистики актива.
@@ -135,10 +165,26 @@ pub async fn fetch_change(binance: &str, interval: &str) -> Result<f64, String> 
         return Err(format!("binance {}", resp.status()));
     }
     let rows: Vec<Vec<Value>> = resp.json().await.map_err(|e| e.to_string())?;
-    let row = rows.first().ok_or("empty")?;
-    let open: f64 = row.get(1).and_then(|v| v.as_str()).unwrap_or("0").parse().unwrap_or(0.0);
-    let close: f64 = row.get(4).and_then(|v| v.as_str()).unwrap_or("0").parse().unwrap_or(0.0);
-    Ok(if open != 0.0 { (close - open) / open * 100.0 } else { 0.0 })
+    change_from_row(rows.first().ok_or("empty")?)
+}
+
+/// Изменение цены внутри одной свечи Binance (в процентах).
+///
+/// Отказ разбора — это отказ, а не «изменение 0.00 %»: ноль процентов означает
+/// «рынок стоял», и отличить его от «мы не смогли посчитать» вызывающий обязан.
+fn change_from_row(row: &[Value]) -> Result<f64, String> {
+    let num = |i: usize| -> Result<f64, String> {
+        row.get(i)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("нет поля {i}"))?
+            .parse::<f64>()
+            .map_err(|e| format!("поле {i}: {e}"))
+    };
+    let (open, close) = (num(1)?, num(4)?);
+    if open == 0.0 {
+        return Err("open = 0, изменение не определено".into());
+    }
+    Ok((close - open) / open * 100.0)
 }
 
 /// Запросить исторические свечи с Binance REST.
@@ -149,18 +195,30 @@ pub async fn fetch_klines(binance: &str, interval: &str, limit: usize, pd: u8, q
         return Err(format!("binance {}", resp.status()));
     }
     let rows: Vec<Vec<Value>> = resp.json().await.map_err(|e| e.to_string())?;
-    let str_at = |r: &Vec<Value>, i: usize| r.get(i).and_then(|v| v.as_str()).unwrap_or("0").to_string();
-    Ok(rows
-        .iter()
-        .map(|r| Kline {
-            time: r.first().and_then(|v| v.as_i64()).unwrap_or(0) / 1000,
-            open: to_raw(&str_at(r, 1), pd),
-            high: to_raw(&str_at(r, 2), pd),
-            low: to_raw(&str_at(r, 3), pd),
-            close: to_raw(&str_at(r, 4), pd),
-            volume: to_raw(&str_at(r, 5), qd),
+    klines_from_rows(&rows, pd, qd)
+}
+
+/// Разобрать свечи из ответа Binance.
+///
+/// Свеча с неразобранным полем — отказ на весь ответ. Раньше такое поле молча
+/// становилось нулём, и по графику с нулевым low принимали решение (BUG-011).
+fn klines_from_rows(rows: &[Vec<Value>], pd: u8, qd: u8) -> Result<Vec<Kline>, String> {
+    let raw_at = |r: &[Value], i: usize, dec: u8| -> Result<i64, String> {
+        let s = r.get(i).and_then(|v| v.as_str()).ok_or_else(|| format!("нет поля {i}"))?;
+        to_raw(s, dec).ok_or_else(|| format!("поле {i}: не число ({s})"))
+    };
+    rows.iter()
+        .map(|r| {
+            Ok(Kline {
+                time: r.first().and_then(|v| v.as_i64()).ok_or("нет времени свечи")? / 1000,
+                open: raw_at(r, 1, pd)?,
+                high: raw_at(r, 2, pd)?,
+                low: raw_at(r, 3, pd)?,
+                close: raw_at(r, 4, pd)?,
+                volume: raw_at(r, 5, qd)?,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Запустить WS-фид Binance: @ticker (котировки) + @aggTrade (сделки). Реконнект при обрыве.
@@ -193,10 +251,22 @@ pub fn spawn(state: AppState) {
                             Ok(Message::Ping(p)) => {
                                 let _ = ws.send(Message::Pong(p)).await;
                             }
-                            Ok(Message::Close(_)) | Err(_) => break,
+                            // Класс ошибки здесь терялся: `Err(_) => break` уводил в
+                            // бесшумный реконнект каждые 3с, и обрыв фида выглядел как
+                            // тишина. Диагностика, съеденная рабочим циклом, — это отказ,
+                            // превращённый в задержку.
+                            Ok(Message::Close(f)) => {
+                                eprintln!("[feed] соединение закрыто биржей: {f:?}");
+                                break;
+                            }
+                            Err(e) => {
+                                eprintln!("[feed] обрыв соединения: {e}");
+                                break;
+                            }
                             _ => {}
                         }
                     }
+                    eprintln!("[feed] поток сообщений завершился");
                 }
                 Err(e) => eprintln!("[feed] ошибка подключения: {e}"),
             }
@@ -206,34 +276,70 @@ pub fn spawn(state: AppState) {
     });
 }
 
+/// Разобрать конверт комбинированного потока Binance: `{"stream": ..., "data": {...}}`.
+///
+/// Обрезанное или чужое сообщение — отказ, а не пустой конверт: пустой `stream`
+/// молча не совпал бы ни с одной веткой, и потеря выглядела бы как тишина.
+fn parse_envelope(text: &str) -> Result<(String, Value), String> {
+    let v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let stream = v["stream"].as_str().ok_or("нет поля stream")?.to_string();
+    let data = v.get("data").ok_or("нет поля data")?.clone();
+    Ok((stream, data))
+}
+
+/// Котировка из `@ticker`. `None` — хотя бы одно число не разобралось.
+///
+/// Пропускаем **всю** котировку, а не отдельное поле: прежний `unwrap_or("0")` клал
+/// в тикер цену 0, а тикер — источник марк-цены, по которой считаются P&L, маржа и
+/// триггеры SL/TP. Нулевой bid означал бы сделку по цене ноль (BUG-011).
+fn ticker_from_data(data: &Value, pd: u8) -> Option<Ticker> {
+    let raw = |k: &str| data[k].as_str().and_then(|s| to_raw(s, pd));
+    Some(Ticker {
+        last: raw("c")?,
+        high: raw("h")?,
+        bid: raw("b")?,
+        ask: raw("a")?,
+        change: data["P"].as_str()?.parse::<f64>().ok()?,
+    })
+}
+
+/// Сделка из `@aggTrade` → `(цена, объём, сторона агрессора)`. `None` — не разобралось.
+fn trade_from_data(data: &Value, pd: u8, qd: u8) -> Option<(i64, i64, &'static str)> {
+    let price = data["p"].as_str().and_then(|s| to_raw(s, pd))?;
+    let qty = data["q"].as_str().and_then(|s| to_raw(s, qd))?;
+    // m = isBuyerMaker: покупатель — мейкер, значит агрессор — продавец.
+    let side = if data["m"].as_bool().unwrap_or(false) { "sell" } else { "buy" };
+    Some((price, qty, side))
+}
+
 async fn handle_msg(state: &AppState, index: &HashMap<String, (u32, u8, u8)>, text: &str) {
-    let v: Value = match serde_json::from_str(text) {
+    let (stream, data) = match parse_envelope(text) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("[feed] нераспознанное сообщение ({e}): {text:.120}");
+            return;
+        }
     };
-    let stream = v["stream"].as_str().unwrap_or("");
-    let data = &v["data"];
     let sym = data["s"].as_str().unwrap_or("");
     let Some(&(id, pd, qd)) = index.get(sym) else { return };
 
     if stream.ends_with("@ticker") {
-        let t = Ticker {
-            last: to_raw(data["c"].as_str().unwrap_or("0"), pd),
-            change: data["P"].as_str().unwrap_or("0").parse().unwrap_or(0.0),
-            high: to_raw(data["h"].as_str().unwrap_or("0"), pd),
-            bid: to_raw(data["b"].as_str().unwrap_or("0"), pd),
-            ask: to_raw(data["a"].as_str().unwrap_or("0"), pd),
-        };
-        state.tickers.lock().await.insert(id, t);
+        match ticker_from_data(&data, pd) {
+            Some(t) => {
+                state.tickers.lock().await.insert(id, t);
+            }
+            None => eprintln!("[feed] {sym}: котировка с неразобранными числами — пропущена"),
+        }
     } else if stream.ends_with("@aggTrade") {
-        let price = to_raw(data["p"].as_str().unwrap_or("0"), pd);
-        let qty = to_raw(data["q"].as_str().unwrap_or("0"), qd);
-        // m = isBuyerMaker: покупатель — мейкер, значит агрессор — продавец.
-        let side = if data["m"].as_bool().unwrap_or(false) { "sell" } else { "buy" };
-        let msg = serde_json::json!([{
-            "type": "trade", "instrument": id, "price": price, "qty": qty, "taker_side": side
-        }])
-        .to_string();
-        let _ = state.events_tx.send(msg);
+        match trade_from_data(&data, pd, qd) {
+            Some((price, qty, side)) => {
+                let msg = serde_json::json!([{
+                    "type": "trade", "instrument": id, "price": price, "qty": qty, "taker_side": side
+                }])
+                .to_string();
+                let _ = state.events_tx.send(msg);
+            }
+            None => eprintln!("[feed] {sym}: сделка с неразобранными числами — пропущена"),
+        }
     }
 }

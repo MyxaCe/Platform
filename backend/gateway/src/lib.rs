@@ -323,7 +323,8 @@ struct DepthQuery {
 #[derive(Serialize, Clone)]
 struct StatDto {
     tf: u32,
-    change: f64,
+    /// `None` — посчитать не удалось (в JSON `null`), а не «изменение 0 %».
+    change: Option<f64>,
 }
 
 // ============================ Хендлеры =====================================
@@ -352,18 +353,19 @@ async fn list_instruments(State(st): State<AppState>) -> Json<Vec<InstrumentDto>
 }
 
 /// Реальные свечи с Binance REST (кэш ~2с).
-async fn get_candles(State(st): State<AppState>, Path(id): Path<u32>, Query(q): Query<CandleQuery>) -> Json<Vec<CandleDto>> {
+///
+/// Отказ отдаётся кодом, а не пустым массивом: `[]` читается как «рынок пуст» и
+/// стирает график, хотя означал «мы не смогли получить данные» (BUG-011).
+async fn get_candles(State(st): State<AppState>, Path(id): Path<u32>, Query(q): Query<CandleQuery>) -> Result<Json<Vec<CandleDto>>, ApiErr> {
     let tf = q.tf.unwrap_or(3600);
     let limit = q.limit.unwrap_or(300).min(1000);
-    let Some(fi) = feed_by_id(&st, id) else {
-        return Json(vec![]);
-    };
+    let fi = feed_by_id(&st, id).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
     let key = (id, tf);
     {
         let cache = st.klines_cache.lock().await;
         if let Some((t, v)) = cache.get(&key) {
             if t.elapsed() < Duration::from_secs(2) {
-                return Json(tail_dto(v, limit));
+                return Ok(Json(tail_dto(v, limit)));
             }
         }
     }
@@ -371,9 +373,12 @@ async fn get_candles(State(st): State<AppState>, Path(id): Path<u32>, Query(q): 
         Ok(v) => {
             let out = tail_dto(&v, limit);
             st.klines_cache.lock().await.insert(key, (Instant::now(), v));
-            Json(out)
+            Ok(Json(out))
         }
-        Err(_) => Json(vec![]),
+        Err(e) => {
+            eprintln!("[gateway] свечи {} tf={tf} недоступны: {e}", fi.symbol);
+            Err(err(StatusCode::SERVICE_UNAVAILABLE, "candles unavailable"))
+        }
     }
 }
 fn tail_dto(v: &[feed::Kline], limit: usize) -> Vec<CandleDto> {
@@ -384,10 +389,11 @@ fn tail_dto(v: &[feed::Kline], limit: usize) -> Vec<CandleDto> {
 }
 
 /// Стакан (order book) с Binance, кэш ~400мс.
-async fn get_depth(State(st): State<AppState>, Path(id): Path<u32>, Query(q): Query<DepthQuery>) -> Json<DepthResp> {
-    let Some(fi) = feed_by_id(&st, id) else {
-        return Json(DepthResp { price_decimals: 2, qty_decimals: 3, bids: vec![], asks: vec![] });
-    };
+///
+/// Как и свечи: отказ — кодом, а не пустым стаканом. Пустой стакан означает «нет
+/// заявок» — совсем другое утверждение, чем «мы не дошли до биржи» (BUG-011).
+async fn get_depth(State(st): State<AppState>, Path(id): Path<u32>, Query(q): Query<DepthQuery>) -> Result<Json<DepthResp>, ApiErr> {
+    let fi = feed_by_id(&st, id).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
     // Клиент просит глубину под свой шаг группировки; Binance принимает фиксированный набор.
     let limit = match q.limit.unwrap_or(20) {
         0..=20 => 20,
@@ -400,7 +406,7 @@ async fn get_depth(State(st): State<AppState>, Path(id): Path<u32>, Query(q): Qu
         let cache = st.depth_cache.lock().await;
         if let Some((t, d)) = cache.get(&(id, limit)) {
             if t.elapsed() < Duration::from_millis(400) {
-                return Json(DepthResp { price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals, bids: d.bids.clone(), asks: d.asks.clone() });
+                return Ok(Json(DepthResp { price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals, bids: d.bids.clone(), asks: d.asks.clone() }));
             }
         }
     }
@@ -408,32 +414,45 @@ async fn get_depth(State(st): State<AppState>, Path(id): Path<u32>, Query(q): Qu
         Ok(d) => {
             let resp = DepthResp { price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals, bids: d.bids.clone(), asks: d.asks.clone() };
             st.depth_cache.lock().await.insert((id, limit), (Instant::now(), d));
-            Json(resp)
+            Ok(Json(resp))
         }
-        Err(_) => Json(DepthResp { price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals, bids: vec![], asks: vec![] }),
+        Err(e) => {
+            eprintln!("[gateway] стакан {} недоступен: {e}", fi.symbol);
+            Err(err(StatusCode::SERVICE_UNAVAILABLE, "depth unavailable"))
+        }
     }
 }
 
 /// Статистика актива: изменение (%) по таймфреймам, кэш ~3с.
-async fn get_stats(State(st): State<AppState>, Path(id): Path<u32>) -> Json<Vec<StatDto>> {
-    let Some(fi) = feed_by_id(&st, id) else {
-        return Json(vec![]);
-    };
+///
+/// `change: null` — посчитать не удалось. Раньше отказ превращался в `0.0`, то есть
+/// в утверждение «рынок стоял» (BUG-011); отличать это обязан клиент, а не сервер.
+async fn get_stats(State(st): State<AppState>, Path(id): Path<u32>) -> Result<Json<Vec<StatDto>>, ApiErr> {
+    let fi = feed_by_id(&st, id).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
     {
         let cache = st.stats_cache.lock().await;
         if let Some((t, v)) = cache.get(&id) {
             if t.elapsed() < Duration::from_secs(3) {
-                return Json(v.clone());
+                return Ok(Json(v.clone()));
             }
         }
     }
     let futs = STAT_TFS.iter().map(|&tf| {
         let sym = fi.binance.clone();
-        async move { StatDto { tf, change: feed::fetch_change(&sym, feed::interval(tf)).await.unwrap_or(0.0) } }
+        let label = fi.symbol.clone();
+        async move {
+            match feed::fetch_change(&sym, feed::interval(tf)).await {
+                Ok(change) => StatDto { tf, change: Some(change) },
+                Err(e) => {
+                    eprintln!("[gateway] статистика {label} tf={tf} недоступна: {e}");
+                    StatDto { tf, change: None }
+                }
+            }
+        }
     });
     let out: Vec<StatDto> = futures_util::future::join_all(futs).await;
     st.stats_cache.lock().await.insert(id, (Instant::now(), out.clone()));
-    Json(out)
+    Ok(Json(out))
 }
 
 /// Открыть сделку по текущей рыночной цене (buy=ask, sell=bid).
