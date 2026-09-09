@@ -68,11 +68,57 @@
       const embedded = ((window.TERMINAL_CONFIG || {}).cabinetOrigins || []).some(Boolean);
       return embedded && !(window.Sso && window.Sso.token());
     }
-    const authedRead = (url) => (tradingBlocked() ? Promise.resolve(null) : read(url));
-    const authedMutate = (url, method, body) =>
-      (tradingBlocked() ? Promise.resolve({ ok: false, status: 401, data: null }) : mutate(url, method, body));
+
+    // Почему торговых данных нет. Отдельно от самих данных, потому что `null` не
+    // отличает «сессии нет» от «сеть моргнула», а показывать эти два случая надо
+    // по-разному: первый — устойчивый отказ, второй — повод оставить прежние цифры
+    // (BUG-011: отказ не должен выглядеть правдоподобным значением).
+    //   'unknown'     — успешного чтения ещё не было;
+    //   'ok'          — данные пришли;
+    //   'no-session'  — 401/403 или сессия не выдана: торговля недоступна;
+    //   'unreachable' — сеть или не-2xx: связи нет, прежние данные ещё могут быть верны.
+    let status = 'unknown';
+
+    /** Чтение торговой ручки: возвращает данные либо null, попутно ставя `status`. */
+    async function authedRead(url) {
+      if (tradingBlocked()) {
+        status = 'no-session';
+        return null;
+      }
+      try {
+        const r = await fetch(url, { headers: authHeaders() });
+        if (r.status === 401 || r.status === 403) {
+          status = 'no-session';
+          return null;
+        }
+        if (!r.ok) {
+          status = 'unreachable';
+          return null;
+        }
+        status = 'ok';
+        return await r.json();
+      } catch {
+        status = 'unreachable';
+        return null;
+      }
+    }
+
+    async function authedMutate(url, method, body) {
+      if (tradingBlocked()) {
+        status = 'no-session';
+        return { ok: false, status: 401, data: null };
+      }
+      const res = await mutate(url, method, body);
+      if (res.status === 401 || res.status === 403) status = 'no-session';
+      else if (res.status === 0) status = 'unreachable';
+      return res;
+    }
 
     return {
+      // ---- Состояние торгового доступа ------------------------------------
+      /** 'unknown' | 'ok' | 'no-session' | 'unreachable' — см. `status` выше. */
+      tradingStatus: () => status,
+
       // ---- Публичные данные (без авторизации) ----------------------------
       instruments: () => read('/instruments'),
       candles: (id, tf, limit) => read(`/candles/${id}?tf=${tf}&limit=${limit}`),

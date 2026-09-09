@@ -50,6 +50,9 @@
   ];
   const defUsd = (c) => `${c < 0 ? '-' : ''}$${(Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const empty = (text) => `<div class="deal-row muted"><span>${text}</span></div>`;
+  // Пустой список и отсутствие доступа выглядят одинаково — «строк нет», — но значат
+  // противоположное. Без сессии пишем причину, а не «No open positions» (BUG-011).
+  const NO_SESSION = 'No cabinet session — trading unavailable';
 
   function mount(root, ctx) {
     const fmtUsd = ctx.fmtUsd || defUsd;
@@ -85,9 +88,13 @@
 
     const lotOf = (d) => (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals);
     const pxOf = (d) => (raw) => (raw == null ? '—' : (raw / 10 ** d.price_decimals).toFixed(d.price_decimals));
+    // Устойчивый отказ (сессии нет) — пишем причину. Сетевой блип не трогает строки:
+    // прежние позиции ещё верны, а «нет позиций» при живых позициях — опаснее.
+    const denied = () => (ctx.api.tradingStatus ? ctx.api.tradingStatus() === 'no-session' : false);
 
     async function refreshDeals() {
-      const list = await ctx.api.deals(); if (!list) return;
+      const list = await ctx.api.deals();
+      if (!list) { if (denied()) rowsEl('deals').innerHTML = empty(NO_SESSION); return; }
       if (ctx.onDeals) ctx.onDeals(list);
       rowsEl('deals').innerHTML = list.map((d) => {
         const pos = d.pnl >= 0, f = pxOf(d);
@@ -96,14 +103,16 @@
       }).join('') || empty('No open positions');
     }
     async function refreshPending() {
-      const list = await ctx.api.pending(); if (!list) return;
+      const list = await ctx.api.pending();
+      if (!list) { if (denied()) rowsEl('pending').innerHTML = empty(NO_SESSION); return; }
       rowsEl('pending').innerHTML = list.map((d) => {
         const f = pxOf(d);
         return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lotOf(d)}</span><span>${f(d.price)}</span><span>${f(d.sl)}</span><span>${f(d.tp)}</span><button class="closebtn" data-id="${d.id}">Cancel</button></div>`;
       }).join('') || empty('No limit orders');
     }
     async function refreshClosed() {
-      const list = await ctx.api.closedDeals(); if (!list) return;
+      const list = await ctx.api.closedDeals();
+      if (!list) { if (denied()) rowsEl('closed').innerHTML = empty(NO_SESSION); return; }
       rowsEl('closed').innerHTML = list.map((d) => {
         const pos = d.pnl >= 0, f = pxOf(d);
         return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lotOf(d)}</span><span>${f(d.entry)}</span><span>${f(d.exit)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${fmtUsd(d.pnl)}</span><span></span></div>`;

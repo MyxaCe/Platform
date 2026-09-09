@@ -14,13 +14,20 @@
   <header class="top">
     <div class="logo"><span class="logo__mark">E</span> <span id="brandName">Exchange</span><span class="muted">Pro · Binance LIVE</span></div>
     <div class="metrics">
-      <div class="metric"><span class="metric__l">BALANCE</span><span id="mBalance" class="metric__v">$0</span></div>
-      <div class="metric"><span class="metric__l">CREDIT</span><span class="metric__v">$0</span></div>
-      <div class="metric"><span class="metric__l">EQUITY</span><span id="mEquity" class="metric__v">$0</span></div>
-      <div class="metric"><span class="metric__l">MARGIN</span><span id="mMargin" class="metric__v">$0</span></div>
-      <div class="metric"><span class="metric__l">FREE BALANCE</span><span id="mFree" class="metric__v">$0</span></div>
-      <div class="metric"><span class="metric__l">OPEN P&amp;L</span><span id="mPnl" class="metric__v">$0</span></div>
+      <div class="metric"><span class="metric__l">BALANCE</span><span id="mBalance" class="metric__v">&mdash;</span></div>
+      <!-- CREDIT: источника данных нет вовсе — в API кредита не существует. Пока он
+           не появится, показываем прочерк: нарисованный «$0» неотличим от настоящей
+           цифры и читается как «кредит равен нулю» (BUG-011). -->
+      <div class="metric"><span class="metric__l">CREDIT</span><span id="mCredit" class="metric__v" title="no data source">&mdash;</span></div>
+      <div class="metric"><span class="metric__l">EQUITY</span><span id="mEquity" class="metric__v">&mdash;</span></div>
+      <div class="metric"><span class="metric__l">MARGIN</span><span id="mMargin" class="metric__v">&mdash;</span></div>
+      <div class="metric"><span class="metric__l">FREE BALANCE</span><span id="mFree" class="metric__v">&mdash;</span></div>
+      <div class="metric"><span class="metric__l">OPEN P&amp;L</span><span id="mPnl" class="metric__v">&mdash;</span></div>
     </div>
+    <!-- Явная причина, по которой цифр нет. Пусто и скрыто, пока счёт отвечает. -->
+    <div id="acctWarn" class="acct-warn" hidden></div>
+    <!-- Рыночные данные (свечи/стакан/статистика) не пришли — говорим об этом. -->
+    <div id="dataWarn" class="acct-warn" hidden></div>
     <div class="top__right">
       <button class="btn" id="themeToggle" data-tip="Light / Dark" title="Light / Dark">◐</button>
       <span id="status" class="status status--off">●</span>

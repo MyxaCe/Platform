@@ -47,6 +47,10 @@ button { font-family: inherit; }
 .metric { display: flex; flex: 1; flex-direction: column; align-items: center; gap: 2px; }
 .metric__l { color: var(--muted); font-size: 10px; letter-spacing: .6px; }
 .metric__v { font-weight: 600; font-variant-numeric: tabular-nums; }
+/* Причина, по которой в метриках прочерки: сессии нет или счёт недоступен (BUG-011).
+   Показывается рядом с метриками, не вместо них — цифры не должны врать молча. */
+.acct-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 600; color: var(--down);
+  border: 1px solid var(--down); border-radius: 6px; padding: 4px 8px; opacity: .9; }
 .top__right { display: flex; align-items: center; gap: 12px; }
 .btn { cursor: pointer; border: 1px solid var(--border); background: var(--panel2); color: var(--text);
   border-radius: 6px; padding: 7px 12px; }

@@ -33,8 +33,13 @@
         let list; try { list = await ctx.fetch(id); } catch { return; }
         if (!Array.isArray(list)) return;
         root.innerHTML = list.map((st) => {
-          const up = st.change >= 0;
           const label = (ctx.labels && ctx.labels[st.tf]) || st.tf;
+          // change === null — сервер не смог посчитать. Раньше он присылал в этом
+          // случае 0, и «не смогли» рисовалось как «рынок стоял» (BUG-011).
+          if (st.change == null) {
+            return `<div class="stat"><span class="stat__l">${label}</span><span class="stat__v" title="no data">&mdash;</span></div>`;
+          }
+          const up = st.change >= 0;
           return `<div class="stat"><span class="stat__l">${label}</span><span class="stat__v ${up ? 'up' : 'down'}">${up ? '+' : ''}${st.change.toFixed(2)}%</span></div>`;
         }).join('');
       }

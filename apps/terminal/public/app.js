@@ -176,7 +176,16 @@ chart.subscribeCrosshairMove((p) => { const id = selected; if (id == null) retur
 async function loadCandles(id, timeframe) {
   const load = document.getElementById('loading'); load.classList.remove('hidden');
   try {
-    const raw = (await api.candles(id, timeframe, 300)) || [];
+    const fetched = await api.candles(id, timeframe, 300);
+    markMarketData('candles', fetched !== null);
+    if (fetched === null) {
+      // Сервер не смог отдать свечи (503) — оставляем прежний график и говорим об
+      // этом. Пустой массив стёр бы график, а пустой график читается как «рынка
+      // нет», хотя означает «мы не получили данные» (BUG-011).
+      load.classList.add('hidden');
+      return;
+    }
+    const raw = fetched;
     const s = pscale(id), v = qscale(id);
     rawCandles = raw.map((c) => ({ time: c.time, open: c.open / s, high: c.high / s, low: c.low / s, close: c.close / s, volume: c.volume / v }));
     makeMainSeries();
@@ -210,9 +219,22 @@ function updateDealPanel() {
 }
 
 // ---- Виджеты (ADR-015): страница даёт контейнер, зависимости идут через ctx --
+// Рыночные данные: отказ показываем отказом. Бейдж гаснет, когда все источники
+// снова отвечают (BUG-011).
+const marketDown = { candles: false, depth: false, stats: false, instruments: false };
+function markMarketData(kind, ok) {
+  if (marketDown[kind] === !ok) return; // ничего не изменилось — не дёргаем DOM
+  marketDown[kind] = !ok;
+  const el = document.getElementById('dataWarn');
+  if (!el) return;
+  const down = Object.keys(marketDown).filter((k) => marketDown[k]);
+  el.hidden = down.length === 0;
+  el.textContent = down.length ? `MARKET DATA UNAVAILABLE: ${down.join(', ').toUpperCase()}` : '';
+}
+
 const book = OrderBook.mount(document.getElementById('book'), {
   instrument: () => selected,
-  fetch: (id, limit) => api.depth(id, limit),
+  fetch: async (id, limit) => { const d = await api.depth(id, limit); markMarketData('depth', d !== null); return d; },
   onPick: (price) => { setMode('limit'); const inp = document.getElementById('price'); inp.value = price; inp.classList.add('flash'); setTimeout(() => inp.classList.remove('flash'), 400); },
   // Подписи колонок и марк-цена — из данных инструмента, которыми владеет хост.
   symbols: (id) => { const [base, quote] = (META[id]?.symbol || '-').split('-'); return { base, quote }; },
@@ -222,7 +244,7 @@ const book = OrderBook.mount(document.getElementById('book'), {
 });
 const stats = AssetStats.mount(document.getElementById('statbar'), {
   instrument: () => selected,
-  fetch: (id) => api.stats(id),
+  fetch: async (id) => { const v = await api.stats(id); markMarketData('stats', v !== null); return v; },
   labels: TFN,
   interval: 5000,
 });
@@ -380,7 +402,63 @@ document.getElementById('btnBuy').addEventListener('click', () => submit('buy'))
 document.getElementById('btnSell').addEventListener('click', () => submit('sell'));
 
 // ============================ Account / positions / history ================
-async function pollAccount() { try { const a = await api.account(); if (!a) return; document.getElementById('mBalance').textContent = usd(a.balance); document.getElementById('mEquity').textContent = usd(a.equity); document.getElementById('mMargin').textContent = usd(a.used_margin); document.getElementById('mFree').textContent = usd(a.free_margin); const p = document.getElementById('mPnl'); p.textContent = usd(a.open_pnl); p.style.color = a.open_pnl > 0 ? 'var(--up)' : a.open_pnl < 0 ? 'var(--down)' : ''; } catch (e) { /* */ } }
+// Метрики счёта. Отказ показывается отказом, а не нулём: ноль — правдоподобный
+// баланс, по нему принимают решение, а по прочерку с причиной идут разбираться
+// (BUG-011). 'unreachable' оставляет прежние цифры: связь могла моргнуть, и
+// затирать верные значения на каждый блип — хуже, чем показать их с оговоркой.
+const ACCT_MSG = {
+  'no-session': 'NO CABINET SESSION — TRADING UNAVAILABLE',
+  unreachable: 'ACCOUNT UNREACHABLE — FIGURES MAY BE STALE',
+  unknown: 'NO ACCOUNT DATA YET',
+};
+function showAcctWarn(status) {
+  const el = document.getElementById('acctWarn');
+  if (!el) return;
+  const msg = status === 'ok' ? null : ACCT_MSG[status] || ACCT_MSG.unknown;
+  el.hidden = !msg;
+  el.textContent = msg || '';
+}
+// Модель ведения позиций счёта. В хеджировании встречная сделка открывает вторую
+// позицию, в неттинге — сворачивает существующую: разница видна на деньгах, поэтому
+// подпись стоит в шапке, а не в настройках (ADR-025).
+function showPositionModel(model) {
+  const el = document.getElementById('modelBadge');
+  if (!el) return;
+  if (!model) { el.hidden = true; return; }
+  const netting = model === 'netting';
+  el.hidden = false;
+  el.textContent = netting ? 'NETTING' : 'HEDGING';
+  el.title = netting
+    ? 'Opposite trade reduces or closes your position'
+    : 'Opposite trade opens a second, separate position — it does not close this one';
+}
+
+function blankMetrics() {
+  ['mBalance', 'mEquity', 'mMargin', 'mFree', 'mPnl'].forEach((id) => {
+    const el = document.getElementById(id); if (el) { el.textContent = '—'; el.style.color = ''; }
+  });
+}
+async function pollAccount() {
+  try {
+    const a = await api.account();
+    const st = api.tradingStatus();
+    showAcctWarn(st);
+    if (!a) {
+      // Сессии нет — цифр нет и быть не может: показываем прочерки, а не последнее
+      // известное значение (оно было бы от чужого/прошлого счёта).
+      if (st === 'no-session' || st === 'unknown') blankMetrics();
+      return;
+    }
+    showPositionModel(a.model);
+    document.getElementById('mBalance').textContent = usd(a.balance);
+    document.getElementById('mEquity').textContent = usd(a.equity);
+    document.getElementById('mMargin').textContent = usd(a.used_margin);
+    document.getElementById('mFree').textContent = usd(a.free_margin);
+    const p = document.getElementById('mPnl');
+    p.textContent = usd(a.open_pnl);
+    p.style.color = a.open_pnl > 0 ? 'var(--up)' : a.open_pnl < 0 ? 'var(--down)' : '';
+  } catch (e) { /* */ }
+}
 // Сигналы считаются из свечей графика (данные хоста); показывает их виджет positions.js.
 function computeSignals() {
   const it = META[selected];
