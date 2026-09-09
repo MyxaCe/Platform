@@ -39,7 +39,7 @@ pub struct Ticker {
 }
 
 /// Свеча (raw-единицы).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Kline {
     pub time: i64,
     pub open: i64,
@@ -341,5 +341,236 @@ async fn handle_msg(state: &AppState, index: &HashMap<String, (u32, u8, u8)>, te
             }
             None => eprintln!("[feed] {sym}: сделка с неразобранными числами — пропущена"),
         }
+    }
+}
+
+// ============================ Тесты разбора ================================
+//
+// Проверяем поведение при **битом входе**, а не при здоровом: здоровый вход
+// доказывает связность кода, а не то, что отказ остаётся отказом (BUG-011, TRM-07).
+// Отказы Binance на живом фиде не воспроизводятся по желанию — поэтому мусор
+// подаётся чистым функциям напрямую.
+//
+// Общее требование ко всем случаям ниже: **ни один битый вход не должен превратиться
+// в число**. Допустимы только отказ (`Err`/`None`) и пропуск.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ---- to_raw: источник всех остальных нулей ----------------------------
+
+    #[test]
+    fn to_raw_parses_valid_price() {
+        assert_eq!(to_raw("123.45", 2), Some(12345));
+        assert_eq!(to_raw("0.00000413", 8), Some(413));
+    }
+
+    /// Не число → отказ. Раньше здесь стоял `unwrap_or(0.0)` и получалась цена 0.
+    #[test]
+    fn to_raw_rejects_garbage_instead_of_zero() {
+        for bad in ["", "abc", "1.2.3", "--5", "1,5", " "] {
+            assert_eq!(to_raw(bad, 2), None, "строка {bad:?} не должна становиться числом");
+        }
+    }
+
+    /// NaN и бесконечность разбираются как f64 — и обязаны быть отвергнуты:
+    /// `NaN as i64` даёт 0, то есть снова цену 0.
+    #[test]
+    fn to_raw_rejects_non_finite() {
+        assert_eq!(to_raw("NaN", 2), None);
+        assert_eq!(to_raw("inf", 2), None);
+        assert_eq!(to_raw("-inf", 2), None);
+    }
+
+    // ---- Свечи: битое поле роняет ответ, а не рисует нулевой low -----------
+
+    fn kline_row() -> Vec<Value> {
+        json!([1_700_000_000_000i64, "100.00", "110.00", "90.00", "105.00", "12.5"])
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn klines_parse_valid_row() {
+        let out = klines_from_rows(&[kline_row()], 2, 2).expect("здоровая строка разбирается");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].time, 1_700_000_000);
+        assert_eq!((out[0].open, out[0].high, out[0].low, out[0].close), (10000, 11000, 9000, 10500));
+    }
+
+    #[test]
+    fn klines_reject_unparsable_field() {
+        let mut row = kline_row();
+        row[3] = json!("не число"); // low
+        let err = klines_from_rows(&[row], 2, 2).expect_err("битое поле обязано ронять ответ");
+        assert!(err.contains("поле 3"), "ошибка должна называть поле, а не молчать: {err}");
+    }
+
+    /// Поле не того типа (число вместо строки Binance) — тоже отказ.
+    #[test]
+    fn klines_reject_wrong_type() {
+        let mut row = kline_row();
+        row[1] = json!(100.0);
+        assert!(klines_from_rows(&[row], 2, 2).is_err());
+    }
+
+    #[test]
+    fn klines_reject_null_field() {
+        let mut row = kline_row();
+        row[4] = Value::Null;
+        assert!(klines_from_rows(&[row], 2, 2).is_err());
+    }
+
+    /// Обрезанная строка (полей меньше, чем нужно) — отказ, а не свеча с нулями.
+    #[test]
+    fn klines_reject_truncated_row() {
+        let row: Vec<Value> = kline_row().into_iter().take(3).collect();
+        assert!(klines_from_rows(&[row], 2, 2).is_err());
+    }
+
+    /// Одна битая свеча роняет весь ответ: половина графика хуже отсутствующего.
+    #[test]
+    fn klines_one_bad_row_fails_whole_response() {
+        let mut bad = kline_row();
+        bad[2] = json!("x");
+        assert!(klines_from_rows(&[kline_row(), bad, kline_row()], 2, 2).is_err());
+    }
+
+    // ---- Стакан: битый уровень пропускается и считается --------------------
+
+    #[test]
+    fn depth_parses_and_counts_skipped() {
+        let v = json!({
+            "bids": [["100.00", "1.000"], ["мусор", "1.000"], ["99.00", "2.000"]],
+            "asks": [["101.00", "1.000"], ["102.00", null]],
+        });
+        let (d, skipped) = depth_from_json(&v, 2, 3);
+        assert_eq!(d.bids, vec![(10000, 1000), (9900, 2000)]);
+        assert_eq!(d.asks, vec![(10100, 1000)]);
+        assert_eq!(skipped, 2, "пропуски обязаны быть посчитаны, иначе они молчаливые");
+    }
+
+    #[test]
+    fn depth_missing_sides_is_empty_not_panic() {
+        let (d, skipped) = depth_from_json(&json!({}), 2, 3);
+        assert!(d.bids.is_empty() && d.asks.is_empty());
+        assert_eq!(skipped, 0);
+    }
+
+    // ---- Изменение цены: отказ вместо «0.00 %» -----------------------------
+
+    #[test]
+    fn change_computed_from_valid_row() {
+        let row = kline_row();
+        let ch = change_from_row(&row).expect("здоровая строка считается");
+        assert!((ch - 5.0).abs() < 1e-9, "ожидали +5%, получили {ch}");
+    }
+
+    /// Ключевой случай: отказ не должен выглядеть как «рынок стоял».
+    #[test]
+    fn change_rejects_garbage_instead_of_zero_percent() {
+        let mut row = kline_row();
+        row[4] = json!("не число");
+        assert!(change_from_row(&row).is_err());
+
+        let mut row = kline_row();
+        row[1] = Value::Null;
+        assert!(change_from_row(&row).is_err());
+
+        assert!(change_from_row(&[]).is_err());
+    }
+
+    #[test]
+    fn change_rejects_zero_open() {
+        let mut row = kline_row();
+        row[1] = json!("0");
+        assert!(change_from_row(&row).is_err(), "деление на ноль не должно давать 0%");
+    }
+
+    // ---- Котировка: пропускается целиком, а не собирается наполовину -------
+
+    fn ticker_data() -> Value {
+        json!({"s": "BTCUSDT", "c": "100.00", "P": "1.5", "h": "110.00", "b": "99.99", "a": "100.01"})
+    }
+
+    #[test]
+    fn ticker_parses_valid() {
+        let t = ticker_from_data(&ticker_data(), 2).expect("здоровая котировка разбирается");
+        assert_eq!((t.last, t.high, t.bid, t.ask), (10000, 11000, 9999, 10001));
+        assert!((t.change - 1.5).abs() < 1e-9);
+    }
+
+    /// Битое поле → котировки нет вовсе. Именно «нет», а не Ticker с нулём в этом
+    /// поле: нулевой bid — это сделка по цене ноль.
+    #[test]
+    fn ticker_skipped_entirely_on_any_bad_field() {
+        for key in ["c", "P", "h", "b", "a"] {
+            let mut d = ticker_data();
+            d[key] = json!("не число");
+            assert!(ticker_from_data(&d, 2).is_none(), "поле {key}: котировка обязана быть пропущена целиком");
+
+            let mut d = ticker_data();
+            d[key] = Value::Null;
+            assert!(ticker_from_data(&d, 2).is_none(), "поле {key} = null: котировка обязана быть пропущена");
+
+            let mut d = ticker_data();
+            d.as_object_mut().unwrap().remove(key);
+            assert!(ticker_from_data(&d, 2).is_none(), "поле {key} отсутствует: котировка обязана быть пропущена");
+        }
+    }
+
+    /// Поле не того типа: число вместо строки — Binance так не присылает, но если
+    /// пришлёт, это не повод молча взять ноль.
+    #[test]
+    fn ticker_rejects_wrong_type() {
+        let mut d = ticker_data();
+        d["b"] = json!(99.99);
+        assert!(ticker_from_data(&d, 2).is_none());
+    }
+
+    // ---- Сделка ------------------------------------------------------------
+
+    #[test]
+    fn trade_parses_valid_and_reads_side() {
+        let d = json!({"p": "100.00", "q": "0.500", "m": true});
+        assert_eq!(trade_from_data(&d, 2, 3), Some((10000, 500, "sell")));
+        let d = json!({"p": "100.00", "q": "0.500", "m": false});
+        assert_eq!(trade_from_data(&d, 2, 3), Some((10000, 500, "buy")));
+    }
+
+    #[test]
+    fn trade_skipped_on_bad_numbers() {
+        assert!(trade_from_data(&json!({"p": "x", "q": "0.5", "m": false}), 2, 3).is_none());
+        assert!(trade_from_data(&json!({"p": "1.0", "q": null, "m": false}), 2, 3).is_none());
+        assert!(trade_from_data(&json!({"m": false}), 2, 3).is_none());
+    }
+
+    // ---- Конверт потока ----------------------------------------------------
+
+    #[test]
+    fn envelope_parses_valid() {
+        let (stream, data) = parse_envelope(r#"{"stream":"btcusdt@ticker","data":{"s":"BTCUSDT"}}"#)
+            .expect("здоровый конверт разбирается");
+        assert_eq!(stream, "btcusdt@ticker");
+        assert_eq!(data["s"], json!("BTCUSDT"));
+    }
+
+    /// Обрезанное сообщение (WS-фрейм пришёл не целиком) — отказ с причиной.
+    #[test]
+    fn envelope_rejects_truncated() {
+        assert!(parse_envelope(r#"{"stream":"btcusdt@ticker","data":{"s":"BTC"#).is_err());
+        assert!(parse_envelope("").is_err());
+        assert!(parse_envelope("не json вовсе").is_err());
+    }
+
+    /// Конверт без обязательных полей — тоже отказ: пустой `stream` не совпал бы ни
+    /// с одной веткой, и сообщение потерялось бы молча.
+    #[test]
+    fn envelope_rejects_missing_fields() {
+        assert!(parse_envelope(r#"{"data":{"s":"BTCUSDT"}}"#).is_err());
+        assert!(parse_envelope(r#"{"stream":"btcusdt@ticker"}"#).is_err());
+        assert!(parse_envelope(r#"{"stream":123,"data":{}}"#).is_err());
     }
 }
