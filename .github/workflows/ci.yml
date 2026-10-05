@@ -62,6 +62,12 @@ jobs:
             | xargs -0 -I{} node --check {}
           echo "Проверено файлов: $(find apps -name '*.js' -not -path '*/node_modules/*' | wc -l)"
 
+      # Тесты индикаторов (TRM-05). Ошибка в индикаторе не падает — она рисует
+      # неправильную линию, по которой принимают решение. Без зависимостей:
+      # встроенный node:test, модули грузятся в vm-песочницу с фиктивным window.
+      - name: Тесты фронтенда
+        run: node --test apps/terminal/tests/*.test.js
+
   images:
     name: Сборка образов
     runs-on: ubuntu-latest

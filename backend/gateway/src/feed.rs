@@ -323,6 +323,10 @@ async fn handle_msg(state: &AppState, index: &HashMap<String, (u32, u8, u8)>, te
     let sym = data["s"].as_str().unwrap_or("");
     let Some(&(id, pd, qd)) = index.get(sym) else { return };
 
+    // Отметка живости ставится здесь — на **принятом и опознанном** сообщении, а не
+    // при открытии сокета: живость фида доказывают данные, а не факт подключения.
+    state.mark_feed_alive();
+
     if stream.ends_with("@ticker") {
         match ticker_from_data(&data, pd) {
             Some(t) => {

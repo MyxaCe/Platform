@@ -53,6 +53,12 @@ pub struct AppState {
     // Реальные данные (Binance):
     feed_instruments: Arc<Vec<feed::FeedInstrument>>,
     tickers: Arc<Mutex<HashMap<u32, feed::Ticker>>>,
+    /// Unix-секунды последнего **принятого** сообщения Binance, 0 — не было ни одного.
+    ///
+    /// Меряем живость фида приходом данных, а не состоянием сокета: открытый сокет,
+    /// по которому ничего не идёт, — это молчащий фид при бодром `connected`. Здоровье
+    /// процесса не означает наличия связи.
+    feed_last_msg: Arc<std::sync::atomic::AtomicI64>,
     klines_cache: Arc<Mutex<KlineCache>>,
     depth_cache: Arc<Mutex<DepthCache>>,
     stats_cache: Arc<Mutex<StatsCache>>,
@@ -62,6 +68,24 @@ pub struct AppState {
     store: Arc<dyn Persistence>,
     /// Лок на счёт: сериализует «мутация → слепок → запись» по одному счёту.
     acct_locks: Arc<Mutex<HashMap<UserId, Arc<Mutex<()>>>>>,
+    /// Счета, поднятые из хранилища с нарушенными инвариантами (красная линия №5).
+    ///
+    /// Карантин, а не стоп сервиса: одна испорченная строка не должна лишать
+    /// обслуживания всех. Чтение разрешено, мутации отклоняются, состояние
+    /// сохраняется **как есть** — молчаливая починка уничтожила бы улику
+    /// (КОНТРАКТЫ §4в).
+    quarantined: Arc<Mutex<std::collections::HashSet<UserId>>>,
+    /// Разрешённые инструменты по сайтам (регуляторика, ADR-023 Т3).
+    ///
+    /// Источник по контракту — `GET {CMS}/v1/cms/sites/{slug}`, поле `instruments`
+    /// с `terminalInstrumentId`, сервер-сервер под `X-API-Key`. Ключа контура у нас
+    /// пока нет, поэтому источник временно читается из env `TENANT_INSTRUMENTS`
+    /// (см. `parse_tenant_instruments`). Шов один и тот же: когда ключ появится,
+    /// меняется только наполнение карты.
+    ///
+    /// `None` — источник не сконфигурирован вовсе. Это **не** «всё разрешено»:
+    /// в тенантном режиме отсутствие списка закрывает торговлю (fail-closed).
+    tenant_instruments: Arc<Option<HashMap<String, Vec<u32>>>>,
     // SSO платформы (ADR-023, Т2): вход по handoff-JWT, сессии терминала.
     sso: Arc<sso::Sso>,
     /// Требовать ли сессию на торговых ручках. Выкл (dev/standalone) → счёт по умолчанию.
@@ -98,12 +122,15 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         events_tx,
         feed_instruments: Arc::new(feed::instruments()),
         tickers: Arc::new(Mutex::new(HashMap::new())),
+        feed_last_msg: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         klines_cache: Arc::new(Mutex::new(HashMap::new())),
         depth_cache: Arc::new(Mutex::new(HashMap::new())),
         stats_cache: Arc::new(Mutex::new(HashMap::new())),
+        tenant_instruments: Arc::new(parse_tenant_instruments(std::env::var("TENANT_INSTRUMENTS").ok().as_deref())),
         broker: Arc::new(Mutex::new(Broker::new(start_cents, 1))), // старт из env, leverage 1
         store,
         acct_locks: Arc::new(Mutex::new(HashMap::new())),
+        quarantined: Arc::new(Mutex::new(std::collections::HashSet::new())),
         sso,
         sso_enabled,
     }
@@ -120,10 +147,25 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
             b.restore(id, snap);
         }
     }
-    // Красная линия №5: инварианты денег проверяются в рантайме, нарушение = стоп.
-    let broken = st.store.check_invariants().await?;
-    if !broken.is_empty() {
-        return Err(persistence::StoreError(format!("нарушены инварианты: {}", broken.join("; "))));
+    // Красная линия №5. Счета, поднятые с нарушенными инвариантами, уходят в
+    // карантин: читать можно, менять нельзя. Сервис при этом стартует — стоп
+    // сервиса не применяется нигде (КОНТРАКТЫ §4в), потому что одна испорченная
+    // строка не должна лишать обслуживания всех остальных.
+    {
+        let b = st.broker.lock().await;
+        let mut q = st.quarantined.lock().await;
+        for user in b.users() {
+            let violations = broker::check_snapshot(&b.snapshot(user), b.leverage());
+            if !violations.is_empty() {
+                q.insert(user);
+                for v in &violations {
+                    eprintln!("[gateway] ИНВАРИАНТ НАРУШЕН, счёт {} в карантине: {v}", user.0);
+                }
+            }
+        }
+        if !q.is_empty() {
+            eprintln!("[gateway] счетов в карантине: {} — мутации по ним отклоняются, состояние не чинится автоматически", q.len());
+        }
     }
     if accounts_n > 0 {
         println!("[gateway] восстановлено из хранилища: счетов {accounts_n}");
@@ -139,6 +181,12 @@ async fn account_lock(st: &AppState, user: UserId) -> Arc<Mutex<()>> {
 /// Мутация счёта с сохранением (ADR-016): лок счёта на всё «мутация → слепок → запись»;
 /// `fsync`/сеть — уже без лока брокера; при отказе хранилища счёт откатывается и отдаётся `503`.
 async fn with_account<T>(st: &AppState, user: UserId, f: impl FnOnce(&mut Broker) -> Result<T, ApiErr>) -> Result<T, ApiErr> {
+    // Счёт в карантине не мутируем: его состояние уже неверно, и любая операция
+    // поверх него закрепила бы порчу. Читать при этом можно.
+    if st.quarantined.lock().await.contains(&user) {
+        return Err(err(StatusCode::LOCKED, "account_quarantined"));
+    }
+
     let lock = account_lock(st, user).await;
     let _guard = lock.lock().await;
 
@@ -150,12 +198,94 @@ async fn with_account<T>(st: &AppState, user: UserId, f: impl FnOnce(&mut Broker
         (out, before, snap)
     };
 
+    // Красная линия №5, проверка ДО записи: если мутация сделала бы состояние
+    // неверным, операция отклоняется и изменение не фиксируется. Граница отказа
+    // проходит по счёту — соседи не затронуты, сервис не останавливается.
+    // Код отдельный: это не деловой отказ вроде «недостаточно средств», и путать
+    // их нельзя (КОНТРАКТЫ §4в).
+    let violations = {
+        let b = st.broker.lock().await;
+        broker::check_snapshot(&snap, b.leverage())
+    };
+    if !violations.is_empty() {
+        st.broker.lock().await.restore(user, before);
+        for v in &violations {
+            eprintln!("[gateway] ИНВАРИАНТ НАРУШЕН операцией, счёт {} откачен: {v}", user.0);
+        }
+        return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "invariant_violated"));
+    }
+
     if let Err(e) = st.store.save_account(user, &snap).await {
         st.broker.lock().await.restore(user, before);
         eprintln!("[gateway] запись состояния не удалась, счёт откачен: {e}");
         return Err(err(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable"));
     }
     Ok(out)
+}
+
+impl AppState {
+    /// Отметить, что от Binance пришло опознанное сообщение (см. `feed_last_msg`).
+    pub(crate) fn mark_feed_alive(&self) {
+        self.feed_last_msg.store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Разобрать временный источник allow-list: `site:1,2,3;other:4,5`.
+///
+/// `None` — переменная не задана (источника нет). Пустой список у сайта — валидное
+/// значение и означает «сайту не разрешено ничего», а не «фильтра нет».
+fn parse_tenant_instruments(raw: Option<&str>) -> Option<HashMap<String, Vec<u32>>> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let mut out: HashMap<String, Vec<u32>> = HashMap::new();
+    for site_part in raw.split(';').filter(|p| !p.trim().is_empty()) {
+        let (site, ids) = site_part.split_once(':').unwrap_or((site_part, ""));
+        let ids = ids
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse::<u32>().ok())
+            .collect();
+        out.insert(site.trim().to_string(), ids);
+    }
+    Some(out)
+}
+
+/// Кто выполняет запрос. `tenant` есть только в тенантном режиме (вход по SSO);
+/// в standalone его нет — и юрисдикции, чей allow-list надо уважать, тоже нет.
+struct Principal {
+    user: UserId,
+    tenant: Option<String>,
+}
+
+/// Можно ли этому принципалу **открывать позицию** по инструменту.
+///
+/// Граница проходит здесь, а не на выдаче списка: спрятать инструмент из витрины
+/// недостаточно, торговать им прямым запросом всё равно можно было бы.
+///
+/// Fail-closed (решение штаба, КОНТРАКТЫ §4б): нет конфига сайта — торговли нет.
+/// Разные юрисдикции разрешают разное, и отказ инфраструктуры не должен
+/// превращаться в разрешение. Отличаем «списка нет» от «в списке нет»: обе ветки
+/// запрещают, но чинятся по-разному, и человек должен видеть причину.
+fn ensure_can_open(st: &AppState, who: &Principal, instrument: u32) -> Result<(), ApiErr> {
+    let Some(tenant) = who.tenant.as_deref() else {
+        return Ok(()); // standalone: сайта нет, ограничивать нечем и не от чьего имени
+    };
+    let Some(map) = st.tenant_instruments.as_ref() else {
+        eprintln!("[gateway] {tenant}: источник allow-list не сконфигурирован — торговля закрыта");
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "tenant_instruments_unavailable"));
+    };
+    let Some(allowed) = map.get(tenant) else {
+        eprintln!("[gateway] {tenant}: сайта нет в allow-list — торговля закрыта");
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "tenant_instruments_unavailable"));
+    };
+    if allowed.contains(&instrument) {
+        Ok(())
+    } else {
+        Err(err(StatusCode::FORBIDDEN, "instrument_not_allowed"))
+    }
 }
 
 /// Текущие марк-цены (инструмент → last) из фида — для P&L/equity брокера.
@@ -172,14 +302,24 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers.get("authorization")?.to_str().ok()?.strip_prefix("Bearer ")
 }
 
-/// Пользователь запроса (ADR-023, Т2). SSO включён — из bearer-сессии, иначе `401`;
-/// SSO выключен (dev/standalone) — счёт по умолчанию.
-async fn require_user(st: &AppState, headers: &HeaderMap) -> Result<UserId, ApiErr> {
+/// Кто выполняет запрос (ADR-023, Т2). SSO включён — из bearer-сессии, иначе `401`;
+/// SSO выключен (dev/standalone) — счёт по умолчанию и никакого сайта.
+async fn require_principal(st: &AppState, headers: &HeaderMap) -> Result<Principal, ApiErr> {
     if !st.sso_enabled {
-        return Ok(DEFAULT_USER);
+        return Ok(Principal { user: DEFAULT_USER, tenant: None });
     }
     let token = bearer(headers).ok_or_else(|| err(StatusCode::UNAUTHORIZED, "missing session"))?;
-    st.sso.resolve(token).await.ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid session"))
+    let (user, tenant) = st
+        .sso
+        .resolve(token)
+        .await
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid session"))?;
+    Ok(Principal { user, tenant: Some(tenant) })
+}
+
+/// То же, когда нужен только счёт: чтение позиций/истории сайтом не ограничивается.
+async fn require_user(st: &AppState, headers: &HeaderMap) -> Result<UserId, ApiErr> {
+    Ok(require_principal(st, headers).await?.user)
 }
 
 // ============================ Роутер =======================================
@@ -288,6 +428,10 @@ struct ClosedDto {
 }
 #[derive(Serialize)]
 struct AccountDto {
+    /// Модель ведения позиций счёта (ADR-025): `hedging` | `netting`. Отдаётся
+    /// наружу, потому что она меняет смысл каждой встречной сделки, и человек
+    /// обязан видеть её ДО того, как не сойдётся баланс.
+    model: &'static str,
     balance: i128,
     equity: i128,
     used_margin: i128,
@@ -320,6 +464,11 @@ struct DepthResp {
 struct DepthQuery {
     limit: Option<usize>,
 }
+/// Сайт для фильтрации витрины инструментов (`?site=`).
+#[derive(Deserialize)]
+struct SiteQuery {
+    site: Option<String>,
+}
 #[derive(Serialize, Clone)]
 struct StatDto {
     tf: u32,
@@ -329,16 +478,73 @@ struct StatDto {
 
 // ============================ Хендлеры =====================================
 
-async fn health() -> &'static str {
-    "ok"
+/// Состояние сервиса. Поля `storage`/`durable` объявляют режим хранилища машине:
+/// «состояние живёт только в памяти» не должно быть видно лишь в логе gateway, иначе
+/// после рестарта пустой счёт выглядит как настоящий (BUG-011, КОНТРАКТЫ §5в).
+///
+/// Про фид сознательно **не** сообщается состояние сокета: открытое соединение, по
+/// которому не приходит ничего, — это молчащий фид, а не живой. `feed_age_secs` —
+/// возраст последнего принятого сообщения Binance, `feed_fresh` — свежее ли оно
+/// порога. `null` в возрасте означает «не приняли ещё ни одного сообщения».
+#[derive(Serialize)]
+struct HealthDto {
+    status: &'static str,
+    storage: &'static str,
+    durable: bool,
+    sso: bool,
+    feed_fresh: bool,
+    feed_age_secs: Option<i64>,
+    priced_instruments: usize,
+}
+
+/// Насколько старым может быть последнее сообщение Binance, чтобы фид считался живым.
+/// Топ-30 пар дают сделки непрерывно; 30 с молчания — это уже не «тихий рынок».
+const FEED_STALE_AFTER_SECS: i64 = 30;
+
+async fn health(State(st): State<AppState>) -> Json<HealthDto> {
+    let last = st.feed_last_msg.load(std::sync::atomic::Ordering::Relaxed);
+    let age = (last > 0).then(|| now_secs() - last);
+    Json(HealthDto {
+        status: "ok",
+        storage: st.store.kind(),
+        durable: st.store.durable(),
+        sso: st.sso_enabled,
+        feed_fresh: age.is_some_and(|a| a <= FEED_STALE_AFTER_SECS),
+        feed_age_secs: age,
+        priced_instruments: st.tickers.lock().await.len(),
+    })
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Список инструментов с реальными котировками (Binance @ticker).
-async fn list_instruments(State(st): State<AppState>) -> Json<Vec<InstrumentDto>> {
+///
+/// Витрина: фильтруется по `?site=`, если он задан. Это удобство, а не защита —
+/// защита стоит на пути открытия сделки (`ensure_can_open`), потому что `?site=`
+/// из браузера подставит кто угодно. Отказ отдаётся кодом, а не пустым списком:
+/// пустой список читается как «сайту нечем торговать», что неотличимо от
+/// «конфиг сайта не доехал» (BUG-011).
+async fn list_instruments(State(st): State<AppState>, Query(q): Query<SiteQuery>) -> Result<Json<Vec<InstrumentDto>>, ApiErr> {
+    let allowed: Option<Vec<u32>> = match q.site.as_deref().filter(|s| !s.is_empty()) {
+        None => None,
+        Some(site) => match st.tenant_instruments.as_ref().as_ref().and_then(|m| m.get(site)) {
+            Some(list) => Some(list.clone()),
+            None => {
+                eprintln!("[gateway] {site}: нет allow-list — список инструментов не отдаём");
+                return Err(err(StatusCode::SERVICE_UNAVAILABLE, "tenant_instruments_unavailable"));
+            }
+        },
+    };
     let tickers = st.tickers.lock().await;
     let out = st
         .feed_instruments
         .iter()
+        .filter(|f| allowed.as_ref().is_none_or(|a| a.contains(&f.id)))
         .map(|f| {
             let t = tickers.get(&f.id);
             InstrumentDto {
@@ -349,7 +555,7 @@ async fn list_instruments(State(st): State<AppState>) -> Json<Vec<InstrumentDto>
             }
         })
         .collect();
-    Json(out)
+    Ok(Json(out))
 }
 
 /// Реальные свечи с Binance REST (кэш ~2с).
@@ -457,7 +663,9 @@ async fn get_stats(State(st): State<AppState>, Path(id): Path<u32>) -> Result<Js
 
 /// Открыть сделку по текущей рыночной цене (buy=ask, sell=bid).
 async fn open_deal(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<DealReq>) -> Result<Json<DealDto>, ApiErr> {
-    let user = require_user(&st, &headers).await?;
+    let who = require_principal(&st, &headers).await?;
+    ensure_can_open(&st, &who, req.instrument)?;
+    let user = who.user;
     let side = match req.side.as_str() {
         "buy" => PosSide::Long,
         "sell" => PosSide::Short,
@@ -485,7 +693,11 @@ async fn open_deal(State(st): State<AppState>, headers: HeaderMap, Json(req): Js
 
 /// Разместить лимитный (отложенный) ордер.
 async fn place_pending(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<PendingReq>) -> Result<Json<PendingDto>, ApiErr> {
-    let user = require_user(&st, &headers).await?;
+    // Лимитный ордер — такой же путь открытия позиции, только отложенный во времени.
+    // Проверять только рыночный вход значило бы оставить дверь рядом с турникетом.
+    let who = require_principal(&st, &headers).await?;
+    ensure_can_open(&st, &who, req.instrument)?;
+    let user = who.user;
     let side = match req.side.as_str() {
         "buy" => PosSide::Long,
         "sell" => PosSide::Short,
@@ -568,6 +780,11 @@ async fn list_deals(State(st): State<AppState>, headers: HeaderMap) -> Result<Js
 }
 
 /// Закрыть позицию по текущей цене (last).
+///
+/// Allow-list здесь сознательно **не** проверяется: он ограничивает набор
+/// разрешённого, а закрытие позицию сокращает. Если инструмент запретили, пока
+/// позиция открыта, запереть человека в ней было бы хуже запрета — он не смог бы
+/// выйти из того, что ему больше не разрешено держать. То же для отмены ордера.
 async fn close_deal(State(st): State<AppState>, headers: HeaderMap, Path(id): Path<u64>) -> Result<Json<serde_json::Value>, ApiErr> {
     let user = require_user(&st, &headers).await?;
     let m = marks(&st).await;
@@ -595,7 +812,11 @@ async fn account(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<
     let open_pnl = b.open_pnl(user, &m);
     let used = b.used_margin(user);
     let equity = balance + open_pnl;
-    Ok(Json(AccountDto { balance, equity, used_margin: used, free_margin: equity - used, open_pnl }))
+    let model = match b.model(user) {
+        broker::PositionModel::Netting => "netting",
+        broker::PositionModel::Hedging => "hedging",
+    };
+    Ok(Json(AccountDto { model, balance, equity, used_margin: used, free_margin: equity - used, open_pnl }))
 }
 
 // ---- SSO: обмен handoff-JWT на сессию терминала (ADR-023, Т2) --------------
@@ -621,7 +842,7 @@ async fn session_create(State(st): State<AppState>, Json(req): Json<SessionReq>)
         .resolve_identity(&claims.tenant, &claims.sub)
         .await
         .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "identity store unavailable"))?;
-    let expires_in = st.sso.mint(claims.jti.clone(), user).await;
+    let expires_in = st.sso.mint(claims.jti.clone(), user, claims.tenant.clone()).await;
     Ok(Json(SessionResp { token: claims.jti, expires_in }))
 }
 
@@ -658,6 +879,20 @@ pub fn spawn_monitor(st: AppState) {
                 let lock = account_lock(&st, user).await;
                 let _guard = lock.lock().await;
                 let snap = { st.broker.lock().await.snapshot(user) };
+                // Триггеры SL/TP и лимитных ордеров меняют счёт так же, как ручные
+                // операции, поэтому и проверяются так же. Иначе инвариант защищал бы
+                // только тот путь, о котором мы помним.
+                let violations = {
+                    let b = st.broker.lock().await;
+                    broker::check_snapshot(&snap, b.leverage())
+                };
+                if !violations.is_empty() {
+                    st.quarantined.lock().await.insert(user);
+                    for v in &violations {
+                        eprintln!("[monitor] ИНВАРИАНТ НАРУШЕН триггером, счёт {} в карантине: {v}", user.0);
+                    }
+                    continue; // испорченное не записываем и не чиним
+                }
                 if let Err(e) = st.store.save_account(user, &snap).await {
                     eprintln!("[monitor] не удалось сохранить счёт {}: {e}", user.0);
                 }
@@ -681,5 +916,385 @@ async fn handle_ws(mut socket: WebSocket, st: AppState) {
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
             Err(broadcast::error::RecvError::Closed) => break,
         }
+    }
+}
+
+// ======================= Тесты allow-list инструментов ======================
+//
+// Регуляторное требование (ADR-023 Т3): сайту нельзя торговать тем, что его
+// юрисдикции не разрешено. Тесты идут **через роутер**, а не по `ensure_can_open`
+// напрямую: проверка, вызванная из одного хендлера и забытая в другом, — это
+// именно тот дефект, который надо ловить (урок BUG-013 — тест должен проверять
+// барьер на его месте, а не свойство функции в вакууме).
+#[cfg(test)]
+mod allow_list_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    const SITE: &str = "apex-ru";
+
+    /// Роутер в тенантном режиме с готовой сессией сайта `apex-ru`.
+    async fn tenant_app(map: Option<HashMap<String, Vec<u32>>>) -> (Router, String) {
+        let mut st = build_state();
+        st.sso = Arc::new(sso::Sso::new("http://jwks.invalid/jwks".into()));
+        st.sso_enabled = true;
+        st.tenant_instruments = Arc::new(map);
+        let token = "session-token".to_string();
+        st.sso.mint(token.clone(), DEFAULT_USER, SITE.to_string()).await;
+        (router(st), token)
+    }
+
+    fn allow(site: &str, ids: &[u32]) -> HashMap<String, Vec<u32>> {
+        let mut m = HashMap::new();
+        m.insert(site.to_string(), ids.to_vec());
+        m
+    }
+
+    async fn post(app: &Router, uri: &str, token: Option<&str>, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let mut b = Request::builder().method("POST").uri(uri).header("content-type", "application/json");
+        if let Some(t) = token {
+            b = b.header("authorization", format!("Bearer {t}"));
+        }
+        let req = b.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+        read(app.clone().oneshot(req).await.unwrap()).await
+    }
+
+    async fn get(app: &Router, uri: &str, token: Option<&str>) -> (StatusCode, serde_json::Value) {
+        let mut b = Request::builder().method("GET").uri(uri);
+        if let Some(t) = token {
+            b = b.header("authorization", format!("Bearer {t}"));
+        }
+        read(app.clone().oneshot(b.body(Body::empty()).unwrap()).await.unwrap()).await
+    }
+
+    async fn read(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = if bytes.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null) };
+        (status, v)
+    }
+
+    fn deal(instrument: u32) -> serde_json::Value {
+        serde_json::json!({"instrument": instrument, "side": "buy", "qty": 100})
+    }
+    fn pending(instrument: u32) -> serde_json::Value {
+        serde_json::json!({"instrument": instrument, "side": "buy", "qty": 100, "price": 1000})
+    }
+
+    // ---- Разбор источника ---------------------------------------------------
+
+    #[test]
+    fn parses_source() {
+        let m = parse_tenant_instruments(Some("apex-ru:1,2,3;other:4")).expect("источник задан");
+        assert_eq!(m.get("apex-ru"), Some(&vec![1, 2, 3]));
+        assert_eq!(m.get("other"), Some(&vec![4]));
+    }
+
+    /// Пустой список у сайта — валидное значение «сайту не разрешено ничего»,
+    /// а не «фильтра нет». Разница регуляторная, поэтому проверяем отдельно.
+    #[test]
+    fn empty_list_is_a_value_not_absence() {
+        let m = parse_tenant_instruments(Some("apex-ru:")).expect("источник задан");
+        assert_eq!(m.get("apex-ru"), Some(&vec![]));
+    }
+
+    #[test]
+    fn absent_source_is_none() {
+        assert!(parse_tenant_instruments(None).is_none());
+        assert!(parse_tenant_instruments(Some("   ")).is_none());
+    }
+
+    // ---- Граница: открытие позиции -----------------------------------------
+
+    /// Рыночный вход по инструменту вне списка сайта — 403.
+    #[tokio::test]
+    async fn open_deal_rejects_instrument_outside_allow_list() {
+        let (app, tok) = tenant_app(Some(allow(SITE, &[1]))).await;
+        let (status, body) = post(&app, "/deals", Some(&tok), deal(2)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "инструмент вне allow-list не должен торговаться");
+        assert_eq!(body["error"], "instrument_not_allowed");
+    }
+
+    /// Лимитный ордер — тот же путь открытия позиции. Дверь рядом с турникетом.
+    #[tokio::test]
+    async fn pending_rejects_instrument_outside_allow_list() {
+        let (app, tok) = tenant_app(Some(allow(SITE, &[1]))).await;
+        let (status, body) = post(&app, "/pending", Some(&tok), pending(2)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "отложенный ордер обязан проверяться так же, как рыночный");
+        assert_eq!(body["error"], "instrument_not_allowed");
+    }
+
+    /// Разрешённый инструмент проходит границу (лимитный ордер не требует живой цены).
+    #[tokio::test]
+    async fn allowed_instrument_passes() {
+        let (app, tok) = tenant_app(Some(allow(SITE, &[1]))).await;
+        let (status, _) = post(&app, "/pending", Some(&tok), pending(1)).await;
+        assert_eq!(status, StatusCode::OK, "разрешённый инструмент обязан торговаться");
+    }
+
+    /// Пустой список запрещает всё — включая инструмент №1.
+    #[tokio::test]
+    async fn empty_allow_list_denies_everything() {
+        let (app, tok) = tenant_app(Some(allow(SITE, &[]))).await;
+        let (status, _) = post(&app, "/deals", Some(&tok), deal(1)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // ---- Fail-closed --------------------------------------------------------
+
+    /// Источник не сконфигурирован → торговля закрыта (КОНТРАКТЫ §4б).
+    /// Отказ инфраструктуры не должен превращаться в разрешение.
+    #[tokio::test]
+    async fn missing_source_closes_trading() {
+        let (app, tok) = tenant_app(None).await;
+        for (uri, body) in [("/deals", deal(1)), ("/pending", pending(1))] {
+            let (status, b) = post(&app, uri, Some(&tok), body).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}: без конфига торговли быть не должно");
+            assert_eq!(b["error"], "tenant_instruments_unavailable", "{uri}: причина обязана отличаться от «не разрешено»");
+        }
+    }
+
+    /// Сайта нет в реестре → тоже закрыто, и причина та же: списка нет.
+    #[tokio::test]
+    async fn unknown_site_closes_trading() {
+        let (app, tok) = tenant_app(Some(allow("some-other-site", &[1, 2]))).await;
+        let (status, b) = post(&app, "/deals", Some(&tok), deal(1)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(b["error"], "tenant_instruments_unavailable");
+    }
+
+    // ---- Что allow-list ограничивать НЕ должен -----------------------------
+
+    /// Закрытие позиции и отмена ордера не ограничиваются: список ограничивает
+    /// набор разрешённого, а закрытие сокращает позицию. Иначе человека запирают
+    /// в том, что ему больше не разрешено держать. Признак прохождения — 404
+    /// (позиции нет), а не 403.
+    #[tokio::test]
+    async fn closing_is_never_blocked_by_allow_list() {
+        let (app, tok) = tenant_app(Some(allow(SITE, &[]))).await;
+        let (status, _) = post(&app, "/deals/1/close", Some(&tok), serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "закрытие не должно упираться в allow-list");
+    }
+
+    /// Отмена отложенного ордера — тоже сокращение риска, тоже не ограничивается.
+    /// Пара к предыдущему тесту: если «для единообразия» границу поставят на все
+    /// торговые ручки подряд, покраснеет один из этих двух.
+    #[tokio::test]
+    async fn cancelling_is_never_blocked_by_allow_list() {
+        let (app, tok) = tenant_app(Some(allow(SITE, &[]))).await;
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/pending/1")
+            .header("authorization", format!("Bearer {tok}"))
+            .body(Body::empty())
+            .unwrap();
+        let (status, _) = read(app.oneshot(req).await.unwrap()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "отмена ордера не должна упираться в allow-list");
+    }
+
+    /// SL/TP — атрибуты позиции (`Position { sl, tp }`), а не отдельные ордера:
+    /// закрытие по ним идёт фоновым монитором, мимо роутера и мимо границы. Тест
+    /// фиксирует именно это: позиция с SL/TP на разрешённом инструменте заводится
+    /// одним запросом, отдельной «ручки закрытия» для неё не требуется.
+    #[tokio::test]
+    async fn sl_tp_travel_with_the_position_not_as_orders() {
+        let (app, tok) = tenant_app(Some(allow(SITE, &[1]))).await;
+        let body = serde_json::json!({"instrument": 1, "side": "buy", "qty": 100, "price": 1000, "sl": 900, "tp": 1200});
+        let (status, v) = post(&app, "/pending", Some(&tok), body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["sl"], 900);
+        assert_eq!(v["tp"], 1200);
+    }
+
+    /// Чтение позиций и счёта сайтом не ограничивается.
+    #[tokio::test]
+    async fn reading_account_is_not_blocked() {
+        let (app, tok) = tenant_app(Some(allow(SITE, &[]))).await;
+        let (status, _) = get(&app, "/account", Some(&tok)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // ---- Витрина ------------------------------------------------------------
+
+    #[tokio::test]
+    async fn instruments_listing_filtered_by_site() {
+        let (app, _) = tenant_app(Some(allow(SITE, &[2, 3]))).await;
+        let (status, body) = get(&app, "/instruments?site=apex-ru", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let ids: Vec<u64> = body.as_array().unwrap().iter().map(|i| i["id"].as_u64().unwrap()).collect();
+        assert_eq!(ids, vec![2, 3], "витрина обязана показывать только разрешённое");
+    }
+
+    /// Без конфига витрина отказывает кодом, а не отдаёт пустой список: пустой
+    /// список читается как «сайту нечем торговать» (BUG-011).
+    #[tokio::test]
+    async fn instruments_listing_fails_loudly_without_config() {
+        let (app, _) = tenant_app(None).await;
+        let (status, b) = get(&app, "/instruments?site=apex-ru", None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(b["error"], "tenant_instruments_unavailable");
+    }
+
+    /// Без `?site=` витрина отдаёт всё: это standalone-режим, юрисдикции нет.
+    #[tokio::test]
+    async fn instruments_listing_unfiltered_without_site() {
+        let (app, _) = tenant_app(Some(allow(SITE, &[1]))).await;
+        let (status, body) = get(&app, "/instruments", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().unwrap().len(), feed::instruments().len());
+    }
+
+    // ---- Standalone ---------------------------------------------------------
+
+    /// Без SSO сайта нет, ограничивать нечем и не от чьего имени: торгуем всем.
+    #[tokio::test]
+    async fn standalone_is_not_restricted() {
+        let app = router(build_state()); // sso выключен: tenant отсутствует
+        let (status, _) = post(&app, "/pending", None, pending(30)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+}
+
+// ============ Проводка инвариантов: отказ до записи и карантин ==============
+//
+// Тесты идут ЧЕРЕЗ РОУТЕР, а не по `check_snapshot`: проверка, которую перестали
+// звать, остаётся зелёной в юнит-тестах самой проверки (урок BUG-013).
+#[cfg(test)]
+mod invariant_wiring_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    /// Слепок с нарушенным инвариантом: позиция с нулевым объёмом.
+    fn corrupt_snapshot() -> broker::AccountSnapshot {
+        broker::AccountSnapshot {
+            balance: 1_000_000,
+            next_id: 1,
+            positions: vec![broker::Position {
+                id: 1, instrument: 1, side: PosSide::Long,
+                qty: 0, entry: 5000, pd: 2, qd: 3, margin: 5_000, sl: None, tp: None,
+            }],
+            pendings: vec![],
+            closed: vec![],
+            model: broker::PositionModel::Hedging,
+        }
+    }
+
+    /// Хранилище, отдающее на старте счёт с нарушенным инвариантом.
+    struct CorruptStore;
+    #[async_trait::async_trait]
+    impl persistence::Persistence for CorruptStore {
+        async fn init(&self) -> Result<(), persistence::StoreError> {
+            Ok(())
+        }
+        async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
+            Ok(persistence::LoadedState { accounts: vec![(DEFAULT_USER, corrupt_snapshot())] })
+        }
+        async fn save_account(&self, _u: UserId, _s: &broker::AccountSnapshot) -> Result<(), persistence::StoreError> {
+            Ok(())
+        }
+    }
+
+    async fn send(app: &Router, method: &str, uri: &str, body: Option<serde_json::Value>) -> (StatusCode, serde_json::Value) {
+        let b = Request::builder().method(method).uri(uri);
+        let req = match body {
+            Some(v) => b.header("content-type", "application/json").body(Body::from(serde_json::to_vec(&v).unwrap())).unwrap(),
+            None => b.body(Body::empty()).unwrap(),
+        };
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = if bytes.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null) };
+        (status, v)
+    }
+
+    fn pending_body() -> serde_json::Value {
+        serde_json::json!({"instrument": 1, "side": "buy", "qty": 100, "price": 1000})
+    }
+
+    // ---- Отказ ДО записи ----------------------------------------------------
+
+    /// Мутация поверх неверного состояния отклоняется, изменение не фиксируется.
+    /// Счёт при этом НЕ в карантине — карантин ставится только при чтении из
+    /// хранилища; здесь проверяется именно проверка перед записью.
+    #[tokio::test]
+    async fn mutation_over_broken_state_is_rejected_before_write() {
+        let st = build_state();
+        st.broker.lock().await.restore(DEFAULT_USER, corrupt_snapshot());
+        let app = router(st.clone());
+
+        let (status, body) = send(&app, "POST", "/pending", Some(pending_body())).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "операция, оставляющая счёт неверным, обязана быть отклонена");
+        assert_eq!(body["error"], "invariant_violated", "отказ обязан отличаться от делового");
+
+        // Изменение не зафиксировано: ордер не добавился.
+        let (_, list) = send(&app, "GET", "/pending", None).await;
+        assert_eq!(list.as_array().map(|a| a.len()), Some(0), "изменение не должно фиксироваться");
+    }
+
+    /// Отказ по инварианту отличим от делового отказа. Их нельзя путать: первый
+    /// означает «состояние сломано», второй — «денег не хватило».
+    #[tokio::test]
+    async fn invariant_rejection_differs_from_business_rejection() {
+        let st = build_state();
+        st.broker.lock().await.restore(DEFAULT_USER, corrupt_snapshot());
+        let app = router(st);
+        let (status, body) = send(&app, "POST", "/pending", Some(pending_body())).await;
+        assert_ne!(status, StatusCode::PAYMENT_REQUIRED);
+        assert_ne!(body["error"], "insufficient_margin");
+    }
+
+    // ---- Карантин при чтении ------------------------------------------------
+
+    /// Сервис СТАРТУЕТ на испорченном состоянии — стоп сервиса не применяется
+    /// нигде: одна испорченная строка не должна лишать обслуживания всех.
+    #[tokio::test]
+    async fn broken_state_quarantines_account_but_service_starts() {
+        let st = build_state_with(Arc::new(CorruptStore));
+        restore_state(&st).await.expect("сервис обязан стартовать, а не падать");
+        assert!(st.quarantined.lock().await.contains(&DEFAULT_USER), "счёт обязан уйти в карантин");
+    }
+
+    /// В карантине: чтение разрешено, мутации отклоняются.
+    #[tokio::test]
+    async fn quarantined_account_reads_but_does_not_mutate() {
+        let st = build_state_with(Arc::new(CorruptStore));
+        restore_state(&st).await.unwrap();
+        let app = router(st);
+
+        let (read_status, _) = send(&app, "GET", "/account", None).await;
+        assert_eq!(read_status, StatusCode::OK, "чтение в карантине обязано работать");
+
+        let (write_status, body) = send(&app, "POST", "/pending", Some(pending_body())).await;
+        assert_eq!(write_status, StatusCode::LOCKED, "мутации в карантине обязаны отклоняться");
+        assert_eq!(body["error"], "account_quarantined");
+    }
+
+    /// Испорченное состояние сохраняется КАК ЕСТЬ: молчаливая починка уничтожила
+    /// бы улику и скрыла причину (КОНТРАКТЫ §4в).
+    #[tokio::test]
+    async fn broken_state_is_not_silently_repaired() {
+        let st = build_state_with(Arc::new(CorruptStore));
+        restore_state(&st).await.unwrap();
+        let snap = st.broker.lock().await.snapshot(DEFAULT_USER);
+        assert_eq!(snap.positions.len(), 1, "позиция не должна исчезнуть");
+        assert_eq!(snap.positions[0].qty, 0, "нулевой объём обязан сохраниться как улика");
+        assert!(!broker::check_snapshot(&snap, 1).is_empty(), "состояние обязано остаться помеченным как неверное");
+    }
+
+    /// Здоровое состояние в карантин не уходит — проверка не срабатывает вхолостую.
+    #[tokio::test]
+    async fn healthy_account_is_not_quarantined() {
+        let st = build_state();
+        restore_state(&st).await.unwrap();
+        assert!(st.quarantined.lock().await.is_empty());
+        let app = router(st);
+        let (status, _) = send(&app, "POST", "/pending", Some(pending_body())).await;
+        assert_eq!(status, StatusCode::OK, "нормальная торговля не должна страдать от проверок");
     }
 }

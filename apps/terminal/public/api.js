@@ -120,7 +120,10 @@
       tradingStatus: () => status,
 
       // ---- Публичные данные (без авторизации) ----------------------------
-      instruments: () => read('/instruments'),
+      /** Состояние сервиса, в т.ч. режим хранилища: { storage, durable, sso }. */
+      health: () => read('/health'),
+      /** Список инструментов. `site` — фильтр витрины по allow-list сайта (ADR-023 Т3). */
+      instruments: (site) => read('/instruments' + (site ? `?site=${encodeURIComponent(site)}` : '')),
       candles: (id, tf, limit) => read(`/candles/${id}?tf=${tf}&limit=${limit}`),
       depth: (id, limit) => read(`/depth/${id}${limit ? `?limit=${limit}` : ''}`),
       stats: (id) => read(`/stats/${id}`),

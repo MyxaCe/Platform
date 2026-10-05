@@ -51,6 +51,10 @@ button { font-family: inherit; }
    Показывается рядом с метриками, не вместо них — цифры не должны врать молча. */
 .acct-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 600; color: var(--down);
   border: 1px solid var(--down); border-radius: 6px; padding: 4px 8px; opacity: .9; }
+/* Постоянная пометка о нестойком состоянии. Не «ошибка» — цветом спокойнее, чем
+   acct-warn: это режим работы, а не отказ. Закрыть её нельзя (BUG-011). */
+.volatile-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 600;
+  color: var(--muted); border: 1px dashed var(--border); border-radius: 6px; padding: 4px 8px; }
 .top__right { display: flex; align-items: center; gap: 12px; }
 .btn { cursor: pointer; border: 1px solid var(--border); background: var(--panel2); color: var(--text);
   border-radius: 6px; padding: 7px 12px; }

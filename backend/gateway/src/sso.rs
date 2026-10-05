@@ -62,6 +62,11 @@ struct JwksCache {
 
 struct Session {
     user: UserId,
+    /// Сайт, к которому привязана сессия (`tenant` из провалидированного токена).
+    /// Нужен на торговых ручках: allow-list инструментов задаётся per-site, и
+    /// определять сайт по чему-либо, кроме токена, нельзя — `?site=` из браузера
+    /// подставит кто угодно.
+    tenant: String,
     expires: Instant,
 }
 
@@ -180,18 +185,20 @@ impl Sso {
 
     /// Выпустить сессию терминала для пользователя. Токен сессии — сам `jti`
     /// (UUIDv4, 122 бит энтропии, одноразовый и уникальный) — отдельный RNG не нужен.
-    pub async fn mint(&self, session_token: String, user: UserId) -> u64 {
+    pub async fn mint(&self, session_token: String, user: UserId, tenant: String) -> u64 {
         let mut s = self.sessions.lock().await;
         let now = Instant::now();
         s.retain(|_, sess| sess.expires > now);
-        s.insert(session_token, Session { user, expires: now + SESSION_TTL });
+        s.insert(session_token, Session { user, tenant, expires: now + SESSION_TTL });
         SESSION_TTL.as_secs()
     }
 
-    /// Разрешить сессию из bearer-токена → UserId (если жива).
-    pub async fn resolve(&self, token: &str) -> Option<UserId> {
+    /// Разрешить сессию из bearer-токена → `(пользователь, сайт)`, если жива.
+    pub async fn resolve(&self, token: &str) -> Option<(UserId, String)> {
         let s = self.sessions.lock().await;
-        s.get(token).filter(|sess| sess.expires > Instant::now()).map(|sess| sess.user)
+        s.get(token)
+            .filter(|sess| sess.expires > Instant::now())
+            .map(|sess| (sess.user, sess.tenant.clone()))
     }
 
     /// Погасить сессию (логаут).
@@ -382,9 +389,20 @@ mod tests {
     #[tokio::test]
     async fn session_lifecycle() {
         let sso = Sso::new("http://x/jwks".into());
-        sso.mint("tok-123".into(), UserId(42)).await;
-        assert_eq!(sso.resolve("tok-123").await, Some(UserId(42)));
+        sso.mint("tok-123".into(), UserId(42), "apex-ru".into()).await;
+        assert_eq!(sso.resolve("tok-123").await, Some((UserId(42), "apex-ru".to_string())));
         sso.logout("tok-123").await;
         assert_eq!(sso.resolve("tok-123").await, None);
+    }
+
+    /// Сайт берётся из сессии, а значит из провалидированного токена. Проверяем, что
+    /// он действительно доезжает до потребителя: на нём стоит allow-list инструментов.
+    #[tokio::test]
+    async fn session_carries_tenant() {
+        let sso = Sso::new("http://x/jwks".into());
+        sso.mint("a".into(), UserId(1), "apex-ru".into()).await;
+        sso.mint("b".into(), UserId(2), "other-site".into()).await;
+        assert_eq!(sso.resolve("a").await.map(|(_, t)| t), Some("apex-ru".to_string()));
+        assert_eq!(sso.resolve("b").await.map(|(_, t)| t), Some("other-site".to_string()));
     }
 }

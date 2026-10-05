@@ -219,6 +219,18 @@ function updateDealPanel() {
 }
 
 // ---- Виджеты (ADR-015): страница даёт контейнер, зависимости идут через ctx --
+// Режим хранилища объявляется в интерфейсе, а не только в логе gateway. Пометка
+// постоянная: закрыть её нельзя, потому что забытая пометка — это снова тишина.
+// Проверяется один раз на старте: режим не меняется без перезапуска сервиса.
+async function showStorageMode() {
+  const h = await api.health();
+  const el = document.getElementById('volatileWarn');
+  if (!el || !h) return; // health недоступен — не выдумываем режим, молчим
+  el.hidden = h.durable !== false;
+  el.textContent = 'DEMO STATE — NOT SAVED BETWEEN RESTARTS';
+  el.title = `storage: ${h.storage}`;
+}
+
 // Рыночные данные: отказ показываем отказом. Бейдж гаснет, когда все источники
 // снова отвечают (BUG-011).
 const marketDown = { candles: false, depth: false, stats: false, instruments: false };
@@ -268,8 +280,17 @@ const trades = Trades.mount(document.getElementById('trades'), {
 });
 // Монтируется последним: его первый refresh выбирает инструмент, а selectInstrument
 // обращается к book/stats/panel/trades — они должны уже существовать.
+// Сайт (тенант) — из своего URL. Для витрины это фильтр по allow-list; настоящая
+// граница стоит на сервере, на пути открытия сделки: `?site=` подставит кто угодно.
+const SITE = new URLSearchParams(location.search).get('site') || '';
 const watchlist = Watchlist.mount(document.querySelector('.watch'), {
-  fetch: () => api.instruments(),
+  fetch: async () => {
+    const list = await api.instruments(SITE);
+    // null здесь — «список не отдали» (например, конфиг сайта не доехал). Пустой
+    // список читался бы как «сайту нечем торговать» — другое утверждение (BUG-011).
+    markMarketData('instruments', list !== null);
+    return list;
+  },
   instrument: () => selected,
   onData: (list) => { list.forEach((it) => (META[it.id] = it)); updateDealPanel(); },
   onSelect: (id) => selectInstrument(id),
@@ -369,7 +390,48 @@ document.addEventListener('mouseover', (e) => { const t = e.target.closest('[dat
 document.addEventListener('mouseout', (e) => { if (e.target.closest('[data-tip]')) tip.classList.add('hidden'); });
 
 // ============================ WebSocket ====================================
-function connectWS() { const proto = location.protocol === 'https:' ? 'wss' : 'ws'; const ws = new WebSocket(`${proto}://${location.host}/stream`); const st = document.getElementById('status'); ws.onopen = () => { st.className = 'status status--on'; }; ws.onclose = () => { st.className = 'status status--off'; setTimeout(connectWS, 1500); }; ws.onmessage = (ev) => { let e; try { e = JSON.parse(ev.data); } catch { return; } for (const x of e) if (x.type === 'trade') { onLiveTrade(x.instrument, x.price, x.qty); trades.pushMarket(x); } }; }
+// Индикатор живости горит по ПРИХОДУ ДАННЫХ, а не по открытому сокету. Открытый
+// сокет, по которому ничего не идёт, — это молчащий фид: если Binance отвалится,
+// соединение браузер→gateway останется целым, и зелёная точка врала бы (BUG-011).
+const FEED_STALE_MS = 20000;
+let lastFeedMsgAt = 0;
+let wsOpen = false;
+function renderFeedStatus() {
+  const st = document.getElementById('status');
+  const age = lastFeedMsgAt ? Date.now() - lastFeedMsgAt : Infinity;
+  const live = wsOpen && age < FEED_STALE_MS;
+  // Транспорт и данные — разные вопросы, и подсказка их различает: «сокет молчит»
+  // и «шлюза нет» лечатся по-разному, хотя оба гасят точку.
+  const why = !wsOpen
+    ? 'no connection to terminal gateway'
+    : live
+      ? 'market data live'
+      : `socket open, no market data for ${lastFeedMsgAt ? Math.round(age / 1000) + 's' : 'the whole session'}`;
+  if (st) {
+    st.className = 'status ' + (live ? 'status--on' : 'status--off');
+    st.title = why;
+  }
+  // Слово рядом с названием биржи — тоже утверждение о состоянии, а не украшение.
+  const label = document.getElementById('feedLabel');
+  if (label) {
+    label.textContent = live ? 'LIVE' : 'NO DATA';
+    label.title = why;
+  }
+}
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/stream`);
+  ws.onopen = () => { wsOpen = true; renderFeedStatus(); };
+  ws.onclose = () => { wsOpen = false; renderFeedStatus(); setTimeout(connectWS, 1500); };
+  ws.onmessage = (ev) => {
+    let e; try { e = JSON.parse(ev.data); } catch { return; }
+    lastFeedMsgAt = Date.now();
+    renderFeedStatus();
+    for (const x of e) if (x.type === 'trade') { onLiveTrade(x.instrument, x.price, x.qty); trades.pushMarket(x); }
+  };
+}
+// Точка обязана гаснуть сама: без этого «живо» осталось бы висеть с последнего тика.
+setInterval(renderFeedStatus, 2000);
 
 // ============================ Order form ===================================
 document.getElementById('tabDeal').addEventListener('click', () => setMode('market'));
@@ -386,6 +448,17 @@ function setUnit(u) { if (sizeUnit === u) return; const it = META[selected]; con
 document.getElementById('unitLot').addEventListener('click', () => setUnit('lot'));
 document.getElementById('unitUsd').addEventListener('click', () => setUnit('usd'));
 document.getElementById('lot').addEventListener('input', updateSizeEq);
+// Отказ границы объясняется словами, а не кодом: «инструмент не разрешён сайту» и
+// «разрешения не доехали» — разные вещи. Первое окончательно, второе чинится
+// администратором, и человек должен понимать, ждать ему или нет (ADR-023 Т3).
+function rejectionText(status, code) {
+  if (code === 'instrument_not_allowed') return 'This instrument is not available on this site';
+  if (code === 'tenant_instruments_unavailable') return 'Instrument permissions unavailable — trading is closed';
+  if (status === 401) return 'No cabinet session — trading unavailable';
+  if (code === 'insufficient_margin') return 'Not enough free margin';
+  return `Rejected ${status}: ${code || ''}`;
+}
+
 async function submit(side) {
   const id = selected; if (id == null) return; const msg = document.getElementById('dealMsg');
   const baseQty = sizeBaseQty(id);
@@ -396,7 +469,7 @@ async function submit(side) {
   else body = { instrument: id, side, qty, sl, tp };
   const { ok, status, data } = isLimit ? await api.placePending(body) : await api.openDeal(body);
   if (ok) { msg.textContent = isLimit ? `Limit order #${data.id}` : `Opened #${data.id}: ${side.toUpperCase()} @ ${fmtP(id, data.entry)}`; msg.style.color = 'var(--up)'; panel.show(isLimit ? 'pending' : 'deals'); pollAccount(); panel.refresh(); }
-  else { msg.textContent = `Rejected ${status}: ${data?.error || ''}`; msg.style.color = 'var(--down)'; }
+  else { msg.textContent = rejectionText(status, data?.error); msg.style.color = 'var(--down)'; }
 }
 document.getElementById('btnBuy').addEventListener('click', () => submit('buy'));
 document.getElementById('btnSell').addEventListener('click', () => submit('sell'));
@@ -510,6 +583,7 @@ window.Theming.init();
 // придёт — терминал работает на счёте по умолчанию (dev/standalone). При смене сессии
 // сразу обновляем сводку счёта.
 window.Sso.init().onChange(() => pollAccount());
+showStorageMode();
 setInterval(syncLast, 2000);
 setInterval(pollAccount, 1000);
 connectWS();

@@ -12,7 +12,11 @@
 </head>
 <body>
   <header class="top">
-    <div class="logo"><span class="logo__mark">E</span> <span id="brandName">Exchange</span><span class="muted">Pro · Binance LIVE</span></div>
+    <!-- «LIVE» — утверждение о состоянии, поэтому оно не статичное: подпись не должна
+     утверждать больше, чем состояние знает. Слово меняется вместе с индикатором. -->
+    <div class="logo"><span class="logo__mark">E</span> <span id="brandName">Exchange</span><span class="muted">Pro · Binance <span id="feedLabel">…</span></span></div>
+    <!-- Стартовые значения — прочерк, а не $0: до первого успешного ответа счёта
+         у нас нет никаких цифр, и ноль выглядел бы настоящим балансом (BUG-011). -->
     <div class="metrics">
       <div class="metric"><span class="metric__l">BALANCE</span><span id="mBalance" class="metric__v">&mdash;</span></div>
       <!-- CREDIT: источника данных нет вовсе — в API кредита не существует. Пока он
@@ -28,6 +32,14 @@
     <div id="acctWarn" class="acct-warn" hidden></div>
     <!-- Рыночные данные (свечи/стакан/статистика) не пришли — говорим об этом. -->
     <div id="dataWarn" class="acct-warn" hidden></div>
+    <!-- Состояние живёт только в памяти (NoopStore). Пометка ПОСТОЯННАЯ и без крестика:
+         закрытая пометка — та же тишина, только с согласия, о котором завтра не помнят.
+         Опасность не в том, что счёт демонстрационный, а в том, что после рестарта
+         человек видит исправный счёт с круглой суммой вместо пустого места. -->
+    <div id="volatileWarn" class="volatile-warn" hidden></div>
+    <!-- Модель ведения позиций (ADR-025). Она меняет смысл встречной сделки, поэтому
+         показывается всегда, а не прячется в настройки. -->
+    <div id="modelBadge" class="volatile-warn" hidden></div>
     <div class="top__right">
       <button class="btn" id="themeToggle" data-tip="Light / Dark" title="Light / Dark">◐</button>
       <span id="status" class="status status--off">●</span>

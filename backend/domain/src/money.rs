@@ -45,7 +45,7 @@ impl std::ops::Add for Qty {
     }
 }
 
-/// Денежная сумма для балансов Ledger'а — целочисленный newtype поверх `i128`
+/// Денежная сумма для балансов счетов — целочисленный newtype поверх `i128`
 /// (шире `i64`, т.к. нотионал = цена × объём может быть большим). См. ADR-006.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Amount(pub i128);

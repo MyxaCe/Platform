@@ -30,6 +30,29 @@ fn side_to_db(s: PosSide) -> i16 {
         PosSide::Short => SIDE_SHORT,
     }
 }
+/// Модель позиций ↔ БД. Число, а не строка: строка на границе денег уже стоила нам
+/// шести исправленных мест (TRM-07), и неизвестное значение обязано быть отказом, а
+/// не молчаливым умолчанием.
+fn model_to_db(m: broker::PositionModel) -> i16 {
+    match m {
+        broker::PositionModel::Hedging => 0,
+        broker::PositionModel::Netting => 1,
+    }
+}
+fn model_from_db(v: i16) -> broker::PositionModel {
+    match v {
+        1 => broker::PositionModel::Netting,
+        0 => broker::PositionModel::Hedging,
+        other => {
+            // Неизвестное значение не подставляем молча: пишем и берём хеджирование
+            // как исторически существовавшую модель. Инварианты счёта проверит
+            // gateway; сюда попасть можно только правкой БД руками.
+            eprintln!("[persistence] неизвестная модель позиций в БД: {other}, читаем как hedging");
+            broker::PositionModel::Hedging
+        }
+    }
+}
+
 fn side_from_db(v: i16) -> PosSide {
     if v == SIDE_SHORT {
         PosSide::Short
@@ -76,6 +99,11 @@ CREATE TABLE IF NOT EXISTS accounts (
   balance     NUMERIC(38,0) NOT NULL,
   next_id     BIGINT NOT NULL
 );
+-- Модель ведения позиций счёта (ADR-025): 0 — хеджирование, 1 — неттинг.
+-- Отдельным ALTER, а не полем в CREATE: у существующих баз таблица уже есть, и
+-- CREATE TABLE IF NOT EXISTS её не тронет. DEFAULT 0 — не догадка: до 2026-09-04
+-- другой модели в коде не существовало, значит все прежние счета хеджирующие.
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS model SMALLINT NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS positions (
   user_id     BIGINT NOT NULL,
   id          BIGINT NOT NULL,
@@ -130,7 +158,7 @@ impl Persistence for PgStore {
 
     async fn load_all(&self) -> Result<LoadedState, StoreError> {
         // Счёт — самостоятельная сущность: перебираем то, что реально лежит в accounts.
-        let acc_rows = sqlx::query("SELECT user_id, balance, next_id FROM accounts ORDER BY user_id")
+        let acc_rows = sqlx::query("SELECT user_id, balance, next_id, model FROM accounts ORDER BY user_id")
             .fetch_all(&self.pool)
             .await
             .map_err(db)?;
@@ -141,6 +169,8 @@ impl Persistence for PgStore {
             let id_db = uid.0 as i64;
             let balance = from_numeric(&acc.get::<BigDecimal, _>("balance"))?;
             let next_id = acc.get::<i64, _>("next_id") as u64;
+
+            let model = model_from_db(acc.get::<i16, _>("model"));
 
             let positions = sqlx::query(
                 "SELECT id, instrument, side, qty, entry, pd, qd, margin, sl, tp FROM positions WHERE user_id = $1 ORDER BY id",
@@ -209,7 +239,7 @@ impl Persistence for PgStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
 
-            accounts.push((uid, AccountSnapshot { balance, next_id, positions, pendings, closed }));
+            accounts.push((uid, AccountSnapshot { balance, next_id, positions, pendings, closed, model }));
         }
 
         Ok(LoadedState { accounts })
@@ -220,12 +250,13 @@ impl Persistence for PgStore {
         let mut tx = self.pool.begin().await.map_err(db)?;
 
         sqlx::query(
-            "INSERT INTO accounts (user_id, balance, next_id) VALUES ($1, $2, $3)
-             ON CONFLICT (user_id) DO UPDATE SET balance = EXCLUDED.balance, next_id = EXCLUDED.next_id",
+            "INSERT INTO accounts (user_id, balance, next_id, model) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (user_id) DO UPDATE SET balance = EXCLUDED.balance, next_id = EXCLUDED.next_id, model = EXCLUDED.model",
         )
         .bind(id_db)
         .bind(to_numeric(snap.balance))
         .bind(snap.next_id as i64)
+        .bind(model_to_db(snap.model))
         .execute(&mut *tx)
         .await
         .map_err(db)?;
@@ -279,6 +310,14 @@ impl Persistence for PgStore {
         Ok(())
     }
 
+    fn durable(&self) -> bool {
+        true
+    }
+
+    fn kind(&self) -> &'static str {
+        "postgres"
+    }
+
     async fn resolve_identity(&self, tenant: &str, sub: &str) -> Result<UserId, StoreError> {
         // Найти-или-создать одним запросом: конфликт по (tenant, sub) => RETURNING
         // существующего user_id (DO UPDATE фиктивный, чтобы RETURNING сработал).
@@ -295,18 +334,4 @@ impl Persistence for PgStore {
         Ok(UserId(row.get::<i64, _>("user_id") as u64))
     }
 
-    async fn check_invariants(&self) -> Result<Vec<String>, StoreError> {
-        // Красная линия №5. Наличие настоящих чисел в SQL (а не текста) — ровно то,
-        // ради чего выбран NUMERIC вместо SQLite-текста.
-        let mut broken = Vec::new();
-        let neg: i64 = sqlx::query("SELECT count(*) AS n FROM accounts WHERE balance < 0")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(db)?
-            .get("n");
-        if neg > 0 {
-            broken.push(format!("счетов с отрицательным балансом: {neg}"));
-        }
-        Ok(broken)
-    }
 }

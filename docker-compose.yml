@@ -36,10 +36,13 @@ services:
       # SSO платформы (ADR-023, Т2). CABINET_URL → JWKS {CABINET_URL}/api/sso/jwks.
       # Из контейнера кабинет на хосте доступен как host.docker.internal.
       CABINET_URL: ${CABINET_URL:-http://host.docker.internal:3002}
-      # SSO включён (интеграция с кабинетом идёт): торговые ручки требуют bearer-сессию,
-      # выданную через /v1/session по handoff-JWT. SSO_DISABLED=1 вернёт standalone-режим
-      # (торговля на счёте по умолчанию без токена) — для локальной отладки терминала.
-      SSO_DISABLED: ${SSO_DISABLED:-0}
+      # Дефолт репозитория — standalone (решение штаба 2026-09-03): терминал обязан
+      # подниматься сам по себе, кабинет — отдельный репозиторий со своим темпом, и
+      # открывший :8888 должен увидеть работающий терминал, а не последствия отсутствия
+      # соседа. SSO_DISABLED=0 включает интеграцию: торговые ручки начинают требовать
+      # bearer-сессию, выданную через /v1/session по handoff-JWT (и тогда нужна БД —
+      # без неё resolve_identity вернёт 503).
+      SSO_DISABLED: ${SSO_DISABLED:-1}
       # Стартовый баланс демо-счёта (центы). Dev выровнен под apex-ru = $10k, чтобы «Обзор»
       # кабинета сходился. Целевое — per-tenant demoStartBalanceCents из CMS (ADR-023).
       DEMO_START_BALANCE_CENTS: ${DEMO_START_BALANCE_CENTS:-1000000}
@@ -61,8 +64,16 @@ services:
       FRAME_ANCESTORS: ${FRAME_ANCESTORS:-*}
       # Рантайм-конфиг фронта (ADR-023). URL для БРАУЗЕРА пользователя (не для контейнера):
       # публичный brand-эндпоинт CMS и origin кабинета для postMessage/SSO.
-      BRAND_URL: ${BRAND_URL:-http://localhost:3001/v1/cms/brand}
-      CABINET_ORIGIN: ${CABINET_ORIGIN:-http://localhost:3002}
+      # Дефолт — пусто, под standalone (см. SSO_DISABLED у gateway). Это не косметика:
+      #  • заданный CABINET_ORIGIN включает у фронта embedded-режим, и торговые ручки
+      #    он перестаёт дёргать вовсе (api.js: tradingBlocked) — даже если gateway
+      #    стоит в standalone и ответил бы. Пустое значение держит обе стороны в
+      #    одном режиме;
+      #  • заданный BRAND_URL без живой CMS даёт ошибку в консоли на каждой загрузке,
+      #    а «консоль без ошибок» — критерий приёмки фронта (принцип №20).
+      # Для интеграции задаём оба вместе с SSO_DISABLED=0.
+      BRAND_URL: ${BRAND_URL:-}
+      CABINET_ORIGIN: ${CABINET_ORIGIN:-}
     ports:
       - "8888:80"
     depends_on:
