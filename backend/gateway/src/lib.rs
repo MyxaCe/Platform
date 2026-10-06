@@ -75,17 +75,20 @@ pub struct AppState {
     /// сохраняется **как есть** — молчаливая починка уничтожила бы улику
     /// (КОНТРАКТЫ §4в).
     quarantined: Arc<Mutex<std::collections::HashSet<UserId>>>,
-    /// Разрешённые инструменты по сайтам (регуляторика, ADR-023 Т3).
+    /// Откуда берутся разрешённые инструменты сайта (регуляторика, ADR-023 Т3).
     ///
-    /// Источник по контракту — `GET {CMS}/v1/cms/sites/{slug}`, поле `instruments`
-    /// с `terminalInstrumentId`, сервер-сервер под `X-API-Key`. Ключа контура у нас
-    /// пока нет, поэтому источник временно читается из env `TENANT_INSTRUMENTS`
-    /// (см. `parse_tenant_instruments`). Шов один и тот же: когда ключ появится,
-    /// меняется только наполнение карты.
+    /// Источник по контракту — `GET {CMS}/v1/cms/sites/{slug}`, поле `instruments`,
+    /// сервер-сервер под `X-API-Key`. Поле — **плоский список символов** (Р-024):
+    /// числовые id живут в `DEFS` и больше нигде, требовать их от CMS значило бы
+    /// вынести нашу нумерацию в межсистемный контракт.
     ///
-    /// `None` — источник не сконфигурирован вовсе. Это **не** «всё разрешено»:
-    /// в тенантном режиме отсутствие списка закрывает торговлю (fail-closed).
-    tenant_instruments: Arc<Option<HashMap<String, Vec<u32>>>>,
+    /// `TenantSource::None` — источник не сконфигурирован вовсе. Это **не** «всё
+    /// разрешено»: в тенантном режиме отсутствие списка закрывает торговлю.
+    tenant_instruments: Arc<TenantSource>,
+    /// Сопоставление «символ → внутренний id», построенное из `DEFS` (Р-024).
+    ///
+    /// Граница перевода стоит здесь, у нас, потому что нумерация — наша деталь.
+    symbols: Arc<HashMap<String, u32>>,
     // SSO платформы (ADR-023, Т2): вход по handoff-JWT, сессии терминала.
     sso: Arc<sso::Sso>,
     /// Требовать ли сессию на торговых ручках. Выкл (dev/standalone) → счёт по умолчанию.
@@ -118,15 +121,19 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         .and_then(|s| s.parse::<i128>().ok())
         .filter(|c| *c > 0)
         .unwrap_or(10_000_000);
+    let feed_instruments = feed::instruments();
+    let symbols = symbol_index(&feed_instruments);
+    let tenant_instruments = TenantSource::from_env(&symbols);
     AppState {
         events_tx,
-        feed_instruments: Arc::new(feed::instruments()),
+        feed_instruments: Arc::new(feed_instruments),
+        symbols: Arc::new(symbols),
         tickers: Arc::new(Mutex::new(HashMap::new())),
         feed_last_msg: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         klines_cache: Arc::new(Mutex::new(HashMap::new())),
         depth_cache: Arc::new(Mutex::new(HashMap::new())),
         stats_cache: Arc::new(Mutex::new(HashMap::new())),
-        tenant_instruments: Arc::new(parse_tenant_instruments(std::env::var("TENANT_INSTRUMENTS").ok().as_deref())),
+        tenant_instruments: Arc::new(tenant_instruments),
         broker: Arc::new(Mutex::new(Broker::new(start_cents, 1))), // старт из env, leverage 1
         store,
         acct_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -230,25 +237,259 @@ impl AppState {
     }
 }
 
-/// Разобрать временный источник allow-list: `site:1,2,3;other:4,5`.
+// ================= Allow-list инструментов: символы → внутренние id ==========
+//
+// Решение штаба Р-024. Контракт между CMS, MDS, витриной, кабинетом и нами —
+// **символы**; числовые id живут в `feed::DEFS` и больше нигде. Требовать от трёх
+// систем знать нашу нумерацию значило бы вынести реализацию терминала в
+// межсистемный контракт, а перенумерация внутри терминала молча изменила бы,
+// кому что разрешено торговать. Поэтому перевод стоит здесь, на нашей границе.
+
+/// Нормализованное написание символа: верхний регистр, без разделителей.
+///
+/// Нужно потому, что одну и ту же пару называют по-разному: MDS — `BTCUSD`,
+/// Binance и мы внутри — `BTCUSDT`, витрина показывает `BTC-USDT`. Нормализация
+/// снимает только **оформление** (регистр, `-`, `/`, `_`, пробелы); разные
+/// написания самого имени разводит `symbol_index`, и делает это явным списком.
+fn normalize_symbol(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_uppercase())
+        .collect()
+}
+
+/// Индекс «символ → внутренний id» по списку инструментов фида.
+///
+/// Каждый инструмент отзывается на два написания:
+///
+/// * собственное, Binance-овское: `BTCUSDT` (оно же `BTC-USDT` после нормализации);
+/// * каноническое для платформы, как его хранит CMS и отдаёт MDS: `BTCUSD`.
+///
+/// Второе — не догадка. Проверено по живому MDS контура 06.10: все 30 пар `DEFS`
+/// присутствуют в его вселенной, у каждой `providerSymbol` совпадает с нашим
+/// Binance-символом, а канонический символ ровно равен «база + USD». То есть
+/// `BTCUSD` и `BTCUSDT` — один и тот же рынок у одного и того же провайдера,
+/// и это утверждение источника, а не наша подгонка строк.
+///
+/// Коллизий быть не должно: если два инструмента отзовутся на одно написание,
+/// разрешение «поплывёт» молча. Ловится тестом `symbol_index_has_no_collisions`.
+fn symbol_index(instruments: &[feed::FeedInstrument]) -> HashMap<String, u32> {
+    let mut out: HashMap<String, u32> = HashMap::new();
+    for f in instruments {
+        let binance = normalize_symbol(&f.binance);
+        let mut spellings = vec![binance.clone(), normalize_symbol(&f.symbol)];
+        if let Some(base) = binance.strip_suffix("USDT") {
+            spellings.push(format!("{base}USD"));
+        }
+        for s in spellings {
+            match out.insert(s.clone(), f.id) {
+                Some(other) if other != f.id => {
+                    // Не `unwrap`/`panic` в рантайме: падать на старте из-за
+                    // справочника — это стоп сервиса, который у нас не применяется
+                    // нигде (КОНТРАКТЫ §4в). Но и молчать нельзя.
+                    eprintln!(
+                        "[gateway] КОЛЛИЗИЯ СИМВОЛОВ: «{s}» указывает и на {other}, и на {}; \
+                         разрешения по этому символу недостоверны",
+                        f.id
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Список сайта после сопоставления символов внутренним id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TenantAllowList {
+    /// Список получен и сопоставлен целиком. Пустой вектор — валидное значение
+    /// «сайту не разрешено ничего» (Р-025), а не «фильтра нет».
+    Resolved(Vec<u32>),
+    /// В списке есть символ, которого терминал не знает.
+    ///
+    /// Выбросить его молча нельзя: разрешённое значение исчезло бы из прав, и
+    /// **никто бы об этом не узнал** — тихое сужение прав на регуляторной границе
+    /// (Р-024). Поэтому отказ, а не пропуск, и отказ на весь список сайта: частично
+    /// сопоставленный список — это уже не тот список, который прислал источник.
+    Unknown(Vec<String>),
+}
+
+impl TenantAllowList {
+    /// Сопоставить присланные символы внутренним id.
+    fn resolve(index: &HashMap<String, u32>, symbols: &[String]) -> Self {
+        let mut ids = Vec::with_capacity(symbols.len());
+        let mut unknown = Vec::new();
+        for s in symbols {
+            match index.get(&normalize_symbol(s)) {
+                Some(id) => ids.push(*id),
+                None => unknown.push(s.clone()),
+            }
+        }
+        if unknown.is_empty() {
+            ids.sort_unstable();
+            ids.dedup();
+            TenantAllowList::Resolved(ids)
+        } else {
+            TenantAllowList::Unknown(unknown)
+        }
+    }
+}
+
+/// Почему списка нет. Коды наружу разные: причины чинятся по-разному (§4б).
+enum NoList {
+    /// Источник не ответил, ответил отказом или не сказал про инструменты вовсе.
+    Unavailable,
+    /// Источник ответил, но список содержит неизвестные символы.
+    Unreadable,
+}
+
+impl NoList {
+    fn api(&self) -> ApiErr {
+        match self {
+            // 503, а не 403: список не «сказал нет», его просто нет.
+            NoList::Unavailable => err(StatusCode::SERVICE_UNAVAILABLE, "tenant_instruments_unavailable"),
+            // Тоже закрыто, но чинится правкой списка в CMS, а не связью.
+            NoList::Unreadable => err(StatusCode::SERVICE_UNAVAILABLE, "tenant_instruments_unreadable"),
+        }
+    }
+}
+
+/// Откуда терминал берёт allow-list сайта.
+///
+/// Порядок выбора объявляется в логе на старте: источник, выбранный молча, —
+/// это источник, о котором никто не знает.
+enum TenantSource {
+    /// Живая CMS: `GET {base}/cms/sites/{slug}` под `X-API-Key`, сервер-сервер.
+    ///
+    /// Читаем **на каждую проверку границы**, без кеша: торговая граница читает
+    /// конфиг живым (Р-030), а бессрочного last-good здесь не будет — список
+    /// меняется ровно потому, что меняются разрешения (§4б).
+    Cms { base: String, api_key: String, http: reqwest::Client },
+    /// Статический список из окружения — для разработки и офлайна.
+    Static(HashMap<String, TenantAllowList>),
+    /// Источника нет. В тенантном режиме это закрытая торговля, а не «всё можно».
+    None,
+}
+
+impl TenantSource {
+    fn from_env(index: &HashMap<String, u32>) -> Self {
+        let base = std::env::var("CMS_BASE_URL").unwrap_or_default().trim_end_matches('/').to_string();
+        let api_key = std::env::var("CMS_API_KEY").unwrap_or_default();
+        if !base.is_empty() && !api_key.is_empty() {
+            println!("[gateway] allow-list: источник — CMS {base}/cms/sites/{{slug}} (сервер-сервер, X-API-Key)");
+            let http = reqwest::Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap_or_default();
+            return TenantSource::Cms { base, api_key, http };
+        }
+        if !base.is_empty() || !api_key.is_empty() {
+            eprintln!("[gateway] allow-list: CMS сконфигурирована наполовину (нужны и CMS_BASE_URL, и CMS_API_KEY) — источник CMS не используется");
+        }
+        match parse_tenant_instruments(std::env::var("TENANT_INSTRUMENTS").ok().as_deref(), index) {
+            Some(map) => {
+                println!("[gateway] allow-list: источник — TENANT_INSTRUMENTS, сайтов {}", map.len());
+                TenantSource::Static(map)
+            }
+            None => {
+                println!("[gateway] allow-list: источника нет — в тенантном режиме торговля закрыта (fail-closed)");
+                TenantSource::None
+            }
+        }
+    }
+
+    /// Список сайта. Любой отказ закрывает торговлю и называет причину в логе.
+    async fn allow_list(&self, site: &str, index: &HashMap<String, u32>) -> Result<Vec<u32>, NoList> {
+        let list = match self {
+            TenantSource::None => {
+                eprintln!("[gateway] {site}: источник allow-list не сконфигурирован — торговля закрыта");
+                return Err(NoList::Unavailable);
+            }
+            TenantSource::Static(map) => match map.get(site) {
+                Some(l) => l.clone(),
+                None => {
+                    eprintln!("[gateway] {site}: сайта нет в allow-list — торговля закрыта");
+                    return Err(NoList::Unavailable);
+                }
+            },
+            TenantSource::Cms { base, api_key, http } => {
+                let url = format!("{base}/cms/sites/{site}");
+                let resp = http.get(&url).header("X-API-Key", api_key).send().await;
+                let resp = match resp {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("[gateway] {site}: CMS недоступна ({e}) — торговля закрыта");
+                        return Err(NoList::Unavailable);
+                    }
+                };
+                if !resp.status().is_success() {
+                    // Разные причины, один исход: списка нет. В логе причина видна,
+                    // чтобы «ключ не приняли» не чинили как «сайта не существует».
+                    eprintln!("[gateway] {site}: CMS ответила {} — торговля закрыта", resp.status());
+                    return Err(NoList::Unavailable);
+                }
+                let body: SiteConfigDto = match resp.json().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("[gateway] {site}: ответ CMS не разобран ({e}) — торговля закрыта");
+                        return Err(NoList::Unavailable);
+                    }
+                };
+                match body.instruments {
+                    // Отсутствие поля — это «источник ничего не сказал», а не
+                    // «ничего не разрешено» и тем более не «разрешено всё».
+                    None => {
+                        eprintln!("[gateway] {site}: в ответе CMS нет поля instruments — список неизвестен, торговля закрыта");
+                        return Err(NoList::Unavailable);
+                    }
+                    Some(symbols) => TenantAllowList::resolve(index, &symbols),
+                }
+            }
+        };
+        match list {
+            TenantAllowList::Resolved(ids) => Ok(ids),
+            TenantAllowList::Unknown(unknown) => {
+                eprintln!(
+                    "[gateway] {site}: allow-list содержит неизвестные терминалу символы [{}] — \
+                     список не принят целиком, торговля закрыта. Молча выбросить их значило бы \
+                     тихо сузить права (Р-024)",
+                    unknown.join(", ")
+                );
+                Err(NoList::Unreadable)
+            }
+        }
+    }
+}
+
+/// Ответ `GET /v1/cms/sites/{slug}`. Разбираем мягко: неизвестные поля игнорируем,
+/// но **отсутствие** `instruments` отличаем от пустого списка — это разные
+/// утверждения («не сказали» против «не разрешено ничего»).
+#[derive(Deserialize)]
+struct SiteConfigDto {
+    #[serde(default)]
+    instruments: Option<Vec<String>>,
+}
+
+/// Разобрать статический источник allow-list: `site:BTCUSD,ETHUSD;other:XRPUSD`.
 ///
 /// `None` — переменная не задана (источника нет). Пустой список у сайта — валидное
 /// значение и означает «сайту не разрешено ничего», а не «фильтра нет».
-fn parse_tenant_instruments(raw: Option<&str>) -> Option<HashMap<String, Vec<u32>>> {
+fn parse_tenant_instruments(raw: Option<&str>, index: &HashMap<String, u32>) -> Option<HashMap<String, TenantAllowList>> {
     let raw = raw?.trim();
     if raw.is_empty() {
         return None;
     }
-    let mut out: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut out: HashMap<String, TenantAllowList> = HashMap::new();
     for site_part in raw.split(';').filter(|p| !p.trim().is_empty()) {
-        let (site, ids) = site_part.split_once(':').unwrap_or((site_part, ""));
-        let ids = ids
+        let (site, symbols) = site_part.split_once(':').unwrap_or((site_part, ""));
+        let symbols: Vec<String> = symbols
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse::<u32>().ok())
+            .map(str::to_string)
             .collect();
-        out.insert(site.trim().to_string(), ids);
+        out.insert(site.trim().to_string(), TenantAllowList::resolve(index, &symbols));
     }
     Some(out)
 }
@@ -269,18 +510,15 @@ struct Principal {
 /// Разные юрисдикции разрешают разное, и отказ инфраструктуры не должен
 /// превращаться в разрешение. Отличаем «списка нет» от «в списке нет»: обе ветки
 /// запрещают, но чинятся по-разному, и человек должен видеть причину.
-fn ensure_can_open(st: &AppState, who: &Principal, instrument: u32) -> Result<(), ApiErr> {
+async fn ensure_can_open(st: &AppState, who: &Principal, instrument: u32) -> Result<(), ApiErr> {
     let Some(tenant) = who.tenant.as_deref() else {
         return Ok(()); // standalone: сайта нет, ограничивать нечем и не от чьего имени
     };
-    let Some(map) = st.tenant_instruments.as_ref() else {
-        eprintln!("[gateway] {tenant}: источник allow-list не сконфигурирован — торговля закрыта");
-        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "tenant_instruments_unavailable"));
-    };
-    let Some(allowed) = map.get(tenant) else {
-        eprintln!("[gateway] {tenant}: сайта нет в allow-list — торговля закрыта");
-        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "tenant_instruments_unavailable"));
-    };
+    let allowed = st
+        .tenant_instruments
+        .allow_list(tenant, &st.symbols)
+        .await
+        .map_err(|e| e.api())?;
     if allowed.contains(&instrument) {
         Ok(())
     } else {
@@ -532,13 +770,18 @@ fn now_secs() -> i64 {
 async fn list_instruments(State(st): State<AppState>, Query(q): Query<SiteQuery>) -> Result<Json<Vec<InstrumentDto>>, ApiErr> {
     let allowed: Option<Vec<u32>> = match q.site.as_deref().filter(|s| !s.is_empty()) {
         None => None,
-        Some(site) => match st.tenant_instruments.as_ref().as_ref().and_then(|m| m.get(site)) {
-            Some(list) => Some(list.clone()),
-            None => {
-                eprintln!("[gateway] {site}: нет allow-list — список инструментов не отдаём");
-                return Err(err(StatusCode::SERVICE_UNAVAILABLE, "tenant_instruments_unavailable"));
+        Some(site) => {
+            let list = st.tenant_instruments.allow_list(site, &st.symbols).await.map_err(|e| e.api())?;
+            if list.is_empty() {
+                // «Пустой список инструментов не отдаётся никогда» (КОНТРАКТЫ §4б).
+                // Сайту действительно ничего не разрешено (Р-025) — но пустой массив
+                // в ответе неотличим от «конфиг не доехал», а исчезновение витрины
+                // без объяснения запрещено. Поэтому окончательное «нет» кодом.
+                eprintln!("[gateway] {site}: allow-list пуст — сайту не разрешён ни один инструмент");
+                return Err(err(StatusCode::FORBIDDEN, "no_instruments_allowed"));
             }
-        },
+            Some(list)
+        }
     };
     let tickers = st.tickers.lock().await;
     let out = st
@@ -664,7 +907,7 @@ async fn get_stats(State(st): State<AppState>, Path(id): Path<u32>) -> Result<Js
 /// Открыть сделку по текущей рыночной цене (buy=ask, sell=bid).
 async fn open_deal(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<DealReq>) -> Result<Json<DealDto>, ApiErr> {
     let who = require_principal(&st, &headers).await?;
-    ensure_can_open(&st, &who, req.instrument)?;
+    ensure_can_open(&st, &who, req.instrument).await?;
     let user = who.user;
     let side = match req.side.as_str() {
         "buy" => PosSide::Long,
@@ -696,7 +939,7 @@ async fn place_pending(State(st): State<AppState>, headers: HeaderMap, Json(req)
     // Лимитный ордер — такой же путь открытия позиции, только отложенный во времени.
     // Проверять только рыночный вход значило бы оставить дверь рядом с турникетом.
     let who = require_principal(&st, &headers).await?;
-    ensure_can_open(&st, &who, req.instrument)?;
+    ensure_can_open(&st, &who, req.instrument).await?;
     let user = who.user;
     let side = match req.side.as_str() {
         "buy" => PosSide::Long,
@@ -937,20 +1180,24 @@ mod allow_list_tests {
     const SITE: &str = "apex-ru";
 
     /// Роутер в тенантном режиме с готовой сессией сайта `apex-ru`.
-    async fn tenant_app(map: Option<HashMap<String, Vec<u32>>>) -> (Router, String) {
+    async fn tenant_app(source: TenantSource) -> (Router, String) {
         let mut st = build_state();
         st.sso = Arc::new(sso::Sso::new("http://jwks.invalid/jwks".into()));
         st.sso_enabled = true;
-        st.tenant_instruments = Arc::new(map);
+        st.tenant_instruments = Arc::new(source);
         let token = "session-token".to_string();
         st.sso.mint(token.clone(), DEFAULT_USER, SITE.to_string()).await;
         (router(st), token)
     }
 
-    fn allow(site: &str, ids: &[u32]) -> HashMap<String, Vec<u32>> {
+    /// Источник, выдающий сайту перечисленные **символы** — ровно в той форме, в
+    /// какой их присылает CMS. Перевод в id идёт через ту же границу, что в бою.
+    fn allow(site: &str, symbols: &[&str]) -> TenantSource {
+        let index = symbol_index(&feed::instruments());
+        let list = TenantAllowList::resolve(&index, &symbols.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         let mut m = HashMap::new();
-        m.insert(site.to_string(), ids.to_vec());
-        m
+        m.insert(site.to_string(), list);
+        TenantSource::Static(m)
     }
 
     async fn post(app: &Router, uri: &str, token: Option<&str>, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
@@ -986,25 +1233,87 @@ mod allow_list_tests {
 
     // ---- Разбор источника ---------------------------------------------------
 
+    fn index() -> HashMap<String, u32> {
+        symbol_index(&feed::instruments())
+    }
+
     #[test]
     fn parses_source() {
-        let m = parse_tenant_instruments(Some("apex-ru:1,2,3;other:4")).expect("источник задан");
-        assert_eq!(m.get("apex-ru"), Some(&vec![1, 2, 3]));
-        assert_eq!(m.get("other"), Some(&vec![4]));
+        let m = parse_tenant_instruments(Some("apex-ru:BTCUSD,ETHUSD,BNBUSD;other:XRPUSD"), &index())
+            .expect("источник задан");
+        assert_eq!(m.get("apex-ru"), Some(&TenantAllowList::Resolved(vec![1, 2, 3])));
+        assert_eq!(m.get("other"), Some(&TenantAllowList::Resolved(vec![5])));
     }
 
     /// Пустой список у сайта — валидное значение «сайту не разрешено ничего»,
     /// а не «фильтра нет». Разница регуляторная, поэтому проверяем отдельно.
     #[test]
     fn empty_list_is_a_value_not_absence() {
-        let m = parse_tenant_instruments(Some("apex-ru:")).expect("источник задан");
-        assert_eq!(m.get("apex-ru"), Some(&vec![]));
+        let m = parse_tenant_instruments(Some("apex-ru:"), &index()).expect("источник задан");
+        assert_eq!(m.get("apex-ru"), Some(&TenantAllowList::Resolved(vec![])));
     }
 
     #[test]
     fn absent_source_is_none() {
-        assert!(parse_tenant_instruments(None).is_none());
-        assert!(parse_tenant_instruments(Some("   ")).is_none());
+        assert!(parse_tenant_instruments(None, &index()).is_none());
+        assert!(parse_tenant_instruments(Some("   "), &index()).is_none());
+    }
+
+    // ---- Р-024: контракт — символы, перевод в id стоит у нас ----------------
+
+    /// Символы, которыми инструмент называют снаружи, ведут к одному и тому же
+    /// внутреннему id: канонический платформенный (`BTCUSD`, так хранит CMS и
+    /// отдаёт MDS), биржевой (`BTCUSDT`) и показанный на витрине (`BTC-USDT`).
+    #[test]
+    fn symbol_maps_to_internal_id() {
+        let idx = index();
+        for s in ["BTCUSD", "BTCUSDT", "BTC-USDT", "btcusd", "btc-usdt"] {
+            assert_eq!(idx.get(&normalize_symbol(s)), Some(&1), "символ {s} обязан указывать на инструмент 1");
+        }
+        assert_eq!(idx.get(&normalize_symbol("MANAUSD")), Some(&30));
+    }
+
+    /// Нормализация снимает только оформление. Если она начнёт склеивать разные
+    /// имена, два инструмента отзовутся на один символ — и разрешения поплывут
+    /// молча. Этот тест и есть доказательство, что такого не происходит.
+    #[test]
+    fn symbol_index_has_no_collisions() {
+        let instruments = feed::instruments();
+        let idx = symbol_index(&instruments);
+        // У каждого инструмента ровно два различимых написания: XXXUSDT и XXXUSD
+        // (`XXX-USDT` после нормализации совпадает с первым).
+        assert_eq!(idx.len(), instruments.len() * 2, "каждый символ обязан указывать ровно на один инструмент");
+        for f in &instruments {
+            assert_eq!(idx.get(&normalize_symbol(&f.binance)), Some(&f.id));
+            assert_eq!(idx.get(&normalize_symbol(&f.symbol)), Some(&f.id));
+        }
+    }
+
+    /// **Главный пункт Р-024.** Неизвестный символ — отказ, а не пропуск.
+    ///
+    /// Молча выбросить его значило бы тихо сузить права: разрешённый инструмент
+    /// исчез бы из списка, и никто бы об этом не узнал. Поэтому не принимается
+    /// **весь** список сайта: частично сопоставленный список — это уже не тот
+    /// список, который прислал источник.
+    #[test]
+    fn unknown_symbol_rejects_the_whole_list() {
+        let list = TenantAllowList::resolve(&index(), &["BTCUSD".into(), "XAUUSD".into(), "ETHUSD".into()]);
+        match list {
+            TenantAllowList::Unknown(unknown) => assert_eq!(unknown, vec!["XAUUSD".to_string()]),
+            TenantAllowList::Resolved(ids) => {
+                panic!("неизвестный символ не должен молча исчезать, а список — сужаться до {ids:?}")
+            }
+        }
+    }
+
+    /// Нераспознанный символ закрывает торговлю, и причина отличается от
+    /// «источника нет»: чинится правкой списка в CMS, а не связью с ней.
+    #[tokio::test]
+    async fn unknown_symbol_closes_trading_with_its_own_reason() {
+        let (app, tok) = tenant_app(allow(SITE, &["BTCUSD", "XAUUSD"])).await;
+        let (status, b) = post(&app, "/deals", Some(&tok), deal(1)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "список с неизвестным символом не принимается целиком");
+        assert_eq!(b["error"], "tenant_instruments_unreadable", "причина обязана отличаться от «источника нет»");
     }
 
     // ---- Граница: открытие позиции -----------------------------------------
@@ -1012,7 +1321,7 @@ mod allow_list_tests {
     /// Рыночный вход по инструменту вне списка сайта — 403.
     #[tokio::test]
     async fn open_deal_rejects_instrument_outside_allow_list() {
-        let (app, tok) = tenant_app(Some(allow(SITE, &[1]))).await;
+        let (app, tok) = tenant_app(allow(SITE, &["BTCUSD"])).await;
         let (status, body) = post(&app, "/deals", Some(&tok), deal(2)).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "инструмент вне allow-list не должен торговаться");
         assert_eq!(body["error"], "instrument_not_allowed");
@@ -1021,7 +1330,7 @@ mod allow_list_tests {
     /// Лимитный ордер — тот же путь открытия позиции. Дверь рядом с турникетом.
     #[tokio::test]
     async fn pending_rejects_instrument_outside_allow_list() {
-        let (app, tok) = tenant_app(Some(allow(SITE, &[1]))).await;
+        let (app, tok) = tenant_app(allow(SITE, &["BTCUSD"])).await;
         let (status, body) = post(&app, "/pending", Some(&tok), pending(2)).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "отложенный ордер обязан проверяться так же, как рыночный");
         assert_eq!(body["error"], "instrument_not_allowed");
@@ -1030,7 +1339,7 @@ mod allow_list_tests {
     /// Разрешённый инструмент проходит границу (лимитный ордер не требует живой цены).
     #[tokio::test]
     async fn allowed_instrument_passes() {
-        let (app, tok) = tenant_app(Some(allow(SITE, &[1]))).await;
+        let (app, tok) = tenant_app(allow(SITE, &["BTCUSD"])).await;
         let (status, _) = post(&app, "/pending", Some(&tok), pending(1)).await;
         assert_eq!(status, StatusCode::OK, "разрешённый инструмент обязан торговаться");
     }
@@ -1038,7 +1347,7 @@ mod allow_list_tests {
     /// Пустой список запрещает всё — включая инструмент №1.
     #[tokio::test]
     async fn empty_allow_list_denies_everything() {
-        let (app, tok) = tenant_app(Some(allow(SITE, &[]))).await;
+        let (app, tok) = tenant_app(allow(SITE, &[])).await;
         let (status, _) = post(&app, "/deals", Some(&tok), deal(1)).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
@@ -1049,7 +1358,7 @@ mod allow_list_tests {
     /// Отказ инфраструктуры не должен превращаться в разрешение.
     #[tokio::test]
     async fn missing_source_closes_trading() {
-        let (app, tok) = tenant_app(None).await;
+        let (app, tok) = tenant_app(TenantSource::None).await;
         for (uri, body) in [("/deals", deal(1)), ("/pending", pending(1))] {
             let (status, b) = post(&app, uri, Some(&tok), body).await;
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}: без конфига торговли быть не должно");
@@ -1060,7 +1369,7 @@ mod allow_list_tests {
     /// Сайта нет в реестре → тоже закрыто, и причина та же: списка нет.
     #[tokio::test]
     async fn unknown_site_closes_trading() {
-        let (app, tok) = tenant_app(Some(allow("some-other-site", &[1, 2]))).await;
+        let (app, tok) = tenant_app(allow("some-other-site", &["BTCUSD", "ETHUSD"])).await;
         let (status, b) = post(&app, "/deals", Some(&tok), deal(1)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(b["error"], "tenant_instruments_unavailable");
@@ -1074,7 +1383,7 @@ mod allow_list_tests {
     /// (позиции нет), а не 403.
     #[tokio::test]
     async fn closing_is_never_blocked_by_allow_list() {
-        let (app, tok) = tenant_app(Some(allow(SITE, &[]))).await;
+        let (app, tok) = tenant_app(allow(SITE, &[])).await;
         let (status, _) = post(&app, "/deals/1/close", Some(&tok), serde_json::Value::Null).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "закрытие не должно упираться в allow-list");
     }
@@ -1084,7 +1393,7 @@ mod allow_list_tests {
     /// торговые ручки подряд, покраснеет один из этих двух.
     #[tokio::test]
     async fn cancelling_is_never_blocked_by_allow_list() {
-        let (app, tok) = tenant_app(Some(allow(SITE, &[]))).await;
+        let (app, tok) = tenant_app(allow(SITE, &[])).await;
         let req = Request::builder()
             .method("DELETE")
             .uri("/pending/1")
@@ -1101,7 +1410,7 @@ mod allow_list_tests {
     /// одним запросом, отдельной «ручки закрытия» для неё не требуется.
     #[tokio::test]
     async fn sl_tp_travel_with_the_position_not_as_orders() {
-        let (app, tok) = tenant_app(Some(allow(SITE, &[1]))).await;
+        let (app, tok) = tenant_app(allow(SITE, &["BTCUSD"])).await;
         let body = serde_json::json!({"instrument": 1, "side": "buy", "qty": 100, "price": 1000, "sl": 900, "tp": 1200});
         let (status, v) = post(&app, "/pending", Some(&tok), body).await;
         assert_eq!(status, StatusCode::OK);
@@ -1112,7 +1421,7 @@ mod allow_list_tests {
     /// Чтение позиций и счёта сайтом не ограничивается.
     #[tokio::test]
     async fn reading_account_is_not_blocked() {
-        let (app, tok) = tenant_app(Some(allow(SITE, &[]))).await;
+        let (app, tok) = tenant_app(allow(SITE, &[])).await;
         let (status, _) = get(&app, "/account", Some(&tok)).await;
         assert_eq!(status, StatusCode::OK);
     }
@@ -1121,7 +1430,7 @@ mod allow_list_tests {
 
     #[tokio::test]
     async fn instruments_listing_filtered_by_site() {
-        let (app, _) = tenant_app(Some(allow(SITE, &[2, 3]))).await;
+        let (app, _) = tenant_app(allow(SITE, &["ETHUSD", "BNBUSD"])).await;
         let (status, body) = get(&app, "/instruments?site=apex-ru", None).await;
         assert_eq!(status, StatusCode::OK);
         let ids: Vec<u64> = body.as_array().unwrap().iter().map(|i| i["id"].as_u64().unwrap()).collect();
@@ -1132,16 +1441,27 @@ mod allow_list_tests {
     /// список читается как «сайту нечем торговать» (BUG-011).
     #[tokio::test]
     async fn instruments_listing_fails_loudly_without_config() {
-        let (app, _) = tenant_app(None).await;
+        let (app, _) = tenant_app(TenantSource::None).await;
         let (status, b) = get(&app, "/instruments?site=apex-ru", None).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(b["error"], "tenant_instruments_unavailable");
     }
 
+    /// Сайту не разрешено ничего — витрина говорит это кодом, а не пустым массивом.
+    /// Пустой список в ответе неотличим от «конфиг не доехал» (§4б), а молчаливое
+    /// исчезновение витрины запрещено отдельно (Р-025).
+    #[tokio::test]
+    async fn empty_allow_list_is_said_out_loud_not_rendered_as_empty() {
+        let (app, _) = tenant_app(allow(SITE, &[])).await;
+        let (status, b) = get(&app, "/instruments?site=apex-ru", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "пустой список инструментов не отдаётся никогда");
+        assert_eq!(b["error"], "no_instruments_allowed");
+    }
+
     /// Без `?site=` витрина отдаёт всё: это standalone-режим, юрисдикции нет.
     #[tokio::test]
     async fn instruments_listing_unfiltered_without_site() {
-        let (app, _) = tenant_app(Some(allow(SITE, &[1]))).await;
+        let (app, _) = tenant_app(allow(SITE, &["BTCUSD"])).await;
         let (status, body) = get(&app, "/instruments", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body.as_array().unwrap().len(), feed::instruments().len());

@@ -55,6 +55,27 @@ impl SsoError {
     }
 }
 
+/// Причина отказа — **фиксированной меткой**, а не текстом ошибки библиотеки:
+/// текст может утащить в лог кусок разбираемого токена, а метка не может.
+///
+/// Метки нужны, чтобы живой прогон мог отличить «не сошлась подпись» от «токен
+/// не нам»: снаружи оба 401, и без этой строки проверка пунктов 2 и 3 чеклиста
+/// на контуре была бы неотличима от проверки подписи.
+fn reject_reason(kind: &jsonwebtoken::errors::ErrorKind) -> &'static str {
+    use jsonwebtoken::errors::ErrorKind as K;
+    match kind {
+        K::InvalidSignature => "подпись не сошлась",
+        K::InvalidIssuer => "чужой iss (токен выпущен не платформой)",
+        K::InvalidAudience => "чужой aud (токен выпущен не для терминала)",
+        K::ExpiredSignature => "истёк exp",
+        K::ImmatureSignature => "ещё не вступил в силу (nbf)",
+        K::MissingRequiredClaim(_) => "нет обязательного claim",
+        K::InvalidAlgorithm => "алгоритм не RS256",
+        K::InvalidToken | K::Base64(_) | K::Json(_) | K::Utf8(_) => "токен не разобран",
+        _ => "прочее",
+    }
+}
+
 struct JwksCache {
     keys: HashMap<String, DecodingKey>,
     fetched: Instant,
@@ -164,7 +185,15 @@ impl Sso {
         v.set_issuer(&["platform-auth"]);
         v.set_audience(&["terminal"]);
         v.set_required_spec_claims(&["exp", "aud", "iss"]);
-        let data = decode::<Claims>(token, &key, &v).map_err(|_| SsoError::BadToken)?;
+        let data = decode::<Claims>(token, &key, &v).map_err(|e| {
+            // Наружу по-прежнему один код (401): различать для клиента, что именно
+            // не сошлось, — значит подсказывать подбирающему. Но **в лог** причина
+            // обязана попадать: сегодня подпись, чужой `iss`, чужой `aud` и
+            // просрочка были неотличимы ни снаружи, ни изнутри, и разбирать живой
+            // отказ было нечем (правило «ошибку не глушат, её показывают»).
+            eprintln!("[sso] handoff-токен отвергнут: {}", reject_reason(e.kind()));
+            SsoError::BadToken
+        })?;
         let claims = data.claims;
 
         if claims.tenant != expected_site {

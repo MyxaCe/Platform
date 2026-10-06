@@ -46,6 +46,15 @@ services:
       # Стартовый баланс демо-счёта (центы). Dev выровнен под apex-ru = $10k, чтобы «Обзор»
       # кабинета сходился. Целевое — per-tenant demoStartBalanceCents из CMS (ADR-023).
       DEMO_START_BALANCE_CENTS: ${DEMO_START_BALANCE_CENTS:-1000000}
+      # Allow-list инструментов per-site (регуляторика, Р-024). Источник — CMS,
+      # сервер-сервер под X-API-Key: GET {CMS_BASE_URL}/cms/sites/{slug}, поле
+      # instruments — плоский список СИМВОЛОВ, которые терминал сам сопоставляет
+      # своим внутренним id. Ключ приходит из окружения, в репозитории его нет.
+      # Обе пусты → источник CMS не используется; дальше TENANT_INSTRUMENTS
+      # (тоже символами); если и его нет — fail-closed (КОНТРАКТЫ §4б).
+      CMS_BASE_URL: ${CMS_BASE_URL:-}
+      CMS_API_KEY: ${CMS_API_KEY:-}
+      TENANT_INSTRUMENTS: ${TENANT_INSTRUMENTS:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
