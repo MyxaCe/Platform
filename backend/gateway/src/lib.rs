@@ -794,7 +794,16 @@ struct InstrumentDto {
     bid: Option<i64>,
     ask: Option<i64>,
     high: Option<i64>,
-    change: f64,
+    /// `None` — котировки по инструменту ещё нет, изменение **неизвестно**.
+    ///
+    /// Было `f64` с `unwrap_or(0.0)`: инструмент без тикера отдавал «0%», и
+    /// витрина рисовала зелёное «+0.00%» — «рынок стоял» вместо «мы не знаем».
+    /// Соседние поля на той же строке (`last`, `bid`, `ask`, `high`) всё это
+    /// время были честными `Option`, и врало ровно одно поле из пяти.
+    ///
+    /// То же решение, что у `/stats`, где `change` обнуляем с самого начала:
+    /// два ответа одного сервиса про одну величину обязаны говорить одинаково.
+    change: Option<f64>,
 }
 #[derive(Serialize)]
 struct DepthResp {
@@ -909,7 +918,7 @@ async fn list_instruments(State(st): State<AppState>, Query(q): Query<SiteQuery>
                 id: f.id, symbol: f.symbol.clone(), base: f.base, quote: f.quote,
                 price_decimals: f.price_decimals, qty_decimals: f.qty_decimals,
                 last: t.map(|t| t.last), bid: t.map(|t| t.bid), ask: t.map(|t| t.ask),
-                high: t.map(|t| t.high), change: t.map(|t| t.change).unwrap_or(0.0),
+                high: t.map(|t| t.high), change: t.map(|t| t.change),
             }
         })
         .collect();
@@ -1669,6 +1678,27 @@ mod allow_list_tests {
         let (status, b) = get(&app, "/instruments?site=apex-ru", None).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "пустой список инструментов не отдаётся никогда");
         assert_eq!(b["error"], "no_instruments_allowed");
+    }
+
+    /// Инструмент без котировки не отдаёт «0%»: изменение неизвестно.
+    ///
+    /// Самый дорогой класс у нас — отказ, надевший правдоподобное значение.
+    /// Здесь он стоял в поле, которое витрина красит зелёным: «+0.00%»
+    /// читается как «рынок стоял», тогда как известно только «тикера нет».
+    /// Четыре соседних поля той же строки врать не умели никогда.
+    #[tokio::test]
+    async fn change_is_unknown_not_zero_when_there_is_no_ticker() {
+        let (app, _) = tenant_app(allow(SITE, &["BTCUSD"])).await;
+        let (status, body) = get(&app, "/instruments?site=apex-ru", None).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let row = &body.as_array().expect("список")[0];
+        assert!(row["last"].is_null(), "предпосылка теста: тикера нет");
+        assert!(
+            row["change"].is_null(),
+            "изменение без котировки обязано быть null, а не {}",
+            row["change"]
+        );
     }
 
     /// Без `?site=` витрина отдаёт всё: это standalone-режим, юрисдикции нет.

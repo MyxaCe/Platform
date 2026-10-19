@@ -6,6 +6,9 @@
     "test": "node --test tests/*.test.js"
   },
   "devDependencies": {
-    "jsdom": "^26.1.0"
+    "jsdom": "^26.1.0",
+    "lightweight-charts": "^4.2.0",
+    "puppeteer-core": "^24.10.2",
+    "ws": "^8.18.2"
   }
 }
