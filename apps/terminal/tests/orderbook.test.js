@@ -72,21 +72,59 @@ const side = (root, cls) => [...root.querySelectorAll(`.${cls} .brow`)].map((r) 
 
 // ---- Группировка: свойства, а не снимок -----------------------------------
 
+/**
+ * Стакан, который ЕСТЬ ЧЕМ сломать.
+ *
+ * Первая редакция этих тестов была зелёной и ничего не проверяла: цены фикстуры
+ * были кратны шагу группировки, корзины совпадали с уровнями один в один, и
+ * обе проверки — сохранение объёма и направление округления — выполнялись
+ * тождественно при любой формуле. Мутация «округлять биды вверх» не покрасила
+ * ничего; это её и выдало.
+ *
+ * Здесь цены шагу НЕ кратны и в каждую корзину попадает больше одного уровня.
+ */
+function unaligned() {
+  return {
+    price_decimals: 2,
+    qty_decimals: 5,
+    bids: [[1000050, 200000], [1000020, 100000], [999970, 300000]],
+    asks: [[1000130, 150000], [1000160, 250000], [1000210, 50000]],
+  };
+}
+
+/** Шаг 100 raw-единиц = 1.00 в цене. */
+function grouped(env, over) {
+  env.window.localStorage.setItem('ob.settings', JSON.stringify({ rounding: true, groupMul: 100 }));
+  return mount(env, Object.assign({ fetch: async () => unaligned() }, over || {}));
+}
+
+test('фикстура группировки действительно сливает уровни', async (t) => {
+  // Отдельная проверка на вырожденность данных: без неё соседние тесты
+  // остаются зелёными на любой формуле, и это уже случилось один раз.
+  const env = setup();
+  t.after(env.cleanup);
+  grouped(env);
+  await settle();
+
+  assert.ok(
+    side(env.root, 'bids').length < unaligned().bids.length,
+    'корзин должно стать меньше, чем уровней, иначе группировка не выполнялась',
+  );
+  assert.ok(side(env.root, 'asks').length < unaligned().asks.length);
+});
+
 test('группировка сохраняет объём: ликвидность перекладывается, а не исчезает', async (t) => {
   const env = setup();
   t.after(env.cleanup);
-
-  // Шаг 100 raw-единиц = 1.00 в цене: три уровня бидов сливаются в один-два.
-  env.window.localStorage.setItem('ob.settings', JSON.stringify({ rounding: true, groupMul: 100 }));
-  mount(env);
+  grouped(env);
   await settle();
 
-  const sum = (rows) => rows.reduce((s, r) => s + Number(r.qty), 0);
-  const d = depth();
+  const d = unaligned();
+  const shown = (rows) => rows.reduce((s, r) => s + Number(r.qty), 0);
   const raw = (list) => list.reduce((s, [, q]) => s + q, 0) / 10 ** d.qty_decimals;
 
-  assert.ok(Math.abs(sum(side(env.root, 'bids')) - raw(d.bids)) < 1e-9, 'объём бидов сохранён');
-  assert.ok(Math.abs(sum(side(env.root, 'asks')) - raw(d.asks)) < 1e-9, 'объём асков сохранён');
+  assert.ok(Math.abs(shown(side(env.root, 'bids')) - raw(d.bids)) < 1e-9, 'объём бидов сохранён');
+  assert.ok(Math.abs(shown(side(env.root, 'asks')) - raw(d.asks)) < 1e-9, 'объём асков сохранён');
 });
 
 test('группировка не показывает цену лучше существующей', async (t) => {
@@ -95,12 +133,10 @@ test('группировка не показывает цену лучше су�
   // нет, и по этой цене ставят заявку.
   const env = setup();
   t.after(env.cleanup);
-
-  env.window.localStorage.setItem('ob.settings', JSON.stringify({ rounding: true, groupMul: 100 }));
-  mount(env);
+  grouped(env);
   await settle();
 
-  const d = depth();
+  const d = unaligned();
   const bestBid = Math.max(...d.bids.map(([p]) => p)) / 100;
   const bestAsk = Math.min(...d.asks.map(([p]) => p)) / 100;
 
@@ -110,6 +146,22 @@ test('группировка не показывает цену лучше су�
   for (const r of side(env.root, 'asks')) {
     assert.ok(Number(r.price) >= bestAsk, `аск ${r.price} дешевле лучшей заявки ${bestAsk}`);
   }
+});
+
+test('после группировки порядок сторон остаётся противоположным', async (t) => {
+  // Сортировка внутри группировки своя, и порядок в ней задаётся стороной.
+  // Без грубого шага эта ветка не выполняется ни разу.
+  const env = setup();
+  t.after(env.cleanup);
+  grouped(env);
+  await settle();
+
+  const bids = side(env.root, 'bids').map((r) => Number(r.price));
+  const asks = side(env.root, 'asks').map((r) => Number(r.price));
+
+  assert.deepEqual(bids, [...bids].sort((a, b) => b - a), 'биды сверху вниз дешевеют');
+  assert.deepEqual(asks, [...asks].sort((a, b) => b - a), 'аски сверху вниз дешевеют (вывод перевёрнут)');
+  assert.ok(asks[asks.length - 1] > bids[0], 'лучший аск дороже лучшего бида');
 });
 
 test('без группировки уровни остаются как есть', async (t) => {
