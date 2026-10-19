@@ -111,7 +111,12 @@
   function readJson(key, fallback) {
     try {
       return JSON.parse(localStorage.getItem(key)) ?? fallback;
-    } catch {
+    } catch (e) {
+      // Откат к умолчанию здесь правильный — избранное и колонки не стоят
+      // сломанного виджета, — но молчать о нём нельзя: человек увидит, что
+      // настройки «сами сбросились», и не найдёт причины. Приватный режим
+      // сюда не попадает: там бросает сам доступ к localStorage, а не разбор.
+      console.warn(`[watchlist] настройка ${key} испорчена, взято умолчание`, e);
       return fallback;
     }
   }

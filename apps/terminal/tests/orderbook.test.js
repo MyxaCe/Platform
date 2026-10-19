@@ -427,13 +427,142 @@ test('destroy останавливает опрос и очищает стака
   assert.equal(hits, during, 'после destroy источник не дёргается');
 });
 
-// ---- Что сознательно не закреплено ----------------------------------------
+// ---- Разрядность объёма (Р-064) -------------------------------------------
 
-test('число знаков объёма в строке стакана сознательно НЕ закреплено', () => {
-  // `row()` делит объём на `10 ** qd`, а печатает через `toFixed(3)`. Тот же
-  // узор, что в ленте сделок: масштаб берётся у инструмента, разрядность
-  // прибита гвоздём. Повторяется в двух виджетах из двух — похоже на принятое
-  // решение про ширину колонки, а не на описку, и закреплять его тестом до
-  // ответа штаба значило бы объявить решением то, чего никто не решал.
+test('объём уровня показывается со знаками своего инструмента', async (t) => {
+  // Тот же узор, что в ленте сделок, и та же починка: масштаб брался у
+  // инструмента, разрядность была прибита гвоздём (`toFixed(3)`).
+  const env = setup();
+  t.after(env.cleanup);
+  mount(env, {
+    fetch: async () => ({
+      price_decimals: 2, qty_decimals: 5,
+      bids: [[1000000, 120]], asks: [[1000100, 7]],
+    }),
+  });
+  await settle();
+
+  assert.equal(side(env.root, 'bids')[0].qty, '0.00120');
+  assert.equal(side(env.root, 'asks')[0].qty, '0.00007');
+});
+
+test('два разных уровня стакана не выглядят одним числом', async (t) => {
+  // По этому числу ставят заявку: уровни, отличающиеся втрое, обязаны
+  // отличаться и на экране.
+  const env = setup();
+  t.after(env.cleanup);
+  mount(env, {
+    fetch: async () => ({
+      price_decimals: 2, qty_decimals: 5,
+      bids: [[1000000, 60], [999900, 140]], asks: [[1000100, 10]],
+    }),
+  });
+  await settle();
+
+  const shown = side(env.root, 'bids').map((r) => r.qty);
+  assert.equal(new Set(shown).size, 2, `разные объёмы показаны одинаково: ${shown.join(' / ')}`);
+});
+
+// ---- Отказ виден как отказ (TRM-16) ---------------------------------------
+
+test('источник не ответил — метка на стакане, уровни гаснут, но остаются', async (t) => {
+  // Пустой стакан означал бы «ликвидности нет», а это неправда. Прежние уровни
+  // были верны на момент чтения; неправдой было бы показывать их как текущие.
+  const env = setup();
+  t.after(env.cleanup);
+
+  let mode = 'ok';
+  const { book } = mount(env, {
+    fetch: async () => {
+      if (mode === 'throw') throw new Error('сеть');
+      return depth();
+    },
+  });
+  await settle();
+  assert.equal(env.root.getAttribute('data-stale'), null);
+
+  mode = 'throw';
+  await book.refresh();
+  await settle();
+
+  assert.equal(env.root.getAttribute('data-stale'), 'unreachable');
+  assert.match(env.root.title, /не ответил/);
+  assert.equal(side(env.root, 'bids').length, 3, 'уровни на месте');
+});
+
+test('ответ без уровней — своя метка, а не та же, что у обрыва связи', async (t) => {
+  const env = setup();
+  t.after(env.cleanup);
+
+  let mode = 'throw';
+  const { book } = mount(env, {
+    fetch: async () => {
+      if (mode === 'throw') throw new Error('сеть');
+      if (mode === 'junk') return { price_decimals: 2 };
+      return depth();
+    },
+  });
+  await settle();
+  const first = env.root.getAttribute('data-stale');
+
+  mode = 'junk';
+  await book.refresh();
+  await settle();
+  const second = env.root.getAttribute('data-stale');
+
+  assert.equal(second, 'malformed');
+  assert.notEqual(first, second, `обе причины дали одну метку «${first}»`);
+});
+
+test('отказ стакана уходит наружу хосту', async (t) => {
+  const env = setup();
+  t.after(env.cleanup);
+
+  const seen = [];
+  let mode = 'ok';
+  const { book } = mount(env, {
+    onError: (e) => seen.push(e.kind),
+    fetch: async () => {
+      if (mode === 'throw') throw new Error('сеть');
+      return depth();
+    },
+  });
+  await settle();
+  assert.deepEqual(seen, []);
+
+  mode = 'throw';
+  await book.refresh();
+  await settle();
+
+  assert.deepEqual(seen, ['unreachable']);
+});
+
+test('после восстановления метка со стакана снимается', async (t) => {
+  const env = setup();
+  t.after(env.cleanup);
+
+  let mode = 'throw';
+  const { book } = mount(env, {
+    fetch: async () => {
+      if (mode === 'throw') throw new Error('сеть');
+      return depth();
+    },
+  });
+  await settle();
+  assert.equal(env.root.getAttribute('data-stale'), 'unreachable');
+
+  mode = 'ok';
+  await book.refresh();
+  await settle();
+
+  assert.equal(env.root.getAttribute('data-stale'), null);
+  assert.equal(env.root.title, '');
+});
+
+test('метка отказа — атрибут, а не отрисовка: CSS здесь не проверяется', () => {
+  // jsdom не считает стили и не раскладывает страницу, поэтому проверено, что
+  // виджет выставляет `data-stale` и `data-stale-label`, а не что метка видна
+  // глазами. Видимость самой плашки закрывается только живым прогоном в
+  // браузере — тем же, которого ждут `drawings` и postMessage-половина SSO.
   assert.ok(true);
 });

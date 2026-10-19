@@ -68,11 +68,19 @@
       if (tape.length > max) tape.length = max;
       renderMarket();
     }
+    /**
+     * Разрядность объёма берётся у инструмента, как и масштаб (Р-064).
+     *
+     * Было `toFixed(3)` при делении на `10 ** qd`: масштаб свой, точность
+     * прибита гвоздём. При `qd = 5` всё между 0.0005 и 0.0015 показывалось
+     * как «0.001» — два разных объёма на торговом экране выглядели одним.
+     * Если ширина колонки жмёт, сужают отображение, а не значение.
+     */
     function renderMarket() {
       const id = ctx.instrument();
       const { pd, qd } = (ctx.decimals && ctx.decimals(id)) || { pd: 2, qd: 5 };
       rows('market').innerHTML = tape.map((t) =>
-        `<div class="trow"><span class="tp ${t.side === 'sell' ? 'sell' : 'buy'}">${(t.price / 10 ** pd).toFixed(pd)}</span><span>${(t.qty / 10 ** qd).toFixed(3)}</span><span class="muted">${hhmmss(t.at)}</span></div>`
+        `<div class="trow"><span class="tp ${t.side === 'sell' ? 'sell' : 'buy'}">${(t.price / 10 ** pd).toFixed(pd)}</span><span>${(t.qty / 10 ** qd).toFixed(qd)}</span><span class="muted">${hhmmss(t.at)}</span></div>`
       ).join('') || '<div class="trades__empty">Waiting for trades…</div>';
     }
     /** Смена инструмента: старая лента к новой паре отношения не имеет. */

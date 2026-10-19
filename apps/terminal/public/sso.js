@@ -44,13 +44,22 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: jwt, site }),
       });
-      if (!r.ok) { sessionToken = null; emit(); return; }
+      if (!r.ok) {
+        console.error(`[sso] шлюз отклонил handoff-токен: HTTP ${r.status}`);
+        sessionToken = null; emit(); return;
+      }
       const d = await r.json();
       sessionToken = d.token;
       expiresAt = Date.now() + (d.expires_in || 0) * 1000;
       scheduleRefresh(cfg);
       emit();
-    } catch {
+    } catch (e) {
+      // След в состоянии был и раньше (сессия становится пустой, интерфейс
+      // показывает «нет сессии»), а вот ПРИЧИНА терялась: сеть, не-2xx и
+      // непригодный ответ схлопывались в один молчаливый отказ. Наружу
+      // по-прежнему виден один исход — подсказывать подбирающему нечего, —
+      // но изнутри отличить обрыв от отказа шлюза теперь можно.
+      console.error('[sso] обмен handoff-токена не состоялся', e);
       sessionToken = null; emit();
     }
   }

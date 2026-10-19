@@ -147,11 +147,149 @@ test('destroy останавливает опрос и очищает полос
   assert.equal(hits, during, 'после destroy источник не дёргается');
 });
 
-test('мутация «исключение источника глушится молча» здесь непрогоняема', () => {
-  // `refresh` ловит любое исключение и выходит без следа: сетевой блип и
-  // ошибка формы ответа неразличимы, и наружу ни то ни другое не выходит.
-  // Покрасить это тестом нечем — наблюдаемого следа у подавленной диагностики
-  // по определению нет. Это находка, а не свойство теста; вынесена в отчёт
-  // штабу отдельной строкой.
-  assert.ok(true);
+// ---- Отказ виден как отказ (TRM-16) ---------------------------------------
+
+test('источник не ответил — на полосе метка, а не вид свежих чисел', async (t) => {
+  // Было `catch { return; }`: полоса продолжала показывать старые числа как
+  // свежие. Молчаливый отказ надевал вид работающего виджета.
+  const env = setup();
+  t.after(env.cleanup);
+
+  let mode = 'ok';
+  const { widget } = mount(env, {
+    fetch: async () => {
+      if (mode === 'throw') throw new Error('сеть');
+      return [{ tf: 60, change: 2 }];
+    },
+  });
+  await settle();
+  assert.equal(env.root.getAttribute('data-stale'), null, 'пока всё хорошо — метки нет');
+
+  mode = 'throw';
+  await widget.refresh();
+  await settle();
+
+  assert.equal(env.root.getAttribute('data-stale'), 'unreachable');
+  assert.match(env.root.getAttribute('data-stale-label'), /НЕТ СВЯЗИ/);
+  assert.match(env.root.title, /не ответил/);
+  assert.equal(cells(env.root)[0].value, '+2.00%', 'числа остаются: они были верны');
+});
+
+test('ответ не той формы — своя метка, а не та же, что у обрыва связи', async (t) => {
+  // Сетевой блип проходит сам, ошибка формы — нет. Схлопывать их в один отказ
+  // значит отправлять чинить наугад.
+  const env = setup();
+  t.after(env.cleanup);
+
+  let mode = 'ok';
+  const { widget } = mount(env, {
+    fetch: async () => (mode === 'junk' ? { периоды: [] } : [{ tf: 60, change: 2 }]),
+  });
+  await settle();
+
+  mode = 'junk';
+  await widget.refresh();
+  await settle();
+
+  assert.equal(env.root.getAttribute('data-stale'), 'malformed');
+  assert.match(env.root.getAttribute('data-stale-label'), /ОТВЕТ НЕ ТОТ/);
+  assert.match(env.root.title, /ответил не тем/);
+});
+
+test('две причины отказа различимы между собой', async (t) => {
+  // Главное свойство починки: не «след есть», а «след называет, какой именно
+  // отказ». Без этой проверки обе причины могли бы схлопнуться в одну метку, и
+  // тест на наличие метки остался бы зелёным.
+  const env = setup();
+  t.after(env.cleanup);
+
+  let mode = 'throw';
+  const { widget } = mount(env, {
+    fetch: async () => {
+      if (mode === 'throw') throw new Error('сеть');
+      if (mode === 'junk') return null;
+      return [{ tf: 60, change: 1 }];
+    },
+  });
+  await settle();
+  const first = env.root.getAttribute('data-stale');
+
+  mode = 'junk';
+  await widget.refresh();
+  await settle();
+  const second = env.root.getAttribute('data-stale');
+
+  assert.notEqual(first, second, `обе причины дали одну метку «${first}»`);
+});
+
+test('отказ уходит наружу хосту, а не только на экран', async (t) => {
+  // У хоста свой индикатор состояния; виджет обязан дать ему повод, а не
+  // прятать отказ внутри себя.
+  const env = setup();
+  t.after(env.cleanup);
+
+  const seen = [];
+  let mode = 'ok';
+  const { widget } = mount(env, {
+    onError: (e) => seen.push(e.kind),
+    fetch: async () => {
+      if (mode === 'throw') throw new Error('сеть');
+      return [{ tf: 60, change: 1 }];
+    },
+  });
+  await settle();
+  assert.deepEqual(seen, [], 'на успехе никого не будим');
+
+  mode = 'throw';
+  await widget.refresh();
+  await widget.refresh();
+  await settle();
+
+  assert.deepEqual(seen, ['unreachable', 'unreachable'], 'каждый неудачный тик — наружу');
+});
+
+test('после восстановления метка снимается', async (t) => {
+  // Застрявшая метка — такая же ложь, как её отсутствие: полоса обновляется, а
+  // на ней написано, что нет.
+  const env = setup();
+  t.after(env.cleanup);
+
+  let mode = 'throw';
+  const { widget } = mount(env, {
+    fetch: async () => {
+      if (mode === 'throw') throw new Error('сеть');
+      return [{ tf: 60, change: 3 }];
+    },
+  });
+  await settle();
+  assert.equal(env.root.getAttribute('data-stale'), 'unreachable');
+
+  mode = 'ok';
+  await widget.refresh();
+  await settle();
+
+  assert.equal(env.root.getAttribute('data-stale'), null);
+  assert.equal(env.root.getAttribute('data-stale-label'), null);
+  assert.equal(env.root.title, '');
+  assert.equal(cells(env.root)[0].value, '+3.00%');
+});
+
+test('поток одинаковых отказов не заливает консоль', async (t) => {
+  // Шумную диагностику чинят в тот же день, но сто одинаковых строк читать
+  // перестанут так же быстро, как молчание. Пишем на смене состояния.
+  const env = setup();
+  t.after(env.cleanup);
+
+  const errs = [];
+  const real = env.window.console.error;
+  env.window.console.error = (...a) => errs.push(a);
+  console.error = env.window.console.error;
+  t.after(() => { env.window.console.error = real; console.error = real; });
+
+  const { widget } = mount(env, { fetch: async () => { throw new Error('сеть'); } });
+  await settle();
+  for (let i = 0; i < 5; i += 1) { await widget.refresh(); }
+  await settle();
+
+  assert.equal(errs.length, 1, `одна строка на серию, а не ${errs.length}`);
 });
