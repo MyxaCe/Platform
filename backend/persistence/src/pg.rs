@@ -11,6 +11,7 @@ use bigdecimal::BigDecimal;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{Pool, Postgres, Row};
 
+use broker::journal::{AccountEvent, EventKind, Operator, Origin};
 use broker::{AccountSnapshot, ClosedDeal, PendingOrder, PosSide, Position};
 use domain::account::UserId;
 
@@ -146,7 +147,74 @@ CREATE TABLE IF NOT EXISTS closed_deals (
   PRIMARY KEY (user_id, idx)
 );
 CREATE INDEX IF NOT EXISTS closed_deals_user_idx ON closed_deals (user_id, idx DESC);
+
+-- ===================== Журнал событий счёта (TRM-13) ========================
+-- Лента пополняется только добавлением. `kind` хранится ровно той канонической
+-- строкой, по которой считался отпечаток: «что подписано» и «что лежит в базе» —
+-- буквально одно и то же, и round-trip проверяется тестом без живой БД.
+-- Отпечатки — 32 hex-символа (128 бит), TEXT: в NUMERIC они не нужны, по ним не
+-- считают, их сравнивают.
+CREATE TABLE IF NOT EXISTS account_events (
+  user_id     BIGINT NOT NULL,
+  seq         BIGINT NOT NULL,
+  at_ms       BIGINT NOT NULL,
+  origin      TEXT NOT NULL,
+  who         TEXT,
+  reason      TEXT,
+  incident    TEXT,
+  kind        TEXT NOT NULL,
+  prev_hash   TEXT NOT NULL,
+  hash        TEXT NOT NULL,
+  PRIMARY KEY (user_id, seq)
+);
+-- Неизменяемость на уровне БД, а не на честном слове приложения: править журнал не
+-- может и тот код, который в него пишет (Р-049). Образец — журнал аудита CMS.
+CREATE OR REPLACE FUNCTION account_events_append_only() RETURNS trigger AS $fn$
+BEGIN
+  RAISE EXCEPTION 'account_events is append-only: % denied', TG_OP;
+END;
+$fn$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS account_events_no_update ON account_events;
+CREATE TRIGGER account_events_no_update
+  BEFORE UPDATE OR DELETE ON account_events
+  FOR EACH ROW EXECUTE FUNCTION account_events_append_only();
 "#;
+
+/// Отпечаток ↔ БД: 32 hex-символа. Число в тексте, а не `NUMERIC`, потому что по нему
+/// не считают — его сравнивают, и сравнивать надо ровно те байты, что записали.
+fn hash_to_db(h: u128) -> String {
+    format!("{h:032x}")
+}
+fn hash_from_db(s: &str) -> Result<u128, StoreError> {
+    u128::from_str_radix(s, 16).map_err(|_| StoreError(format!("журнал: отпечаток «{s}» не читается")))
+}
+
+/// Поднять запись журнала из строки БД.
+///
+/// Отпечаток берётся как есть и **не пересчитывается**: иначе правка строки в базе
+/// молча получила бы сходящийся отпечаток и цепочка перестала бы что-либо значить.
+/// Сверяет цепочку вызывающий, при подъёме журнала.
+fn event_from_row(r: &PgRow) -> Result<AccountEvent, StoreError> {
+    let seq = r.get::<i64, _>("seq") as u64;
+    let bad = |what: &str| StoreError(format!("журнал: запись №{seq} не читается ({what})"));
+    let origin = match r.get::<String, _>("origin").as_str() {
+        "system" => Origin::System,
+        "client" => Origin::Client,
+        "operator" => {
+            // Пустое основание или потерянный инцидент — отказ чтения, а не «ну и
+            // ладно»: ручная проводка без причины не отличима от злоупотребления.
+            let who = r.get::<Option<String>, _>("who").unwrap_or_default();
+            let reason = r.get::<Option<String>, _>("reason").unwrap_or_default();
+            let incident = r.get::<Option<String>, _>("incident").unwrap_or_default();
+            Origin::Operator(Operator::new(&who, &reason, &incident).map_err(|e| bad(&e.to_string()))?)
+        }
+        other => return Err(bad(&format!("неизвестный источник «{other}»"))),
+    };
+    let kind = EventKind::decode(&r.get::<String, _>("kind")).map_err(|e| bad(&e.to_string()))?;
+    let prev = hash_from_db(&r.get::<String, _>("prev_hash"))?;
+    let hash = hash_from_db(&r.get::<String, _>("hash"))?;
+    Ok(AccountEvent::from_storage(seq, r.get::<i64, _>("at_ms"), origin, kind, prev, hash))
+}
 
 #[async_trait]
 impl Persistence for PgStore {
@@ -242,10 +310,33 @@ impl Persistence for PgStore {
             accounts.push((uid, AccountSnapshot { balance, next_id, positions, pendings, closed, model }));
         }
 
-        Ok(LoadedState { accounts })
+        // Журналы (TRM-13). Читаются по тем же счетам и в порядке записи: сверку
+        // делает вызывающий, здесь только подъём без единой догадки — неразобранная
+        // запись это отказ чтения, а не пропуск строки.
+        let mut journals = Vec::new();
+        for acc in &acc_rows {
+            let uid = UserId(acc.get::<i64, _>("user_id") as u64);
+            let rows = sqlx::query(
+                "SELECT seq, at_ms, origin, who, reason, incident, kind, prev_hash, hash
+                 FROM account_events WHERE user_id = $1 ORDER BY seq",
+            )
+            .bind(uid.0 as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db)?;
+            let mut lane = Vec::with_capacity(rows.len());
+            for r in &rows {
+                lane.push(event_from_row(r)?);
+            }
+            if !lane.is_empty() {
+                journals.push((uid, lane));
+            }
+        }
+
+        Ok(LoadedState { accounts, journals })
     }
 
-    async fn save_account(&self, user: UserId, snap: &AccountSnapshot) -> Result<(), StoreError> {
+    async fn save_account(&self, user: UserId, snap: &AccountSnapshot, events: &[AccountEvent]) -> Result<(), StoreError> {
         let id_db = user.0 as i64;
         let mut tx = self.pool.begin().await.map_err(db)?;
 
@@ -304,6 +395,36 @@ impl Persistence for PgStore {
             .bind(d.qty).bind(d.entry).bind(d.exit).bind(to_numeric(d.pnl))
             .bind(d.pd as i16).bind(d.qd as i16)
             .execute(&mut *tx).await.map_err(db)?;
+        }
+
+        // Журнал — в той же транзакции, что и слепок (TRM-13). Разъехаться им нельзя:
+        // иначе падение между двумя записями произвело бы ровно то расхождение, ради
+        // обнаружения которого журнал и заводился.
+        //
+        // Никакого ON CONFLICT: повтор номера обязан падать. Уникальный ключ здесь —
+        // это «поверх записанного не пишут», и глушить его значило бы терять запись.
+        for e in events {
+            let (who, reason, incident) = match e.origin().operator() {
+                Some(o) => (Some(o.who()), Some(o.reason()), Some(o.incident())),
+                None => (None, None, None),
+            };
+            sqlx::query(
+                "INSERT INTO account_events (user_id, seq, at_ms, origin, who, reason, incident, kind, prev_hash, hash)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+            )
+            .bind(id_db)
+            .bind(e.seq() as i64)
+            .bind(e.at_ms())
+            .bind(e.origin().tag())
+            .bind(who)
+            .bind(reason)
+            .bind(incident)
+            .bind(e.kind().encode())
+            .bind(hash_to_db(e.prev()))
+            .bind(hash_to_db(e.hash()))
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
         }
 
         tx.commit().await.map_err(db)?;

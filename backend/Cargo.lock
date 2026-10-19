@@ -1051,6 +1051,7 @@ dependencies = [
  "broker",
  "domain",
  "sqlx",
+ "tokio",
 ]
 
 [[package]]

@@ -92,7 +92,12 @@ impl gateway::persistence::Persistence for FailingStore {
     async fn load_all(&self) -> Result<gateway::persistence::LoadedState, gateway::persistence::StoreError> {
         Ok(gateway::persistence::LoadedState::default())
     }
-    async fn save_account(&self, _u: domain::account::UserId, _s: &broker::AccountSnapshot) -> Result<(), gateway::persistence::StoreError> {
+    async fn save_account(
+        &self,
+        _u: domain::account::UserId,
+        _s: &broker::AccountSnapshot,
+        _e: &[broker::journal::AccountEvent],
+    ) -> Result<(), gateway::persistence::StoreError> {
         Err(gateway::persistence::StoreError("disk on fire".into()))
     }
 }

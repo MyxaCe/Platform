@@ -8,6 +8,10 @@ use std::collections::HashMap;
 
 use domain::account::UserId;
 
+pub mod journal;
+
+use journal::{CloseCause, EventKind};
+
 /// Деньги в центах (1/100 USD).
 pub type Cents = i128;
 
@@ -80,7 +84,7 @@ pub fn margin_for(entry: i64, qty: i64, pd: u8, qd: u8, lev: i128) -> Cents {
 }
 
 /// Открытая позиция.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Position {
     pub id: u64,
     pub instrument: u32,
@@ -106,7 +110,7 @@ impl Position {
 }
 
 /// Отложенный (лимитный) ордер: срабатывает, когда цена достигает `price`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingOrder {
     pub id: u64,
     pub instrument: u32,
@@ -120,7 +124,7 @@ pub struct PendingOrder {
 }
 
 /// Закрытая сделка (история).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedDeal {
     pub instrument: u32,
     pub side: PosSide,
@@ -153,11 +157,23 @@ struct Account {
     /// под которой они открыты. Иначе внутри одного счёта смешались бы две модели,
     /// и на вопрос «против какой из встречных неттить» не было бы верного ответа.
     model: PositionModel,
+    /// Исходящая очередь событий журнала (TRM-13): что произошло со счётом в текущей
+    /// операции. **Не часть состояния** — в слепок не попадает и рестарта не переживает:
+    /// её забирает вызывающий сразу после операции и записывает в журнал той же
+    /// транзакцией, что и слепок.
+    ///
+    /// Времени и источника здесь нет: ядро детерминировано (красная линия №2), «кто и
+    /// когда» проставляет адаптер при запечатывании записи.
+    outbox: Vec<EventKind>,
 }
 
 impl Account {
     fn used_margin(&self) -> Cents {
         self.positions.values().map(|p| p.margin).sum()
+    }
+
+    fn log(&mut self, e: EventKind) {
+        self.outbox.push(e);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -178,6 +194,7 @@ impl Account {
         self.next_id += 1;
         let id = self.next_id;
         self.positions.insert(id, Position { id, instrument, side, qty, entry, pd, qd, margin, sl, tp });
+        self.log(EventKind::PositionOpened { id, instrument, side, qty, entry, pd, qd, sl, tp });
         Ok(id)
     }
 
@@ -220,6 +237,7 @@ impl Account {
             if tp.is_some() {
                 p.tp = tp;
             }
+            self.log(EventKind::PositionIncreased { id: pos_id, add_qty: qty, add_entry: entry, sl, tp });
             return Ok(pos_id);
         }
 
@@ -245,10 +263,12 @@ impl Account {
             let p = self.positions.get_mut(&pos_id).expect("позиция на месте");
             p.qty = left;
             p.margin = margin_for(p.entry, left, p.pd, p.qd, lev);
+            self.log(EventKind::PositionReduced { id: pos_id, qty: closing, exit: entry });
             return Ok(pos_id);
         }
 
         self.positions.remove(&pos_id);
+        self.log(EventKind::PositionClosed { id: pos_id, exit: entry, cause: CloseCause::Netting });
         let remainder = qty - closing;
         if remainder > 0 {
             // Встречный объём больше открытого: остаток открывает позицию в новую
@@ -259,11 +279,15 @@ impl Account {
         Ok(pos_id)
     }
 
-    fn close_pos(&mut self, id: u64, mark: i64) -> Option<Cents> {
+    /// `cause` — не косметика: по журналу надо отличать «человек закрыл» от «сработал
+    /// стоп». Иначе при разборе претензии «меня закрыли не по моей команде» ответить
+    /// будет нечем, а это ровно тот разговор, ради которого журнал и заводится.
+    fn close_pos(&mut self, id: u64, mark: i64, cause: CloseCause) -> Option<Cents> {
         let pos = self.positions.remove(&id)?;
         let pnl = pos.unrealized(mark);
         self.balance += pnl;
         self.closed.push(ClosedDeal { instrument: pos.instrument, side: pos.side, qty: pos.qty, entry: pos.entry, exit: mark, pnl, pd: pos.pd, qd: pos.qd });
+        self.log(EventKind::PositionClosed { id, exit: mark, cause });
         Some(pnl)
     }
 
@@ -289,11 +313,14 @@ impl Account {
         });
         let fired_any = !fire.is_empty();
         for p in fire {
+            // Сначала «ордер сработал», потом открытие позиции отдельной записью: это
+            // два разных события, и у открывшейся позиции свой id, а не id ордера.
+            self.log(EventKind::PendingTriggered { id: p.id, price: p.price });
             let _ = self.try_open(lev, p.instrument, p.side, p.qty, p.price, p.pd, p.qd, p.sl, p.tp);
         }
 
         // SL/TP по открытым позициям.
-        let mut to_close: Vec<(u64, i64)> = Vec::new();
+        let mut to_close: Vec<(u64, i64, CloseCause)> = Vec::new();
         for pos in self.positions.values() {
             if let Some(&m) = marks.get(&pos.instrument) {
                 let sl_hit = pos.sl.is_some_and(|sl| match pos.side {
@@ -305,15 +332,15 @@ impl Account {
                     PosSide::Short => m <= tp,
                 });
                 if sl_hit {
-                    to_close.push((pos.id, pos.sl.unwrap()));
+                    to_close.push((pos.id, pos.sl.unwrap(), CloseCause::StopLoss));
                 } else if tp_hit {
-                    to_close.push((pos.id, pos.tp.unwrap()));
+                    to_close.push((pos.id, pos.tp.unwrap(), CloseCause::TakeProfit));
                 }
             }
         }
         let closed_any = !to_close.is_empty();
-        for (id, mark) in to_close {
-            self.close_pos(id, mark);
+        for (id, mark, cause) in to_close {
+            self.close_pos(id, mark, cause);
         }
         fired_any || closed_any
     }
@@ -332,7 +359,27 @@ impl Broker {
 
     fn acct(&mut self, user: UserId) -> &mut Account {
         let start = self.start_balance;
-        self.accounts.entry(user).or_insert_with(|| Account { balance: start, ..Default::default() })
+        self.accounts.entry(user).or_insert_with(|| {
+            // Заведение счёта — тоже изменение состояния, и стартовый баланс обязан
+            // иметь происхождение. Без этой записи первые деньги на счёте взялись бы
+            // ниоткуда, и журнал начинался бы с необъяснимой суммы.
+            let mut a = Account { balance: start, ..Default::default() };
+            a.log(EventKind::AccountOpened { balance: start });
+            a
+        })
+    }
+
+    /// Забрать события, накопленные операциями с этим счётом, и очистить очередь.
+    ///
+    /// Забирать обязан вызывающий — **и на отказе тоже**: события неудавшейся операции
+    /// не должны уехать в журнал вместе со следующей.
+    pub fn take_events(&mut self, user: UserId) -> Vec<EventKind> {
+        self.accounts.get_mut(&user).map(|a| std::mem::take(&mut a.outbox)).unwrap_or_default()
+    }
+
+    /// Есть ли неразобранные события по счёту (для проверок вызывающего).
+    pub fn pending_events(&self, user: UserId) -> usize {
+        self.accounts.get(&user).map(|a| a.outbox.len()).unwrap_or(0)
     }
 
     // ---- Чтение -----------------------------------------------------------
@@ -376,13 +423,18 @@ impl Broker {
 
     /// Закрыть позицию по марк-цене. Возвращает реализованный P&L.
     pub fn close(&mut self, user: UserId, id: u64, mark: i64) -> Result<Cents, BrokerError> {
-        self.acct(user).close_pos(id, mark).ok_or(BrokerError::UnknownPosition)
+        self.acct(user).close_pos(id, mark, CloseCause::Command).ok_or(BrokerError::UnknownPosition)
     }
 
     /// Пополнить счёт (демо: бумажные деньги). Возвращает новый баланс.
+    ///
+    /// Ручное начисление центра управления (Р-049) — это она же: сумма та же, разница
+    /// в `Origin` записи, который проставляет адаптер. Отдельного «исправить остаток»
+    /// не будет: остаток не перезаписывается, он выводится из проводок.
     pub fn deposit(&mut self, user: UserId, amount: Cents) -> Cents {
         let a = self.acct(user);
         a.balance += amount;
+        a.log(EventKind::Deposited { amount });
         a.balance
     }
 
@@ -394,6 +446,7 @@ impl Broker {
         }
         let a = self.acct(user);
         a.balance -= amount;
+        a.log(EventKind::Withdrawn { amount });
         Ok(a.balance)
     }
 
@@ -404,11 +457,14 @@ impl Broker {
         a.next_id += 1;
         let id = a.next_id;
         a.pendings.insert(id, PendingOrder { id, instrument, side, qty, price, pd, qd, sl, tp });
+        a.log(EventKind::PendingPlaced { id, instrument, side, qty, price, pd, qd, sl, tp });
         id
     }
 
     pub fn cancel_pending(&mut self, user: UserId, id: u64) -> Result<(), BrokerError> {
-        if self.acct(user).pendings.remove(&id).is_some() {
+        let a = self.acct(user);
+        if a.pendings.remove(&id).is_some() {
+            a.log(EventKind::PendingCancelled { id });
             Ok(())
         } else {
             Err(BrokerError::UnknownPending)
@@ -454,6 +510,10 @@ impl Broker {
     }
 
     /// Восстановить счёт из хранилища на старте. Полностью заменяет состояние счёта.
+    ///
+    /// Очередь событий при этом **обнуляется**, и это не оплошность: `restore` служит
+    /// ещё и откатом неудавшейся операции, а события отката в журнал попасть не должны —
+    /// журнал пишется только о том, что состоялось.
     pub fn restore(&mut self, user: UserId, snap: AccountSnapshot) {
         let a = Account {
             balance: snap.balance,
@@ -462,6 +522,7 @@ impl Broker {
             pendings: snap.pendings.into_iter().map(|p| (p.id, p)).collect(),
             closed: snap.closed,
             model: snap.model,
+            outbox: Vec::new(),
         };
         self.accounts.insert(user, a);
     }
@@ -479,6 +540,7 @@ impl Broker {
         }
         if a.positions.is_empty() {
             a.model = model;
+            a.log(EventKind::ModelAdopted { model });
             true
         } else {
             false
@@ -493,6 +555,12 @@ impl Broker {
     /// Плечо брокера — нужно тем, кто проверяет инварианты по слепку.
     pub fn leverage(&self) -> i128 {
         self.leverage
+    }
+
+    /// Стартовый баланс счёта — нужен журналу: с него начинается свёртка счёта,
+    /// у которого ещё нет ни одной записи.
+    pub fn start_balance(&self) -> Cents {
+        self.start_balance
     }
 
     /// Все счета, о которых знает брокер (для сохранения/обхода).

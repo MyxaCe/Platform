@@ -25,8 +25,9 @@ use tokio::sync::{broadcast, Mutex};
 
 use domain::account::UserId;
 
+use broker::journal::{self, Journal, Origin};
 use broker::{Broker, PosSide};
-use persistence::{NoopStore, Persistence};
+use persistence::{MemoryStore, Persistence};
 
 /// Реэкспорт: тестам и бинарю нужен трейт хранилища, чтобы подставить свою реализацию.
 pub use persistence;
@@ -75,6 +76,12 @@ pub struct AppState {
     /// сохраняется **как есть** — молчаливая починка уничтожила бы улику
     /// (КОНТРАКТЫ §4в).
     quarantined: Arc<Mutex<std::collections::HashSet<UserId>>>,
+    /// Журналы счетов (TRM-13): по одному на счёт, пополняются только добавлением.
+    ///
+    /// Лежат рядом с брокером, а не внутри него, по той же причине, что и хранилище:
+    /// ядро детерминировано и не знает ни времени, ни источника события. Брокер
+    /// говорит «что произошло», здесь к этому добавляется «кто и когда».
+    journals: Arc<Mutex<HashMap<UserId, Journal>>>,
     /// Откуда берутся разрешённые инструменты сайта (регуляторика, ADR-023 Т3).
     ///
     /// Источник по контракту — `GET {CMS}/v1/cms/sites/{slug}`, поле `instruments`,
@@ -96,10 +103,11 @@ pub struct AppState {
 }
 
 pub fn build_state() -> AppState {
-    build_state_with(Arc::new(NoopStore))
+    build_state_with(Arc::new(MemoryStore::new()))
 }
 
-/// Собрать состояние с конкретным хранилищем. `NoopStore` = всё в памяти (тесты, запуск без БД).
+/// Собрать состояние с конкретным хранилищем. `MemoryStore` = всё в памяти процесса
+/// (тесты, запуск без БД) — но путь записи при этом настоящий, см. `persistence`.
 pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
     let (events_tx, _rx) = broadcast::channel(4096);
     // SSO: JWKS платформы = {CABINET_URL}/api/sso/jwks. Без CABINET_URL SSO выключен
@@ -138,6 +146,7 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         store,
         acct_locks: Arc::new(Mutex::new(HashMap::new())),
         quarantined: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        journals: Arc::new(Mutex::new(HashMap::new())),
         sso,
         sso_enabled,
     }
@@ -146,12 +155,36 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
 /// Поднять счета из хранилища. Вызывается один раз на старте, до приёма запросов.
 pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError> {
     st.store.init().await?;
+    // Ошибка чтения поднимается наружу и роняет старт. Это **не** то же самое, что
+    // «журнала нет»: недоступное хранилище и пустая лента — разные беды, и сервис,
+    // который их путает, стартует на выдуманной истории (TRM-13).
     let loaded = st.store.load_all().await?;
     let accounts_n = loaded.accounts.len();
+    let (lev, start_balance) = {
+        let b = st.broker.lock().await;
+        (b.leverage(), b.start_balance())
+    };
     {
         let mut b = st.broker.lock().await;
         for (id, snap) in loaded.accounts {
             b.restore(id, snap);
+        }
+    }
+    // Журналы: поднять, проверить цепочку, свернуть. Испорченная лента — не повод
+    // «взять, что разобралось»: счёт уходит в карантин вместе с причиной.
+    {
+        let mut js = st.journals.lock().await;
+        let mut q = st.quarantined.lock().await;
+        for (user, events) in loaded.journals {
+            match Journal::load(lev, start_balance, events) {
+                Ok(j) => {
+                    js.insert(user, j);
+                }
+                Err(fault) => {
+                    eprintln!("[gateway] ЖУРНАЛ ИСПОРЧЕН, счёт {} в карантине: {fault}", user.0);
+                    q.insert(user);
+                }
+            }
         }
     }
     // Красная линия №5. Счета, поднятые с нарушенными инвариантами, уходят в
@@ -160,14 +193,28 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
     // строка не должна лишать обслуживания всех остальных.
     {
         let b = st.broker.lock().await;
+        let js = st.journals.lock().await;
         let mut q = st.quarantined.lock().await;
         for user in b.users() {
-            let violations = broker::check_snapshot(&b.snapshot(user), b.leverage());
+            let snap = b.snapshot(user);
+            let violations = broker::check_snapshot(&snap, b.leverage());
             if !violations.is_empty() {
                 q.insert(user);
                 for v in &violations {
                     eprintln!("[gateway] ИНВАРИАНТ НАРУШЕН, счёт {} в карантине: {v}", user.0);
                 }
+            }
+            // Остаток обязан сходиться с журналом (TRM-13). Счёт, чью историю нечем
+            // переиграть, — такой же карантин: править его деньги вслепую нельзя.
+            // Чинить расхождение нельзя тем более: подогнанный слепок уничтожает улику.
+            if q.contains(&user) {
+                continue; // уже в карантине, причина названа
+            }
+            let empty = Journal::new(b.leverage(), b.start_balance());
+            let status = journal::audit(js.get(&user).unwrap_or(&empty), &snap);
+            if !status.ok() {
+                q.insert(user);
+                eprintln!("[gateway] ЖУРНАЛ НЕ СХОДИТСЯ [{}], счёт {} в карантине: {status}", status.tag(), user.0);
             }
         }
         if !q.is_empty() {
@@ -185,9 +232,26 @@ async fn account_lock(st: &AppState, user: UserId) -> Arc<Mutex<()>> {
     st.acct_locks.lock().await.entry(user).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
 }
 
-/// Мутация счёта с сохранением (ADR-016): лок счёта на всё «мутация → слепок → запись»;
-/// `fsync`/сеть — уже без лока брокера; при отказе хранилища счёт откатывается и отдаётся `503`.
-async fn with_account<T>(st: &AppState, user: UserId, f: impl FnOnce(&mut Broker) -> Result<T, ApiErr>) -> Result<T, ApiErr> {
+/// Мутация счёта с сохранением (ADR-016) и записью в журнал (TRM-13).
+///
+/// Порядок жёсткий, и каждый шаг стоит на своём месте:
+///
+/// 1. под локом счёта мутировать брокер, забрать его события и снять слепок;
+/// 2. проверить инварианты слепка (красная линия №5) — отказ до записи;
+/// 3. запечатать события и **свериться**: совпадает ли состояние, которое утверждает
+///    журнал, с тем, что в слепке. Сверка до записи, потому что запись не отменить:
+///    лента только дописывается, и ошибочную запись оттуда уже не убрать;
+/// 4. слепок и записи журнала — одной транзакцией хранилища;
+/// 5. только теперь пополнить журнал в памяти.
+///
+/// `origin` — кто источник: [`Origin::Client`] для действий из терминала,
+/// [`Origin::System`] для триггеров, [`Origin::Operator`] для ручной проводки (ADM-03).
+async fn with_account<T>(
+    st: &AppState,
+    user: UserId,
+    origin: Origin,
+    f: impl FnOnce(&mut Broker) -> Result<T, ApiErr>,
+) -> Result<T, ApiErr> {
     // Счёт в карантине не мутируем: его состояние уже неверно, и любая операция
     // поверх него закрепила бы порчу. Читать при этом можно.
     if st.quarantined.lock().await.contains(&user) {
@@ -197,23 +261,24 @@ async fn with_account<T>(st: &AppState, user: UserId, f: impl FnOnce(&mut Broker
     let lock = account_lock(st, user).await;
     let _guard = lock.lock().await;
 
-    let (out, before, snap) = {
+    let (out, before, snap, kinds, lev, start_balance) = {
         let mut b = st.broker.lock().await;
         let before = b.snapshot(user);
-        let out = f(&mut b)?;
+        let out = f(&mut b);
+        // Очередь сливается ВСЕГДА, в том числе на отказе: события несостоявшейся
+        // операции не должны уехать в журнал прицепом к следующей.
+        let kinds = b.take_events(user);
         let snap = b.snapshot(user);
-        (out, before, snap)
+        (out, before, snap, kinds, b.leverage(), b.start_balance())
     };
+    let out = out?;
 
     // Красная линия №5, проверка ДО записи: если мутация сделала бы состояние
     // неверным, операция отклоняется и изменение не фиксируется. Граница отказа
     // проходит по счёту — соседи не затронуты, сервис не останавливается.
     // Код отдельный: это не деловой отказ вроде «недостаточно средств», и путать
     // их нельзя (КОНТРАКТЫ §4в).
-    let violations = {
-        let b = st.broker.lock().await;
-        broker::check_snapshot(&snap, b.leverage())
-    };
+    let violations = broker::check_snapshot(&snap, lev);
     if !violations.is_empty() {
         st.broker.lock().await.restore(user, before);
         for v in &violations {
@@ -222,12 +287,48 @@ async fn with_account<T>(st: &AppState, user: UserId, f: impl FnOnce(&mut Broker
         return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "invariant_violated"));
     }
 
-    if let Err(e) = st.store.save_account(user, &snap).await {
+    // Журнал (TRM-13). Запечатываем, но ещё не пишем: сначала сверка.
+    let sealed = {
+        let mut js = st.journals.lock().await;
+        let j = js.entry(user).or_insert_with(|| Journal::new(lev, start_balance));
+        let sealed = j.seal(now_ms(), &origin, &kinds);
+        let would_be = j.preview(&sealed);
+        let diverged = journal::reconcile(&would_be, &snap);
+        if !diverged.is_empty() {
+            drop(js);
+            st.broker.lock().await.restore(user, before);
+            for d in &diverged {
+                eprintln!("[gateway] ЖУРНАЛ НЕ СХОДИТСЯ, операция по счёту {} откачена: {d}", user.0);
+            }
+            return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "journal_divergence"));
+        }
+        sealed
+    };
+
+    if let Err(e) = st.store.save_account(user, &snap, &sealed).await {
         st.broker.lock().await.restore(user, before);
         eprintln!("[gateway] запись состояния не удалась, счёт откачен: {e}");
         return Err(err(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable"));
     }
+
+    // Записано — теперь пополняем ленту в памяти. Ошибка здесь означала бы, что
+    // журнал в памяти разошёлся с журналом в хранилище: это карантин, а не предупреждение.
+    commit_journal(st, user, sealed).await;
     Ok(out)
+}
+
+/// Принять в память уже записанные в хранилище записи.
+async fn commit_journal(st: &AppState, user: UserId, sealed: Vec<broker::journal::AccountEvent>) {
+    let mut js = st.journals.lock().await;
+    let lev_start = { let b = st.broker.lock().await; (b.leverage(), b.start_balance()) };
+    let j = js.entry(user).or_insert_with(|| Journal::new(lev_start.0, lev_start.1));
+    for e in sealed {
+        if let Err(fault) = j.commit(e) {
+            eprintln!("[gateway] ЖУРНАЛ В ПАМЯТИ РАЗОШЁЛСЯ С ХРАНИЛИЩЕМ, счёт {} в карантине: {fault}", user.0);
+            st.quarantined.lock().await.insert(user);
+            return;
+        }
+    }
 }
 
 impl AppState {
@@ -575,6 +676,7 @@ pub fn router(state: AppState) -> Router {
         .route("/pending", post(place_pending).get(list_pending))
         .route("/pending/:id", delete(cancel_pending))
         .route("/account", get(account))
+        .route("/account/journal", get(account_journal))
         .route("/stream", get(ws_stream))
         // SSO платформы (ADR-023, Т2): обмен handoff-JWT на сессию терминала и логаут.
         .route("/v1/session", post(session_create))
@@ -760,6 +862,15 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Время для записи журнала. Живёт здесь, на границе: ядро детерминировано и часов
+/// не знает (красная линия №2), «когда» приходит вместе с событием снаружи.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Список инструментов с реальными котировками (Binance @ticker).
 ///
 /// Витрина: фильтруется по `?site=`, если он задан. Это удобство, а не защита —
@@ -923,7 +1034,7 @@ async fn open_deal(State(st): State<AppState>, headers: HeaderMap, Json(req): Js
         let t = tickers.get(&req.instrument).ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "no price yet"))?;
         (if matches!(side, PosSide::Long) { t.ask } else { t.bid }, t.last)
     };
-    let id = with_account(&st, user, |b| {
+    let id = with_account(&st, user, Origin::Client, |b| {
         b.open(user, req.instrument, side, req.qty, entry, fi.price_decimals, fi.qty_decimals, req.sl, req.tp)
             .map_err(|_| err(StatusCode::PAYMENT_REQUIRED, "insufficient_margin"))
     })
@@ -950,7 +1061,7 @@ async fn place_pending(State(st): State<AppState>, headers: HeaderMap, Json(req)
         return Err(err(StatusCode::BAD_REQUEST, "qty and price must be > 0"));
     }
     let fi = feed_by_id(&st, req.instrument).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
-    let id = with_account(&st, user, |b| {
+    let id = with_account(&st, user, Origin::Client, |b| {
         Ok(b.place_pending(user, req.instrument, side, req.qty, req.price, fi.price_decimals, fi.qty_decimals, req.sl, req.tp))
     })
     .await?;
@@ -977,7 +1088,7 @@ async fn list_pending(State(st): State<AppState>, headers: HeaderMap) -> Result<
 
 async fn cancel_pending(State(st): State<AppState>, headers: HeaderMap, Path(id): Path<u64>) -> Result<StatusCode, ApiErr> {
     let user = require_user(&st, &headers).await?;
-    with_account(&st, user, |b| {
+    with_account(&st, user, Origin::Client, |b| {
         b.cancel_pending(user, id).map_err(|_| err(StatusCode::NOT_FOUND, "unknown pending"))
     })
     .await?;
@@ -1031,7 +1142,7 @@ async fn list_deals(State(st): State<AppState>, headers: HeaderMap) -> Result<Js
 async fn close_deal(State(st): State<AppState>, headers: HeaderMap, Path(id): Path<u64>) -> Result<Json<serde_json::Value>, ApiErr> {
     let user = require_user(&st, &headers).await?;
     let m = marks(&st).await;
-    let (pnl, mark) = with_account(&st, user, |b| {
+    let (pnl, mark) = with_account(&st, user, Origin::Client, |b| {
         let inst = b
             .positions(user)
             .into_iter()
@@ -1060,6 +1171,77 @@ async fn account(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<
         broker::PositionModel::Hedging => "hedging",
     };
     Ok(Json(AccountDto { model, balance, equity, used_margin: used, free_margin: equity - used, open_pnl }))
+}
+
+/// Журнал счёта и итог сверки со слепком (TRM-13).
+///
+/// Отдаётся владельцу счёта: на вопрос «откуда у меня эти деньги» нужно отвечать
+/// записями, а не уверениями. Экран администратора — не здесь, это `ADM-03`.
+#[derive(Serialize)]
+struct JournalEntryDto {
+    seq: u64,
+    at_ms: i64,
+    /// `system` — движок, `client` — владелец счёта, `operator` — ручная проводка.
+    source: &'static str,
+    /// Основание и инцидент ручной проводки. У системных и клиентских событий пусты.
+    ///
+    /// Имени оператора здесь сознательно нет: клиенту нужно знать, что проводка
+    /// ручная и по какому инциденту, а кто именно её сделал — вопрос разбора, и
+    /// отвечать на него должен центр управления своей поверхностью, а не торговый API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    incident: Option<String>,
+    /// Каноническая строка события — та же, что записана и подписана.
+    event: String,
+}
+
+#[derive(Serialize)]
+struct JournalDto {
+    /// `reconciled` · `no_entries` · `faulted` · `diverged`. Коды разные не из
+    /// аккуратности: «записи нет» и «журнал испорчен» требуют разных действий.
+    status: &'static str,
+    /// Человекочитаемая причина, когда сверка не сошлась.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+    /// Баланс, восстановленный **из журнала** (а не взятый из слепка).
+    replayed_balance: broker::Cents,
+    balance: broker::Cents,
+    entries: Vec<JournalEntryDto>,
+}
+
+async fn account_journal(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<JournalDto>, ApiErr> {
+    let user = require_user(&st, &headers).await?;
+    let (snap, lev, start_balance) = {
+        let b = st.broker.lock().await;
+        (b.snapshot(user), b.leverage(), b.start_balance())
+    };
+    let js = st.journals.lock().await;
+    let empty = Journal::new(lev, start_balance);
+    let j = js.get(&user).unwrap_or(&empty);
+    let status = journal::audit(j, &snap);
+    let entries = j
+        .events()
+        .iter()
+        .map(|e| {
+            let op = e.origin().operator();
+            JournalEntryDto {
+                seq: e.seq(),
+                at_ms: e.at_ms(),
+                source: e.origin().tag(),
+                reason: op.map(|o| o.reason().to_string()),
+                incident: op.map(|o| o.incident().to_string()),
+                event: e.kind().encode(),
+            }
+        })
+        .collect();
+    Ok(Json(JournalDto {
+        status: status.tag(),
+        detail: if status.ok() { None } else { Some(status.to_string()) },
+        replayed_balance: j.replay().balance,
+        balance: snap.balance,
+        entries,
+    }))
 }
 
 // ---- SSO: обмен handoff-JWT на сессию терминала (ADR-023, Т2) --------------
@@ -1113,22 +1295,34 @@ pub fn spawn_monitor(st: AppState) {
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
             tick.tick().await;
-            let m = marks(&st).await;
+            monitor_tick(&st).await;
+        }
+    });
+}
+
+/// Один проход монитора.
+///
+/// Вынесен из цикла сознательно: путь триггеров проверяется тестами **тем же кодом**,
+/// которым он работает в бою, а не ожиданием таймера. Сработавший стоп меняет счёт так
+/// же, как ручная операция, и обязан оставлять такую же запись — спорят как раз о нём.
+pub async fn monitor_tick(st: &AppState) {
+            let m = marks(st).await;
             if m.is_empty() {
-                continue;
+                return;
             }
             let changed = { st.broker.lock().await.check(&m) };
             for user in changed {
-                let lock = account_lock(&st, user).await;
+                let lock = account_lock(st, user).await;
                 let _guard = lock.lock().await;
-                let snap = { st.broker.lock().await.snapshot(user) };
-                // Триггеры SL/TP и лимитных ордеров меняют счёт так же, как ручные
-                // операции, поэтому и проверяются так же. Иначе инвариант защищал бы
-                // только тот путь, о котором мы помним.
-                let violations = {
-                    let b = st.broker.lock().await;
-                    broker::check_snapshot(&snap, b.leverage())
+                let (snap, kinds, lev, start_balance) = {
+                    let mut b = st.broker.lock().await;
+                    (b.snapshot(user), b.take_events(user), b.leverage(), b.start_balance())
                 };
+                // Триггеры SL/TP и лимитных ордеров меняют счёт так же, как ручные
+                // операции, поэтому и проверяются так же, и в журнал идут так же.
+                // Иначе защита стояла бы только на том пути, о котором мы помним, а
+                // сработавший стоп не оставлял бы следа — при том что спорят именно о нём.
+                let violations = broker::check_snapshot(&snap, lev);
                 if !violations.is_empty() {
                     st.quarantined.lock().await.insert(user);
                     for v in &violations {
@@ -1136,12 +1330,27 @@ pub fn spawn_monitor(st: AppState) {
                     }
                     continue; // испорченное не записываем и не чиним
                 }
-                if let Err(e) = st.store.save_account(user, &snap).await {
+                let sealed = {
+                    let mut js = st.journals.lock().await;
+                    let j = js.entry(user).or_insert_with(|| Journal::new(lev, start_balance));
+                    let sealed = j.seal(now_ms(), &Origin::System, &kinds);
+                    let diverged = journal::reconcile(&j.preview(&sealed), &snap);
+                    if !diverged.is_empty() {
+                        drop(js);
+                        st.quarantined.lock().await.insert(user);
+                        for d in &diverged {
+                            eprintln!("[monitor] ЖУРНАЛ НЕ СХОДИТСЯ после триггера, счёт {} в карантине: {d}", user.0);
+                        }
+                        continue; // цену уже не отыграть назад, но и чинить молча нельзя
+                    }
+                    sealed
+                };
+                if let Err(e) = st.store.save_account(user, &snap, &sealed).await {
                     eprintln!("[monitor] не удалось сохранить счёт {}: {e}", user.0);
+                    continue; // в память журнал не принимаем: в хранилище его нет
                 }
+                commit_journal(st, user, sealed).await;
             }
-        }
-    });
 }
 
 async fn ws_stream(State(st): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -1513,9 +1722,9 @@ mod invariant_wiring_tests {
             Ok(())
         }
         async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
-            Ok(persistence::LoadedState { accounts: vec![(DEFAULT_USER, corrupt_snapshot())] })
+            Ok(persistence::LoadedState { accounts: vec![(DEFAULT_USER, corrupt_snapshot())], journals: vec![] })
         }
-        async fn save_account(&self, _u: UserId, _s: &broker::AccountSnapshot) -> Result<(), persistence::StoreError> {
+        async fn save_account(&self, _u: UserId, _s: &broker::AccountSnapshot, _e: &[journal::AccountEvent]) -> Result<(), persistence::StoreError> {
             Ok(())
         }
     }
@@ -1616,5 +1825,322 @@ mod invariant_wiring_tests {
         let app = router(st);
         let (status, _) = send(&app, "POST", "/pending", Some(pending_body())).await;
         assert_eq!(status, StatusCode::OK, "нормальная торговля не должна страдать от проверок");
+    }
+}
+
+// ============ Проводка журнала: от запроса до восстановленного счёта =========
+//
+// Тесты идут ЧЕРЕЗ РОУТЕР и через настоящий монитор, а не по `Journal` напрямую:
+// журнал, в который перестали писать, остаётся зелёным в собственных юнит-тестах.
+// Класс «написано и не вызывается» модульными тестами не ловится в принципе — это
+// уже стоило нам пустого инварианта (TRM-06).
+#[cfg(test)]
+mod journal_wiring_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn send(app: &Router, method: &str, uri: &str, body: Option<serde_json::Value>) -> (StatusCode, serde_json::Value) {
+        let b = Request::builder().method(method).uri(uri);
+        let req = match body {
+            Some(v) => b.header("content-type", "application/json").body(Body::from(serde_json::to_vec(&v).unwrap())).unwrap(),
+            None => b.body(Body::empty()).unwrap(),
+        };
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = if bytes.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null) };
+        (status, v)
+    }
+
+    /// Цена нужна торговым ручкам: без тикера открытие отвечает «нет цены».
+    async fn with_price(st: &AppState, instrument: u32, px: i64) {
+        st.tickers.lock().await.insert(instrument, feed::Ticker { last: px, change: 0.0, high: px, bid: px, ask: px });
+    }
+
+    fn deal_body() -> serde_json::Value {
+        serde_json::json!({"instrument": 1, "side": "buy", "qty": 1000})
+    }
+
+    async fn events_of(st: &AppState) -> Vec<String> {
+        st.journals
+            .lock()
+            .await
+            .get(&DEFAULT_USER)
+            .map(|j| j.events().iter().map(|e| e.kind().encode()).collect())
+            .unwrap_or_default()
+    }
+
+    // ---- Сделка из терминала оставляет след ---------------------------------
+
+    /// Открытие через HTTP обязано появиться в журнале, а остаток — выводиться из него.
+    #[tokio::test]
+    async fn opening_a_deal_through_the_router_lands_in_the_journal() {
+        let st = build_state();
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+
+        let (status, _) = send(&app, "POST", "/deals", Some(deal_body())).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let kinds = events_of(&st).await;
+        assert!(kinds.iter().any(|k| k.starts_with("account_opened")), "заведение счёта обязано быть записано: {kinds:?}");
+        assert!(kinds.iter().any(|k| k.starts_with("position_opened")), "сделка обязана быть записана: {kinds:?}");
+
+        let (status, body) = send(&app, "GET", "/account/journal", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "reconciled", "журнал обязан сходиться со слепком: {body}");
+        assert_eq!(body["replayed_balance"], body["balance"], "остаток обязан выводиться из журнала");
+        assert_eq!(body["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(body["entries"][1]["source"], "client", "сделку сделал человек, и это видно");
+    }
+
+    /// Закрытие записывается с причиной «по команде» — иначе срабатывание стопа и
+    /// действие человека в истории неразличимы.
+    #[tokio::test]
+    async fn closing_through_the_router_is_recorded_with_its_cause() {
+        let st = build_state();
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+        let (_, deal) = send(&app, "POST", "/deals", Some(deal_body())).await;
+        let id = deal["id"].as_u64().unwrap();
+
+        let (status, _) = send(&app, "POST", &format!("/deals/{id}/close"), None).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let kinds = events_of(&st).await;
+        assert!(kinds.iter().any(|k| k.contains("position_closed") && k.contains("cause=command")), "{kinds:?}");
+        let (_, body) = send(&app, "GET", "/account/journal", None).await;
+        assert_eq!(body["status"], "reconciled");
+    }
+
+    /// Отложенный ордер и его отмена — тоже изменения состояния.
+    #[tokio::test]
+    async fn pending_order_and_its_cancellation_are_recorded() {
+        let st = build_state();
+        let app = router(st.clone());
+        let body = serde_json::json!({"instrument": 1, "side": "buy", "qty": 100, "price": 1000});
+        let (_, p) = send(&app, "POST", "/pending", Some(body)).await;
+        let id = p["id"].as_u64().unwrap();
+        send(&app, "DELETE", &format!("/pending/{id}"), None).await;
+
+        let kinds = events_of(&st).await;
+        assert!(kinds.iter().any(|k| k.starts_with("pending_placed")), "{kinds:?}");
+        assert!(kinds.iter().any(|k| k.starts_with("pending_cancelled")), "{kinds:?}");
+    }
+
+    /// Сработавший стоп проходит через монитор, а не через запрос — и обязан
+    /// записываться тем же механизмом, иначе журнал пропускает ровно те события,
+    /// о которых спорят чаще всего.
+    #[tokio::test]
+    async fn stop_loss_fired_by_the_monitor_is_recorded_as_a_system_event() {
+        let st = build_state();
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+        let body = serde_json::json!({"instrument": 1, "side": "buy", "qty": 1000, "sl": 49_000});
+        let (status, _) = send(&app, "POST", "/deals", Some(body)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        with_price(&st, 1, 48_000).await;
+        monitor_tick(&st).await;
+
+        let kinds = events_of(&st).await;
+        assert!(
+            kinds.iter().any(|k| k.contains("position_closed") && k.contains("cause=stop_loss")),
+            "срабатывание стопа обязано попасть в журнал: {kinds:?}"
+        );
+        let last = st.journals.lock().await.get(&DEFAULT_USER).unwrap().events().last().unwrap().clone();
+        assert_eq!(last.origin(), &Origin::System, "у триггера нет человека-автора");
+
+        let (_, jb) = send(&app, "GET", "/account/journal", None).await;
+        assert_eq!(jb["status"], "reconciled", "после срабатывания стопа остаток обязан сходиться: {jb}");
+        assert!(st.quarantined.lock().await.is_empty(), "нормальное срабатывание — не повод для карантина");
+    }
+
+    // ---- Хранилище: журнал переживает перезапуск ----------------------------
+
+    /// Журнал и слепок пишутся в хранилище вместе и поднимаются вместе. Проверяем
+    /// на настоящем пути записи, а не на заглушке: заглушка, которая ничего не делает,
+    /// однажды уже «проверяла» у нас пустой инвариант.
+    #[tokio::test]
+    async fn journal_survives_a_restart_through_the_store() {
+        let store = Arc::new(persistence::MemoryStore::new());
+        let before = {
+            let st = build_state_with(store.clone());
+            with_price(&st, 1, 50_000).await;
+            let app = router(st.clone());
+            send(&app, "POST", "/deals", Some(deal_body())).await;
+            send(&app, "POST", "/pending", Some(serde_json::json!({"instrument": 2, "side": "sell", "qty": 10, "price": 9_000}))).await;
+            let (_, acct) = send(&app, "GET", "/account", None).await;
+            acct["balance"].clone()
+        };
+
+        // Новый процесс: то же хранилище, пустая память.
+        let st2 = build_state_with(store.clone());
+        restore_state(&st2).await.expect("подъём обязан пройти");
+        let app2 = router(st2.clone());
+
+        assert!(st2.quarantined.lock().await.is_empty(), "сошедшийся счёт в карантин не уходит");
+        let (_, jb) = send(&app2, "GET", "/account/journal", None).await;
+        assert_eq!(jb["status"], "reconciled", "после рестарта журнал обязан сходиться: {jb}");
+        assert_eq!(jb["balance"], before, "остаток обязан пережить рестарт");
+        assert_eq!(jb["replayed_balance"], before, "и обязан выводиться из журнала");
+        assert!(jb["entries"].as_array().unwrap().len() >= 3, "лента обязана подняться целиком: {jb}");
+    }
+
+    // ---- Отказы: разные беды — разные ответы --------------------------------
+
+    /// Изменение состояния, не оставившее записи, отклоняется ДО сохранения.
+    /// Так ловится самый вероятный будущий дефект: добавили операцию, записать забыли.
+    #[tokio::test]
+    async fn a_state_change_without_a_journal_entry_is_rejected() {
+        let st = build_state();
+        let app = router(st.clone());
+        // Сначала нормальная операция: журнал заводится и сходится.
+        send(&app, "POST", "/pending", Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 1, "price": 10}))).await;
+        let before = st.broker.lock().await.balance(DEFAULT_USER);
+
+        // А теперь операция, которая меняет счёт в обход журнала — ровно то, что
+        // случится, если кто-то добавит путь и не пропишет событие.
+        let out: Result<(), ApiErr> = with_account(&st, DEFAULT_USER, Origin::Client, |b| {
+            let mut snap = b.snapshot(DEFAULT_USER);
+            snap.balance += 777_000;
+            b.restore(DEFAULT_USER, snap);
+            Ok(())
+        })
+        .await;
+        assert!(out.is_err(), "несписанное изменение обязано быть отклонено");
+        assert_eq!(
+            st.broker.lock().await.balance(DEFAULT_USER),
+            before,
+            "и откачено: деньги без проводки не остаются на счёте"
+        );
+    }
+
+    /// Счёт со слепком, но без журнала, — отдельный диагноз `no_entries`, и он ведёт
+    /// в карантин: переиграть такой счёт нечем, а править его деньги вслепую нельзя.
+    #[tokio::test]
+    async fn an_account_without_a_journal_is_quarantined_as_no_entries() {
+        struct SnapshotOnlyStore;
+        #[async_trait::async_trait]
+        impl persistence::Persistence for SnapshotOnlyStore {
+            async fn init(&self) -> Result<(), persistence::StoreError> {
+                Ok(())
+            }
+            async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
+                // Инварианты в порядке: расходится именно история, а не состояние.
+                let snap = broker::AccountSnapshot { balance: 42_000_000, next_id: 0, ..Default::default() };
+                Ok(persistence::LoadedState { accounts: vec![(DEFAULT_USER, snap)], journals: vec![] })
+            }
+            async fn save_account(&self, _u: UserId, _s: &broker::AccountSnapshot, _e: &[journal::AccountEvent]) -> Result<(), persistence::StoreError> {
+                Ok(())
+            }
+        }
+        let st = build_state_with(Arc::new(SnapshotOnlyStore));
+        restore_state(&st).await.expect("сервис обязан стартовать: стоп сервиса не применяется нигде");
+        assert!(st.quarantined.lock().await.contains(&DEFAULT_USER), "счёт без истории обязан уйти в карантин");
+
+        let app = router(st);
+        let (status, body) = send(&app, "GET", "/account/journal", None).await;
+        assert_eq!(status, StatusCode::OK, "читать можно и в карантине");
+        assert_eq!(body["status"], "no_entries", "диагноз обязан называть беду своим именем: {body}");
+    }
+
+    /// «Журнал недоступен» — **не** «записей нет». В первом случае мы не знаем истории
+    /// и стартовать нельзя; во втором знаем, что её нет, и счёт уходит в карантин, а
+    /// сервис работает. Склеить их значило бы работать на выдуманной истории.
+    #[tokio::test]
+    async fn unreadable_storage_is_not_the_same_as_an_empty_journal() {
+        struct UnreadableStore;
+        #[async_trait::async_trait]
+        impl persistence::Persistence for UnreadableStore {
+            async fn init(&self) -> Result<(), persistence::StoreError> {
+                Ok(())
+            }
+            async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
+                Err(persistence::StoreError("журнал недоступен".into()))
+            }
+            async fn save_account(&self, _u: UserId, _s: &broker::AccountSnapshot, _e: &[journal::AccountEvent]) -> Result<(), persistence::StoreError> {
+                Ok(())
+            }
+        }
+        let st = build_state_with(Arc::new(UnreadableStore));
+        let out = restore_state(&st).await;
+        assert!(out.is_err(), "на недоступном журнале сервис не стартует");
+        assert!(st.quarantined.lock().await.is_empty(), "карантин тут ни при чём: мы вообще ничего не прочитали");
+    }
+
+    /// Испорченная цепочка в хранилище ловится при подъёме: счёт в карантин, сервис
+    /// работает, состояние НЕ чинится — слепок остаётся таким, каким его подняли.
+    #[tokio::test]
+    async fn a_tampered_journal_quarantines_the_account_and_is_not_repaired() {
+        let store = Arc::new(persistence::MemoryStore::new());
+        {
+            let st = build_state_with(store.clone());
+            let app = router(st.clone());
+            send(&app, "POST", "/pending", Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 5, "price": 100}))).await;
+        }
+        // Правим ленту так, как её правил бы человек с доступом к базе: меняем
+        // содержимое записи, оставив отпечаток прежним.
+        struct Tampered(Arc<persistence::MemoryStore>);
+        #[async_trait::async_trait]
+        impl persistence::Persistence for Tampered {
+            async fn init(&self) -> Result<(), persistence::StoreError> {
+                Ok(())
+            }
+            async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
+                let mut loaded = self.0.load_all().await?;
+                for (_, lane) in loaded.journals.iter_mut() {
+                    let v = &lane[0];
+                    lane[0] = journal::AccountEvent::from_storage(
+                        v.seq(),
+                        v.at_ms(),
+                        v.origin().clone(),
+                        journal::EventKind::AccountOpened { balance: 99_000_000 },
+                        v.prev(),
+                        v.hash(),
+                    );
+                }
+                Ok(loaded)
+            }
+            async fn save_account(&self, u: UserId, s: &broker::AccountSnapshot, e: &[journal::AccountEvent]) -> Result<(), persistence::StoreError> {
+                self.0.save_account(u, s, e).await
+            }
+        }
+        let st2 = build_state_with(Arc::new(Tampered(store.clone())));
+        restore_state(&st2).await.expect("сервис обязан стартовать");
+        assert!(st2.quarantined.lock().await.contains(&DEFAULT_USER), "подделанная лента — карантин");
+
+        let app2 = router(st2.clone());
+        let (status, _) = send(&app2, "POST", "/pending", Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 1, "price": 1}))).await;
+        assert_eq!(status, StatusCode::LOCKED, "мутации по счёту с испорченной историей не проходят");
+        let snap = st2.broker.lock().await.snapshot(DEFAULT_USER);
+        assert_eq!(snap.pendings.len(), 1, "состояние не чинится и не затирается: улика остаётся");
+    }
+
+    /// Отказ хранилища не оставляет записи в журнале: иначе в памяти была бы история,
+    /// которой нет в базе, и после рестарта она исчезла бы молча.
+    #[tokio::test]
+    async fn a_failed_write_leaves_no_entry_in_the_journal() {
+        struct FailingStore;
+        #[async_trait::async_trait]
+        impl persistence::Persistence for FailingStore {
+            async fn init(&self) -> Result<(), persistence::StoreError> {
+                Ok(())
+            }
+            async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
+                Ok(persistence::LoadedState::default())
+            }
+            async fn save_account(&self, _u: UserId, _s: &broker::AccountSnapshot, _e: &[journal::AccountEvent]) -> Result<(), persistence::StoreError> {
+                Err(persistence::StoreError("диск горит".into()))
+            }
+        }
+        let st = build_state_with(Arc::new(FailingStore));
+        let app = router(st.clone());
+        let (status, _) = send(&app, "POST", "/pending", Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 1, "price": 10}))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(events_of(&st).await.is_empty(), "незаписанного в хранилище в журнале быть не должно");
     }
 }

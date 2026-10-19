@@ -15,8 +15,8 @@
 //! ## Почему трейт
 //!
 //! Реализация меняется, не задевая логику брокера и обработчики gateway: сейчас
-//! [`NoopStore`] (всё в памяти, как раньше) и `PgStore` (PostgreSQL); в Фазе 3
-//! состояние переедет на журнал событий — граница останется здесь же.
+//! [`MemoryStore`] (всё в памяти процесса) и `PgStore` (PostgreSQL). Журнал событий
+//! счёта (TRM-13) живёт здесь же, рядом со слепком, и пишется с ним одной транзакцией.
 //!
 //! ## Порядок записи (важно)
 //!
@@ -27,6 +27,13 @@
 //! 2. **отпустить лок**;
 //! 3. `save_account(...)` — запись одной транзакцией;
 //! 4. не прошло — вернуть счёт к предыдущему слепку (под локом) и ответить `503`.
+//!
+//! ## Слепок и журнал пишутся вместе (TRM-13)
+//!
+//! `save_account` принимает и слепок, и новые записи журнала, и кладёт их **одной
+//! транзакцией**. Иначе мы сами бы производили то расхождение, которое журнал заведён
+//! обнаруживать: упавшая между двумя записями транзакция оставила бы остаток без
+//! проводки или проводку без остатка.
 
 pub mod money;
 mod pg;
@@ -35,6 +42,7 @@ pub use pg::PgStore;
 
 use async_trait::async_trait;
 
+use broker::journal::AccountEvent;
 use broker::AccountSnapshot;
 use domain::account::UserId;
 
@@ -55,6 +63,10 @@ impl std::error::Error for StoreError {}
 pub struct LoadedState {
     /// Счета брокера.
     pub accounts: Vec<(UserId, AccountSnapshot)>,
+    /// Журналы счетов (TRM-13), в порядке записи. Счёт без журнала здесь просто
+    /// отсутствует — и это **не** то же самое, что недоступное хранилище: туда мы
+    /// вообще не доходим, чтение отдаёт [`StoreError`].
+    pub journals: Vec<(UserId, Vec<AccountEvent>)>,
 }
 
 /// Контракт хранилища состояния.
@@ -66,9 +78,13 @@ pub trait Persistence: Send + Sync {
     /// Поднять всё состояние. Вызывается один раз на старте, до приёма запросов.
     async fn load_all(&self) -> Result<LoadedState, StoreError>;
 
-    /// Сохранить слепок счёта одной транзакцией: позиции и отложенные ордера
-    /// переписываются целиком, история закрытых сделок дописывается.
-    async fn save_account(&self, user: UserId, snap: &AccountSnapshot) -> Result<(), StoreError>;
+    /// Сохранить слепок счёта и новые записи его журнала **одной транзакцией**:
+    /// позиции и отложенные ордера переписываются целиком, история закрытых сделок и
+    /// журнал — только дописываются.
+    ///
+    /// `events` уже запечатаны вызывающим (номер, время, источник, отпечаток): здесь
+    /// их содержимое не меняется и не досочиняется.
+    async fn save_account(&self, user: UserId, snap: &AccountSnapshot, events: &[AccountEvent]) -> Result<(), StoreError>;
 
     /// Найти или создать внутренний `UserId` по внешней личности `(tenant, sub)` из
     /// провалидированного SSO-токена (ADR-023, фаза Т2). Маппинг стабилен между
@@ -99,20 +115,56 @@ pub trait Persistence: Send + Sync {
     // `NoopStore` идут все тесты — то есть не выполнялась ни разу (TRM-06).
 }
 
-/// Заглушка: ничего не хранит. Поведение платформы ровно как до ADR-016 —
-/// перезапуск обнуляет состояние. Используется, когда `DATABASE_URL` не задан
-/// (локальный запуск и существующие тесты не требуют живой БД).
-pub struct NoopStore;
+/// Хранилище в памяти процесса: режим без `DATABASE_URL` (локальный запуск и тесты).
+///
+/// **Пришло на смену `NoopStore`, и это не косметика.** `NoopStore` ничего не делал, а
+/// все тесты шли на нём — то есть путь записи не выполнялся ни разу, и ровно так у нас
+/// однажды «работал» пустой инвариант (TRM-06). Здесь путь записи настоящий: события
+/// складываются в ленту, номера проверяются, подъём возвращает то же, что положили.
+/// Durability от этого не появляется — состояние живёт, пока жив процесс, — но **код**,
+/// который с БД отвечает за журнал, в тестах выполняется, а не обходится стороной.
+#[derive(Default)]
+pub struct MemoryStore {
+    accounts: std::sync::Mutex<std::collections::HashMap<UserId, AccountSnapshot>>,
+    journals: std::sync::Mutex<std::collections::HashMap<UserId, Vec<AccountEvent>>>,
+}
+
+impl MemoryStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 #[async_trait]
-impl Persistence for NoopStore {
+impl Persistence for MemoryStore {
     async fn init(&self) -> Result<(), StoreError> {
         Ok(())
     }
+
     async fn load_all(&self) -> Result<LoadedState, StoreError> {
-        Ok(LoadedState::default())
+        let accounts = self.accounts.lock().map_err(|_| StoreError("память счетов испорчена".into()))?;
+        let journals = self.journals.lock().map_err(|_| StoreError("память журналов испорчена".into()))?;
+        let mut acc: Vec<(UserId, AccountSnapshot)> = accounts.iter().map(|(u, s)| (*u, s.clone())).collect();
+        acc.sort_by_key(|(u, _)| u.0);
+        let mut jr: Vec<(UserId, Vec<AccountEvent>)> = journals.iter().map(|(u, e)| (*u, e.clone())).collect();
+        jr.sort_by_key(|(u, _)| u.0);
+        Ok(LoadedState { accounts: acc, journals: jr })
     }
-    async fn save_account(&self, _user: UserId, _snap: &AccountSnapshot) -> Result<(), StoreError> {
+
+    async fn save_account(&self, user: UserId, snap: &AccountSnapshot, events: &[AccountEvent]) -> Result<(), StoreError> {
+        let mut accounts = self.accounts.lock().map_err(|_| StoreError("память счетов испорчена".into()))?;
+        let mut journals = self.journals.lock().map_err(|_| StoreError("память журналов испорчена".into()))?;
+        let lane = journals.entry(user).or_default();
+        // Только добавление, и только в хвост. Повтор номера — отказ, как и уникальный
+        // ключ в БД: журнал, в который можно записать «поверх», журналом не является.
+        for e in events {
+            let expected = lane.last().map(|x: &AccountEvent| x.seq()).unwrap_or(0) + 1;
+            if e.seq() != expected {
+                return Err(StoreError(format!("журнал счёта {}: ожидалась запись №{expected}, пришла №{}", user.0, e.seq())));
+            }
+            lane.push(e.clone());
+        }
+        accounts.insert(user, snap.clone());
         Ok(())
     }
 }
