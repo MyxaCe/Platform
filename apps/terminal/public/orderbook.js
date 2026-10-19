@@ -55,6 +55,18 @@
 .ob__group { background: var(--panel2,#151a25); border: 1px solid var(--border,#1f2735); color: var(--text,#d7dce5);
   border-radius: 5px; padding: 2px 6px; font-size: 11px; font-family: inherit; cursor: pointer; }
 
+/* Стакан, который перестал обновляться (TRM-16): уровни гаснут, но остаются —
+   пустой стакан означал бы «ликвидности нет», а это неправда. */
+.ob[data-stale] { position: relative; }
+.ob[data-stale] .ob__side { opacity: .35; }
+/* attr() читает атрибут СВОЕГО элемента, поэтому метка висит на корне .ob,
+   где и стоит data-stale-label, а не на шапке. Справа от неё кнопка «⋯» —
+   отступ её не накрывает. Обратных кавычек здесь быть не может: весь блок
+   лежит внутри шаблонной строки JS, и одна такая кавычка обрывает её. */
+.ob[data-stale]::after { content: attr(data-stale-label); position: absolute; top: 9px; right: 36px; z-index: 7;
+  font-size: 10px; font-weight: 700; letter-spacing: .4px; color: var(--down,#ef5350);
+  background: var(--panel,#10141d); border: 1px solid var(--down,#ef5350); border-radius: 4px;
+  padding: 1px 6px; pointer-events: none; }
 .ob__cols { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; padding: 5px 10px;
   color: var(--muted,#6b7688); font-size: 10px; }
 .ob__cols span:nth-child(n+2) { text-align: right; }
@@ -216,10 +228,13 @@
       const maxCum = Math.max(1, asksC.length ? asksC[asksC.length - 1][2] : 1, bidsC.length ? bidsC[bidsC.length - 1][2] : 1);
       const width = (q, c) => (cfg.depth === 'cum' ? (c / maxCum) : (q / maxRow)) * 100;
 
+      // Разрядность объёма — у инструмента, как и масштаб (Р-064). Было
+      // `toFixed(3)` при делении на `10 ** qd`: два разных уровня стакана
+      // показывались одним числом, и по нему ставят заявку.
       const row = ([p, q, c], cls) => {
         const price = (p / ps).toFixed(pd);
         return `<div class="brow ${cls}" data-p="${price}"><div class="bar" style="width:${width(q, c).toFixed(1)}%"></div>` +
-          `<span class="bp">${price}</span><span class="bq">${(q / qs).toFixed(3)}</span><span class="bt">${compact((p / ps) * (q / qs))}</span></div>`;
+          `<span class="bp">${price}</span><span class="bq">${(q / qs).toFixed(qd)}</span><span class="bt">${compact((p / ps) * (q / qs))}</span></div>`;
       };
       elAsks.innerHTML = asksC.slice().reverse().map((r) => row(r, 'ask')).join('');
       elBids.innerHTML = bidsC.map((r) => row(r, 'bid')).join('');
@@ -291,10 +306,69 @@
       return Math.min(1000, Math.max(20, rows * mul));
     }
 
+    /**
+     * Отказ обязан быть виден как отказ (TRM-16).
+     *
+     * Было `catch { return; }` — та же семья, что в `stats.js`: обрыв связи и
+     * ответ не той формы неразличимы и наружу не выходят, а стакан продолжает
+     * показывать прежние уровни как текущие. На торговом экране это хуже, чем
+     * на полосе статистики: по уровню ставят заявку.
+     *
+     * Уровни НЕ стираем — они были верны на момент последнего чтения, а пустой
+     * стакан означал бы «ликвидности нет», что неправда. Вместо этого гасим их
+     * и ставим метку с причиной.
+     */
+    let failKind = null;
+    let failCount = 0;
+
+    const LABEL = { unreachable: 'НЕТ СВЯЗИ', malformed: 'ОТВЕТ НЕ ТОТ' };
+    const WHY = {
+      unreachable: 'Стакан не обновляется: источник не ответил. Уровни — с последнего успешного чтения.',
+      malformed: 'Стакан не обновляется: источник ответил не тем. Уровни — с последнего успешного чтения.',
+    };
+
+    function fail(kind, detail) {
+      const changed = failKind !== kind;
+      failCount = changed ? 1 : failCount + 1;
+      failKind = kind;
+      root.setAttribute('data-stale', kind);
+      root.setAttribute('data-stale-label', LABEL[kind]);
+      root.title = WHY[kind];
+      // На смене состояния, а не на каждом тике: опрос идёт раз в 700 мс, и
+      // поток одинаковых строк читать перестанут так же быстро, как молчание.
+      if (changed) console.error(`[orderbook] ${WHY[kind]}`, detail);
+      if (ctx.onError) ctx.onError({ kind, detail, count: failCount });
+    }
+
+    function succeeded() {
+      if (failKind) {
+        console.info(`[orderbook] обновление восстановлено после ${failCount} неудач (${failKind})`);
+      }
+      failKind = null;
+      failCount = 0;
+      root.removeAttribute('data-stale');
+      root.removeAttribute('data-stale-label');
+      root.title = '';
+    }
+
     async function refresh() {
       const id = ctx.instrument(); if (id == null) return;
-      let d; try { d = await ctx.fetch(id, needLevels()); } catch { return; }
-      if (!d || !d.asks) return;
+
+      let d;
+      try {
+        d = await ctx.fetch(id, needLevels());
+      } catch (e) {
+        fail('unreachable', e);
+        return;
+      }
+
+      // Ответ без уровней — ошибка формы, а не блип: сама она не пройдёт.
+      if (!d || !d.asks) {
+        fail('malformed', d);
+        return;
+      }
+
+      succeeded();
       last = d;
       render();
     }

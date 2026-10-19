@@ -106,7 +106,11 @@ test('v2: поле logo не читается — его там нет', (t) => 
 
 // ---- Форма legacy ----------------------------------------------------------
 
-test('legacy: плоский ответ читается по-прежнему', (t) => {
+test('legacy: плоский логотип показывается и на тёмной теме', (t) => {
+  // Запрет Р-063 намеренно НЕ распространён на legacy: довод там про имя поля
+  // `logoLight`, а здесь поле называется `logo` — фон в его имени не назван, и
+  // терминал показывает его на тёмной теме с самого начала. Ломать работающий
+  // экран доводом, который к его полю не относится, мы не стали.
   // Обе формы обязаны работать: момент переезда контура на v2 нам не
   // подчиняется, и потребитель, умеющий только одну форму, остаётся без
   // логотипа либо до переезда, либо после.
@@ -201,11 +205,11 @@ test('светлая тема берёт logoLight, тёмная — logoDark', 
   assert.equal(markSrc(document), 'https://media/apex-dark.svg', 'смена темы меняет логотип');
 });
 
-test('нет варианта для тёмной темы — показываем основной, а не пустоту', (t) => {
-  // Контракт запрещает выдумывать тёмный вариант за владельца бренда, но
-  // `logoLight` там назван «основным логотипом», а тема терминала по
-  // умолчанию тёмная: правило «нет logoDark — логотипа нет» оставило бы без
-  // логотипа большинство посетителей.
+test('нет варианта для тёмной темы — имя текстом, а не светлый знак (Р-063)', (t) => {
+  // Решение штаба против прежнего прочтения этой команды. `logoLight`
+  // предназначен для светлого фона, то есть вероятно нарисован тёмными
+  // чернилами: на тёмной теме он не «хуже тёмного варианта», а невидим —
+  // вышло бы пустое место, про которое код считает, что логотип показан.
   const { window, document, cleanup } = setup();
   t.after(cleanup);
 
@@ -214,7 +218,44 @@ test('нет варианта для тёмной темы — показыва�
 
   window.Theming.applyBrand(brand);
 
+  assert.equal(markSrc(document), null, 'светлый знак на тёмный фон не ставим');
+  assert.equal(document.querySelector('.logo__mark').textContent, 'A', 'знак уступает место инициалу');
+  assert.equal(document.getElementById('brandName').textContent, 'Apex', 'полное имя рядом');
+});
+
+test('тот же бренд на светлой теме знак показывает', (t) => {
+  // Зеркало предыдущего. Без этой пары мутация «не показывать логотип
+  // никогда» осталась бы зелёной: отказ касается тёмного фона, а не логотипа.
+  const { window, document, cleanup } = setup();
+  t.after(cleanup);
+
+  const brand = v2();
+  brand.brand.logoDark = null;
+
+  window.Theming.setTheme('light');
+  window.Theming.applyBrand(brand);
+
   assert.equal(markSrc(document), 'https://media/apex-light.svg');
+});
+
+test('переход на тёмную тему убирает светлый знак, а не оставляет висеть', (t) => {
+  // Знак переиспользуется между перерисовками. Если бы смена темы его не
+  // трогала, светлый логотип остался бы на тёмном фоне — то есть исчез бы с
+  // экрана, оставив пустой квадрат.
+  const { window, document, cleanup } = setup();
+  t.after(cleanup);
+
+  const brand = v2();
+  brand.brand.logoDark = null;
+
+  window.Theming.setTheme('light');
+  window.Theming.applyBrand(brand);
+  assert.equal(markSrc(document), 'https://media/apex-light.svg');
+
+  window.Theming.setTheme('dark');
+
+  assert.equal(markSrc(document), null, 'картинка убрана');
+  assert.equal(document.querySelector('.logo__mark').textContent, 'A');
 });
 
 test('та же картинка не пересоздаётся при смене темы', (t) => {
@@ -224,7 +265,9 @@ test('та же картинка не пересоздаётся при смен
   t.after(cleanup);
 
   const brand = v2();
-  brand.brand.logoDark = null; // в обеих темах логотип один и тот же
+  // Оба варианта — один файл: тогда смена темы не меняет адрес, и видно,
+  // переиспользуется элемент или создаётся заново.
+  brand.brand.logoDark = img('https://media/apex-light.svg', 'Apex');
 
   window.Theming.applyBrand(brand);
   const before = document.querySelectorAll('.logo__mark img');
@@ -237,7 +280,10 @@ test('та же картинка не пересоздаётся при смен
   assert.equal(after[0], before[0], 'тот же элемент, а не новый с тем же адресом');
 });
 
-test('фавикон берётся из favicon, а без него — из логотипа', (t) => {
+test('фавикон не зависит от темы и берёт logoLight', (t) => {
+  // Вкладка браузера про нашу тему ничего не знает. Оставить её без иконки
+  // из-за тёмной темы терминала значило бы перенести наше ограничение туда,
+  // где оно не действует.
   const { window, document, cleanup } = setup();
   t.after(cleanup);
 
@@ -246,8 +292,10 @@ test('фавикон берётся из favicon, а без него — из л
 
   const noFav = v2();
   noFav.brand.favicon = null;
-  window.Theming.applyBrand(noFav);
-  assert.equal(document.querySelector('link[rel="icon"]').href, 'https://media/apex-dark.svg');
+  noFav.brand.logoDark = null;
+  window.Theming.applyBrand(noFav); // тема тёмная, знака в шапке нет
+
+  assert.equal(document.querySelector('link[rel="icon"]').href, 'https://media/apex-light.svg');
 });
 
 // ---- Адрес ресурса ---------------------------------------------------------

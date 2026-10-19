@@ -396,6 +396,10 @@ document.addEventListener('mouseout', (e) => { if (e.target.closest('[data-tip]'
 const FEED_STALE_MS = 20000;
 let lastFeedMsgAt = 0;
 let wsOpen = false;
+/** Сколько сообщений фида не разобралось за сессию. Ноль — не «всё хорошо», а
+ *  «пока ни одного»: различать их помогает возраст последнего сообщения. */
+let feedDropped = 0;
+
 function renderFeedStatus() {
   const st = document.getElementById('status');
   const age = lastFeedMsgAt ? Date.now() - lastFeedMsgAt : Infinity;
@@ -409,7 +413,10 @@ function renderFeedStatus() {
       : `socket open, no market data for ${lastFeedMsgAt ? Math.round(age / 1000) + 's' : 'the whole session'}`;
   if (st) {
     st.className = 'status ' + (live ? 'status--on' : 'status--off');
-    st.title = why;
+    // Неразобранные сообщения приписываем к подсказке, а не прячем: зелёная
+    // точка при сыплющемся разборе — ровно то «правильное на вид состояние»,
+    // которое мы ловим.
+    st.title = feedDropped ? `${why}; не разобрано сообщений: ${feedDropped}` : why;
   }
   // Слово рядом с названием биржи — тоже утверждение о состоянии, а не украшение.
   const label = document.getElementById('feedLabel');
@@ -424,7 +431,22 @@ function connectWS() {
   ws.onopen = () => { wsOpen = true; renderFeedStatus(); };
   ws.onclose = () => { wsOpen = false; renderFeedStatus(); setTimeout(connectWS, 1500); };
   ws.onmessage = (ev) => {
-    let e; try { e = JSON.parse(ev.data); } catch { return; }
+    let e;
+    try {
+      e = JSON.parse(ev.data);
+    } catch (err) {
+      // Мягкий разбор означает «не падает», а не «исчезает без следа»
+      // (TRM-16). Сообщение, которое не разобралось, — это либо наш сломанный
+      // шлюз, либо чужой формат; без счётчика и строки в логе они неотличимы
+      // друг от друга и от «биржа молчит». Счёт виден в подсказке индикатора
+      // фида, так что след остаётся и в интерфейсе, а не только в консоли.
+      feedDropped += 1;
+      if (feedDropped === 1 || feedDropped % 50 === 0) {
+        console.error(`[feed] сообщение не разобрано (всего ${feedDropped})`, err, String(ev.data).slice(0, 200));
+      }
+      renderFeedStatus();
+      return;
+    }
     lastFeedMsgAt = Date.now();
     renderFeedStatus();
     for (const x of e) if (x.type === 'trade') { onLiveTrade(x.instrument, x.price, x.qty); trades.pushMarket(x); }
@@ -530,7 +552,13 @@ async function pollAccount() {
     const p = document.getElementById('mPnl');
     p.textContent = usd(a.open_pnl);
     p.style.color = a.open_pnl > 0 ? 'var(--up)' : a.open_pnl < 0 ? 'var(--down)' : '';
-  } catch (e) { /* */ }
+  } catch (e) {
+    // Было `catch (e) { }` — глушилось всё, включая ошибку формы ответа счёта
+    // (TRM-16). `api.account()` сеть уже проглатывает сам и возвращает `null`,
+    // поэтому сюда долетает не блип, а дефект: отсутствующий узел разметки или
+    // поле не того типа. Такое не проходит само и обязано быть громким.
+    console.error('[account] метрики счёта не отрисованы', e);
+  }
 }
 // Сигналы считаются из свечей графика (данные хоста); показывает их виджет positions.js.
 function computeSignals() {
