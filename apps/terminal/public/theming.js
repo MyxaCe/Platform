@@ -62,53 +62,158 @@
     return [up(r), up(g), up(b)];
   }
 
-  // ---- Валидация ответа CMS ------------------------------------------------
-  // Не полноценный JSON-Schema-валидатор: проверяем критичные поля контракта
-  // (cms.brand.schema.json). Невалидное — отвергаем целиком, бренд не меняем.
-  function validLogo(l) {
-    if (l === null) return true;
-    return l && typeof l === 'object' && typeof l.url === 'string' && l.url.length > 0
-      && Number.isFinite(l.width) && Number.isFinite(l.height) && typeof l.alt === 'string';
+  // ---- Чтение ответа бренда: две формы, один канонический вид --------------
+  //
+  // CMS v2 отдаёт бренд публичным ресурсом БЕЗ ключа (Р-039, ADR-0035):
+  //   GET {CMS}/v1/public/sites/{slug}/brand
+  //   { contract, site: { slug, name },
+  //     brand: { logoLight, logoDark, logoMono, logoMark, favicon, emailLogo,
+  //              primaryColor, socials } }
+  // Поле, которое мы читали как `logo`, там называется `logoLight`, имя бренда
+  // переехало из корня в `site.name`, а слаг — из параметра в путь (TRM-12).
+  //
+  // Legacy-ответ `GET {CMS}/v1/cms/brand?site=&locale=` плоский:
+  //   { name, primaryColor, logo, favicon }
+  //
+  // Читаем ОБЕ формы, и это не перестраховка. Переезд контура на v2 и выкатка
+  // терминала — разные моменты, и порядок их нам не подчиняется: потребитель,
+  // умеющий только новую форму, остаётся без логотипа ровно в момент переезда,
+  // умеющий только старую — сразу после него. Обе формы снимают вопрос порядка.
+  //
+  // Жёсткость здесь опаснее мягкости. Прежняя проверка требовала валидный
+  // `primaryColor` и отвергала ВЕСЬ ответ, если его нет, — а в v2 это поле
+  // объявлено обнуляемым. Бренд с логотипом и именем, но без цвета, откатил бы
+  // терминал на кеш или на палитру платформы и показал бы чужое имя при живой
+  // CMS. Тот же дефект уже стоил кабинету бренда целиком: проверка на одно поле,
+  // отказ за весь объект. Поэтому поля читаются по отдельности, и негодное
+  // поле стоит своего поля, а не всего бренда.
+
+  /** Картинка бренда. `width/height/mimeType` для отрисовки не нужны — `<img>`
+   *  возьмёт размеры сам, — и требовать их значило бы отвергнуть годную
+   *  картинку из-за поля, которым мы не пользуемся. */
+  function readImage(v) {
+    if (!v || typeof v !== 'object') return null;
+    if (typeof v.url !== 'string' || v.url.length === 0) return null;
+    return { url: v.url, alt: typeof v.alt === 'string' ? v.alt : '' };
   }
-  function validBrand(b) {
-    return b && typeof b === 'object'
-      && typeof b.name === 'string' && b.name.length > 0
-      && /^#[0-9a-fA-F]{6}$/.test(b.primaryColor || '')
-      && validLogo(b.logo === undefined ? null : b.logo);
+
+  function readColor(v) {
+    return typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v) ? v : null;
+  }
+
+  function readName(v) {
+    return typeof v === 'string' && v.trim() !== '' ? v : null;
+  }
+
+  /**
+   * Приводит ответ любой из двух форм к одному виду.
+   * `null` — форма не опознана вовсе: раскрашиваться мусором мы не станем.
+   */
+  function normalizeBrand(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+
+    // Признак v2 — вложенные объекты `site` и `brand`. Опознаём по форме, а не
+    // по полю `contract`: оно там равно "v1" (версия контракта выдачи, не
+    // версия CMS), и ориентироваться на него значит поставить ловушку
+    // следующему читателю.
+    const v2 = !!raw.brand && typeof raw.brand === 'object'
+      && !!raw.site && typeof raw.site === 'object';
+    const src = v2 ? raw.brand : raw;
+    const name = readName(v2 ? raw.site.name : raw.name);
+
+    // Плоский ответ без имени неотличим от чужого JSON — например от страницы
+    // ошибки прокси. Для v2 опознавательный признак даёт сама форма.
+    if (!v2 && name === null) return null;
+
+    const brand = {
+      shape: v2 ? 'v2' : 'legacy',
+      name: name,
+      primaryColor: readColor(src.primaryColor),
+      logoLight: readImage(v2 ? src.logoLight : src.logo),
+      logoDark: v2 ? readImage(src.logoDark) : null,
+      favicon: readImage(src.favicon),
+    };
+
+    // Ответ опознан, но пригодного в нём нет ничего. Применять нечего, и
+    // «применили» было бы неправдой: отличать это от успеха обязан вызывающий,
+    // иначе в last-good ляжет пустышка.
+    if (!brand.name && !brand.primaryColor && !brand.logoLight && !brand.favicon) {
+      return null;
+    }
+
+    return brand;
+  }
+
+  /**
+   * Какой логотип показать в текущей теме.
+   *
+   * По контракту `logoLight` — «основной логотип», а `logoDark` — необязательный
+   * вариант для тёмной темы. Берём вариант темы, когда он есть, и основной,
+   * когда нет. Это НЕ та «подмена тёмного светлым», от которой предостерегает
+   * контракт: там речь о том, чтобы не выдумывать тёмный вариант за владельца
+   * бренда. Тема терминала по умолчанию тёмная, и правило «нет logoDark —
+   * логотипа нет» оставило бы без логотипа большинство посетителей.
+   */
+  function pickLogo(brand) {
+    if (currentTheme() === 'dark' && brand.logoDark) return brand.logoDark;
+    return brand.logoLight;
   }
 
   // ---- Применение бренда ---------------------------------------------------
-  function applyBrand(brand) {
-    if (!validBrand(brand)) return false;
 
-    const ch = hexToChannels(brand.primaryColor);
-    if (ch) {
-      root.style.setProperty('--accent', ch.join(' '));
-      root.style.setProperty('--accent-hover', lighten(ch, 0.12).join(' '));
-      // Тёмный акцент → светлый текст на нём, и наоборот (порог по яркости).
-      root.style.setProperty('--on-accent', luminance(ch) > 0.4 ? '#08090c' : '#f5f6f8');
+  /** Последний применённый бренд: логотип зависит от темы, а тему меняют и
+   *  после загрузки бренда. */
+  let applied = null;
+
+  function renderMark(brand) {
+    const mark = document.querySelector('.logo__mark');
+    if (!mark) return;
+
+    const logo = pickLogo(brand);
+    if (logo) {
+      const cur = mark.querySelector('img');
+      // Переиспользуем, а не пересоздаём: иначе каждая смена темы заставляла бы
+      // браузер грузить ту же картинку заново.
+      if (cur && cur.getAttribute('src') === logo.url) return;
+      mark.innerHTML = '';
+      const img = document.createElement('img');
+      img.src = logo.url;
+      img.alt = logo.alt || brand.name || '';
+      mark.appendChild(img);
+      return;
     }
 
-    const name = brand.name;
-    const brandEl = document.getElementById('brandName');
-    if (brandEl) brandEl.textContent = name;
-    if (name) document.title = name + ' · Terminal';
+    // Логотипа нет — буква имени. Если нет и имени, НЕ трогаем знак вовсе:
+    // поставить сюда заглушку значило бы стереть то, что уже нарисовано, ради
+    // поля, о котором CMS ничего не сказала.
+    if (brand.name) mark.textContent = brand.name.trim().charAt(0).toUpperCase();
+  }
 
-    const mark = document.querySelector('.logo__mark');
-    if (mark) {
-      if (brand.logo && brand.logo.url) {
-        mark.innerHTML = '';
-        const img = document.createElement('img');
-        img.src = brand.logo.url;
-        img.alt = brand.logo.alt || name || '';
-        mark.appendChild(img);
-      } else {
-        mark.textContent = (name || 'T').trim().charAt(0).toUpperCase();
+  function applyBrand(raw) {
+    const brand = normalizeBrand(raw);
+    if (!brand) return false;
+
+    if (brand.primaryColor) {
+      const ch = hexToChannels(brand.primaryColor);
+      if (ch) {
+        root.style.setProperty('--accent', ch.join(' '));
+        root.style.setProperty('--accent-hover', lighten(ch, 0.12).join(' '));
+        // Тёмный акцент → светлый текст на нём, и наоборот (порог по яркости).
+        root.style.setProperty('--on-accent', luminance(ch) > 0.4 ? '#08090c' : '#f5f6f8');
       }
     }
 
-    const fav = brand.favicon || brand.logo;
-    if (fav && fav.url) {
+    if (brand.name) {
+      const brandEl = document.getElementById('brandName');
+      if (brandEl) brandEl.textContent = brand.name;
+      document.title = brand.name + ' · Terminal';
+    }
+
+    applied = brand;
+    renderMark(brand);
+
+    const fav = brand.favicon || pickLogo(brand);
+    if (fav) {
       let link = document.querySelector('link[rel="icon"]');
       if (!link) { link = document.createElement('link'); link.rel = 'icon'; document.head.appendChild(link); }
       link.href = fav.url;
@@ -117,6 +222,12 @@
     document.dispatchEvent(new Event('themechange')); // график перечитает акцент
     return true;
   }
+
+  // Смена темы меняет и логотип. Слушатель только перерисовывает знак и сам
+  // события не шлёт — иначе `applyBrand` и он закольцевались бы.
+  document.addEventListener('themechange', function () {
+    if (applied) renderMark(applied);
+  });
 
   // ---- Загрузка из CMS -----------------------------------------------------
   function cacheBrand(b) {
@@ -128,15 +239,44 @@
       if (raw) applyBrand(JSON.parse(raw));
     } catch { /* нет валидного кеша — остаёмся на палитре платформы */ }
   }
-  async function fetchBrand(cfg) {
-    if (!cfg.brandUrl) return; // без прокси работаем на дефолтном бренде платформы
-    // Тенант приходит из ?site= (обязателен, ADR-023). CMS-ключ в браузер НЕ кладём:
-    // brand запрашивается через gateway-прокси платформы, ключ у него server-side.
-    const site = cfg.site || new URLSearchParams(location.search).get('site') || '';
+  /**
+   * Куда идти за брендом.
+   *
+   * В v2 слаг сайта стоит В ПУТИ: `{CMS}/v1/public/sites/{slug}/brand`. В
+   * конфиге такой адрес задаётся с плейсхолдером `{site}`; адрес без
+   * плейсхолдера считается legacy и получает слаг параметром.
+   *
+   * Ключа нет ни там, ни там, и это не упущение: публичный ресурс v2 выдаётся
+   * без ключа намеренно (Р-039) — тему терминала браузер грузит до логина.
+   *
+   * `null` — спрашивать нельзя. Адрес со слагом в пути без слага собрался бы в
+   * `/sites//brand`: это был бы запрос чужого или никакого бренда, то есть
+   * правдоподобный неверный ответ вместо отказа.
+   */
+  function brandRequestUrl(cfg) {
+    const base = String((cfg && cfg.brandUrl) || '').trim();
+    if (!base) return null; // адреса нет — остаёмся на палитре платформы
+
+    const site = (cfg && cfg.site)
+      || (typeof location !== 'undefined' ? new URLSearchParams(location.search).get('site') : '')
+      || '';
+
+    if (base.indexOf('{site}') !== -1) {
+      if (!site) return null;
+      return base.replace(/\{site\}/g, encodeURIComponent(site));
+    }
+
+    // Legacy: тенант параметром (ADR-023), локаль туда же. У публичного ресурса
+    // v2 локали нет вовсе — бренд от неё не зависит.
     const qs = new URLSearchParams();
     if (site) qs.set('site', site);
-    qs.set('locale', cfg.locale || 'en');
-    const url = `${cfg.brandUrl.replace(/\/$/, '')}?${qs}`;
+    qs.set('locale', (cfg && cfg.locale) || 'en');
+    return `${base.replace(/\/$/, '')}?${qs}`;
+  }
+
+  async function fetchBrand(cfg) {
+    const url = brandRequestUrl(cfg);
+    if (!url) return;
     try {
       const r = await fetch(url, { credentials: 'omit' });
       if (!r.ok) return;
@@ -160,5 +300,11 @@
     return { setTheme, toggleTheme, applyBrand, refresh: () => fetchBrand(cfg) };
   }
 
-  window.Theming = { init, applyBrand, setTheme, toggleTheme, currentTheme };
+  // `normalizeBrand` и `brandRequestUrl` экспортируются ради тестов, и это
+  // названо вслух: обе — чистые функции, в которых живёт вся разница между
+  // формой ответа v2 и legacy. Проверять их через сеть значило бы проверять
+  // заодно `fetch`, а читать глазами — не проверять вовсе.
+  window.Theming = {
+    init, applyBrand, setTheme, toggleTheme, currentTheme, normalizeBrand, brandRequestUrl,
+  };
 })();
