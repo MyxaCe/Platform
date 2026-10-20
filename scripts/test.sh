@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Прогон тестов Rust-workspace (backend/) через Docker-образ Rust (ADR-004).
+# Прогон проверок Rust-workspace (backend/) через Docker-образ Rust (ADR-004).
 # Кэш сборки и реестра crates.io — в именованных volume'ах (первый прогон медленный).
 # Тома переименованы под текущий проект (были platform-target/platform-registry от
 # допивотного репозитория). Старые НЕ удалены — решение по ним за владельцем; из-за
@@ -12,8 +12,22 @@
 # Монтируется **только на чтение** — чужая папка, править её мы не вправе.
 # Если каталога нет, переменная не задаётся вовсе, и тест сверки падает с
 # «сверка НЕ выполнена»: непроверенное не должно выглядеть пройденным.
+#
+# СОСТАВ ПРОВЕРОК (TRM-29). Здесь идут ТЕ ЖЕ проверки и в том же порядке, что в
+# CI (.github/workflows/ci.yml, задание «Тесты и clippy»): тесты, clippy, формат.
+# Раньше тут был только `cargo test`, а clippy жил исключительно в CI — и
+# закономерно нашёлся отказом в CI (TRM-27): позже всего и чужими глазами.
+# Проверка, которую гоняют только в CI, обнаруживается отказом в CI.
+# Поэтому пропуска отдельных шагов здесь нет намеренно: переключатель вроде
+# SKIP_CLIPPY однажды выставят и забудут, и мы вернёмся ровно сюда.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if ! docker info >/dev/null 2>&1; then
+  echo "[test.sh] Docker не отвечает — проверки НЕ выполнены (это не 'зелено')." >&2
+  echo "[test.sh] Запустите Docker Desktop и повторите." >&2
+  exit 1
+fi
 
 CMS_CONTRACTS="${CMS_CONTRACTS:-${ROOT}/../cms/src/contracts}"
 CONTRACTS_ARGS=()
@@ -23,10 +37,31 @@ else
   echo "[test.sh] каталог контрактов CMS не найден (${CMS_CONTRACTS}) — сверка эталонной таблицы не выполнится и покраснеет" >&2
 fi
 
+# Версию тулчейна печатаем ПЕРВОЙ строкой — ровно её не хватило в TRM-27.
+# Тег `rust:slim` плавающий: в образе может лежать тулчейн старше раннера, и
+# тогда новый линт виден только в CI. Печать версии делает расхождение видимым
+# сразу; устранить его совсем должен закреплённый тулчейн (см. отчёт TRM-29).
+#
+# -D warnings: предупреждение = ошибка. Флаги clippy и fmt скопированы из CI
+# дословно; расходиться им нельзя — иначе снова «у себя зелено, там красно».
 MSYS_NO_PATHCONV=1 docker run --rm \
   -e CARGO_TARGET_DIR=/target \
   -v "${ROOT}/backend:/app" -w /app \
   -v terminal-target:/target \
   -v terminal-registry:/usr/local/cargo/registry \
   "${CONTRACTS_ARGS[@]}" \
-  rust:slim sh -c "cargo test $*"
+  rust:slim sh -c '
+    set -eu
+    cargo clippy --version >/dev/null 2>&1 || rustup component add clippy
+    cargo fmt --version    >/dev/null 2>&1 || rustup component add rustfmt
+    echo "[test.sh] тулчейн: $(rustc --version) | $(cargo clippy --version)"
+
+    echo "[test.sh] --- тесты ---"
+    cargo test --workspace "$@"
+
+    echo "[test.sh] --- clippy ---"
+    cargo clippy --workspace --all-targets --message-format=short -- -D warnings
+
+    echo "[test.sh] --- формат ---"
+    cargo fmt --all -- --check
+  ' sh "$@"
