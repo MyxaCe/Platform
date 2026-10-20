@@ -318,34 +318,17 @@
      * стакан означал бы «ликвидности нет», что неправда. Вместо этого гасим их
      * и ставим метку с причиной.
      */
-    let failKind = null;
-    let failCount = 0;
+    const diag = window.Diag.reporter({ subject: 'orderbook', onError: ctx.onError, log: ctx.log });
 
-    const LABEL = { unreachable: 'НЕТ СВЯЗИ', malformed: 'ОТВЕТ НЕ ТОТ' };
-    const WHY = {
-      unreachable: 'Стакан не обновляется: источник не ответил. Уровни — с последнего успешного чтения.',
-      malformed: 'Стакан не обновляется: источник ответил не тем. Уровни — с последнего успешного чтения.',
-    };
-
-    function fail(kind, detail) {
-      const changed = failKind !== kind;
-      failCount = changed ? 1 : failCount + 1;
-      failKind = kind;
-      root.setAttribute('data-stale', kind);
-      root.setAttribute('data-stale-label', LABEL[kind]);
-      root.title = WHY[kind];
-      // На смене состояния, а не на каждом тике: опрос идёт раз в 700 мс, и
-      // поток одинаковых строк читать перестанут так же быстро, как молчание.
-      if (changed) console.error(`[orderbook] ${WHY[kind]}`, detail);
-      if (ctx.onError) ctx.onError({ kind, detail, count: failCount });
+    function fail(reason, detail) {
+      const { badge, why } = diag.fail(reason, detail);
+      root.setAttribute('data-stale', reason);
+      root.setAttribute('data-stale-label', badge);
+      root.title = `Стакан не обновляется: ${why}. Уровни — с последнего успешного чтения.`;
     }
 
     function succeeded() {
-      if (failKind) {
-        console.info(`[orderbook] обновление восстановлено после ${failCount} неудач (${failKind})`);
-      }
-      failKind = null;
-      failCount = 0;
+      diag.ok();
       root.removeAttribute('data-stale');
       root.removeAttribute('data-stale-label');
       root.title = '';
@@ -354,15 +337,25 @@
     async function refresh() {
       const id = ctx.instrument(); if (id == null) return;
 
-      let d;
+      let answer;
       try {
-        d = await ctx.fetch(id, needLevels());
+        answer = await ctx.fetch(id, needLevels());
       } catch (e) {
-        fail('unreachable', e);
+        fail('network', e);
         return;
       }
 
-      // Ответ без уровней — ошибка формы, а не блип: сама она не пройдёт.
+      const got = answer && typeof answer === 'object' && 'reason' in answer
+        ? answer
+        : { data: answer, reason: null };
+
+      if (got.reason) {
+        fail(got.reason, got.status);
+        return;
+      }
+
+      const d = got.data;
+      // Ответ без уровней — канал донёс, но не то.
       if (!d || !d.asks) {
         fail('malformed', d);
         return;

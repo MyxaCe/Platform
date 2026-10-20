@@ -176,6 +176,38 @@ test('сделок по инструменту нет — так и написа
   assert.match(env.root.querySelector('[data-rows="mine"]').textContent, /No trades on this instrument/);
 });
 
+test('не прочитали сделки — так и написано, а не «сделок нет» (QA-05)', async (t) => {
+  // «No trades on this instrument» — утверждение о счёте человека. Делать его
+  // по чтению, которого не было, нельзя: пустой список и неудавшееся чтение
+  // означают противоположное. Та же семья, что `change` с нулём вместо «не
+  // знаем».
+  const env = setup();
+  t.after(env.cleanup);
+  mount(env, { myTrades: async () => null });
+  await settle();
+
+  const text = env.root.querySelector('[data-rows="mine"]').textContent;
+  assert.match(text, /Не удалось прочитать/);
+  assert.doesNotMatch(text, /No trades on this instrument/);
+});
+
+test('отказ чтения не стирает прежние сделки', async (t) => {
+  // Они были верны на момент чтения; пустота означала бы, что их нет.
+  const env = setup();
+  t.after(env.cleanup);
+
+  let answer = [myDeal()];
+  const w = mount(env, { myTrades: async () => answer });
+  await settle();
+  assert.equal(rows(env.root, 'mine').length, 1);
+
+  answer = null;
+  await w.refreshMine();
+  await settle();
+
+  assert.equal(rows(env.root, 'mine').length, 1, 'строка осталась');
+});
+
 test('мои сделки запрашиваются для текущего инструмента', async (t) => {
   const env = setup();
   t.after(env.cleanup);

@@ -63,37 +63,26 @@
        * так же быстро, как молчание. Повторы считаются и называются числом при
        * восстановлении.
        */
-      let failKind = null;
-      let failCount = 0;
+      /**
+       * Диагностика — общим помощником (TRM-17), а не своей политикой.
+       *
+       * Раньше здесь жили свои имена причин (`unreachable`/`malformed`) и своя
+       * политика вывода. Имена оказались неверны: `unreachable` склеивал нашу
+       * сеть и отказ соседа — разные неполадки у разных людей. Теперь имена из
+       * `КОНТРАКТЫ.md` §4г, и приходят они от `api.js`, который единственный
+       * знает, что именно не получилось.
+       */
+      const diag = window.Diag.reporter({ subject: 'stats', onError: ctx.onError, log: ctx.log });
 
-      const LABEL = {
-        unreachable: 'НЕТ СВЯЗИ',
-        malformed: 'ОТВЕТ НЕ ТОТ',
-      };
-      const WHY = {
-        unreachable: 'Статистика не обновляется: источник не ответил. Числа — с последнего успешного чтения.',
-        malformed: 'Статистика не обновляется: источник ответил не тем. Числа — с последнего успешного чтения.',
-      };
-
-      function fail(kind, detail) {
-        const changed = failKind !== kind;
-        failCount = changed ? 1 : failCount + 1;
-        failKind = kind;
-
-        root.setAttribute('data-stale', kind);
-        root.setAttribute('data-stale-label', LABEL[kind]);
-        root.title = WHY[kind];
-
-        if (changed) console.error(`[stats] ${WHY[kind]}`, detail);
-        if (ctx.onError) ctx.onError({ kind, detail, count: failCount });
+      function fail(reason, detail) {
+        const { badge, why } = diag.fail(reason, detail);
+        root.setAttribute('data-stale', reason);
+        root.setAttribute('data-stale-label', badge);
+        root.title = `Статистика не обновляется: ${why}. Числа — с последнего успешного чтения.`;
       }
 
       function succeeded() {
-        if (failKind) {
-          console.info(`[stats] обновление восстановлено после ${failCount} неудач (${failKind})`);
-        }
-        failKind = null;
-        failCount = 0;
+        diag.ok();
         root.removeAttribute('data-stale');
         root.removeAttribute('data-stale-label');
         root.title = '';
@@ -102,21 +91,35 @@
       async function refresh() {
         const id = ctx.instrument(); if (id == null) return;
 
-        let list;
+        // Источник отдаёт `{ data, reason }`: причину называет тот, кто знает,
+        // что именно не получилось, а не тот, кто получил пустоту.
+        let answer;
         try {
-          list = await ctx.fetch(id);
+          answer = await ctx.fetch(id);
         } catch (e) {
-          fail('unreachable', e);
+          // Исключение из слоя чтения — это «не донесли», то есть `network`.
+          // Глушить его, как раньше, нельзя: отказ обязан быть виден.
+          fail('network', e);
           return;
         }
 
-        // Ошибка формы ответа — не сетевой блип, и ждать конца цикла опроса,
-        // чтобы о ней узнать, нельзя: она не пройдёт сама.
-        if (!Array.isArray(list)) {
-          fail('malformed', list);
+        const got = answer && typeof answer === 'object' && 'reason' in answer
+          ? answer
+          : { data: answer, reason: null };
+
+        if (got.reason) {
+          fail(got.reason, got.status);
           return;
         }
 
+        // Форма ответа — наша зона: канал донёс, но не то. Это `malformed` той
+        // же оси, и слово здесь то же самое.
+        if (!Array.isArray(got.data)) {
+          fail('malformed', got.data);
+          return;
+        }
+
+        const list = got.data;
         succeeded();
         root.innerHTML = list.map((st) => {
           const label = (ctx.labels && ctx.labels[st.tf]) || st.tf;
