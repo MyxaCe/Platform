@@ -268,7 +268,7 @@ impl Account {
         }
 
         self.positions.remove(&pos_id);
-        self.log(EventKind::PositionClosed { id: pos_id, exit: entry, cause: CloseCause::Netting });
+        self.log(EventKind::PositionClosed { id: pos_id, exit: entry, cause: CloseCause::Netting, observed: None, across_gap: false });
         let remainder = qty - closing;
         if remainder > 0 {
             // Встречный объём больше открытого: остаток открывает позицию в новую
@@ -282,18 +282,29 @@ impl Account {
     /// `cause` — не косметика: по журналу надо отличать «человек закрыл» от «сработал
     /// стоп». Иначе при разборе претензии «меня закрыли не по моей команде» ответить
     /// будет нечем, а это ровно тот разговор, ради которого журнал и заводится.
-    fn close_pos(&mut self, id: u64, mark: i64, cause: CloseCause) -> Option<Cents> {
+    /// `exec` — цена ИСПОЛНЕНИЯ (по ней считаются деньги), `observed` — цена,
+    /// которая была на рынке. У закрытия по команде это одно и то же, и
+    /// `observed` там `None`; у стопа и тейка на разрыве они расходятся, и
+    /// журнал обязан назвать обе (TRM-31).
+    fn close_pos(&mut self, id: u64, exec: i64, observed: Option<i64>, across_gap: bool, cause: CloseCause) -> Option<Cents> {
         let pos = self.positions.remove(&id)?;
-        let pnl = pos.unrealized(mark);
+        let pnl = pos.unrealized(exec);
         self.balance += pnl;
-        self.closed.push(ClosedDeal { instrument: pos.instrument, side: pos.side, qty: pos.qty, entry: pos.entry, exit: mark, pnl, pd: pos.pd, qd: pos.qd });
-        self.log(EventKind::PositionClosed { id, exit: mark, cause });
+        self.closed.push(ClosedDeal { instrument: pos.instrument, side: pos.side, qty: pos.qty, entry: pos.entry, exit: exec, pnl, pd: pos.pd, qd: pos.qd });
+        self.log(EventKind::PositionClosed { id, exit: exec, cause, observed, across_gap });
         Some(pnl)
     }
 
     /// Прогнать триггеры. Возвращает `true`, если состояние счёта изменилось —
     /// по этому признаку gateway понимает, какие счета надо сохранить (ADR-016).
-    fn run_triggers(&mut self, lev: i128, marks: &HashMap<u32, i64>) -> bool {
+    ///
+    /// `across_gap` — этот прогон идёт на первом тике после молчания фида, то
+    /// есть ряд цены разорван (Р-073, TRM-19). Поведение триггеров от этого
+    /// НЕ меняется: цена, пришедшая после дыры, — настоящая, и прятать её
+    /// значило бы не исполнить стоп на реальном движении. Меняется только
+    /// запись: закрытие на разрыве должно быть отличимо в журнале, потому что
+    /// спорят именно о нём.
+    fn run_triggers(&mut self, lev: i128, marks: &HashMap<u32, i64>, across_gap: bool) -> bool {
         // Сработавшие лимитные ордера → открыть позицию.
         let mut fire: Vec<PendingOrder> = Vec::new();
         self.pendings.retain(|_, p| match marks.get(&p.instrument) {
@@ -315,12 +326,18 @@ impl Account {
         for p in fire {
             // Сначала «ордер сработал», потом открытие позиции отдельной записью: это
             // два разных события, и у открывшейся позиции свой id, а не id ордера.
-            self.log(EventKind::PendingTriggered { id: p.id, price: p.price });
+            // В журнал идёт и НАБЛЮДЁННАЯ цена (TRM-31): исполнение по уровню
+            // ордера — наше решение, а что было на рынке — факт, и восстановить
+            // его потом будет неоткуда.
+            let observed = marks.get(&p.instrument).copied();
+            self.log(EventKind::PendingTriggered { id: p.id, price: p.price, observed, across_gap });
             let _ = self.try_open(lev, p.instrument, p.side, p.qty, p.price, p.pd, p.qd, p.sl, p.tp);
         }
 
-        // SL/TP по открытым позициям.
-        let mut to_close: Vec<(u64, i64, CloseCause)> = Vec::new();
+        // SL/TP по открытым позициям. Кортеж несёт обе цены — исполнения и
+        // наблюдённую: на спокойном рынке они совпадают, на разрыве расходятся,
+        // и журналу нужны обе.
+        let mut to_close: Vec<(u64, i64, i64, CloseCause)> = Vec::new();
         for pos in self.positions.values() {
             if let Some(&m) = marks.get(&pos.instrument) {
                 let sl_hit = pos.sl.is_some_and(|sl| match pos.side {
@@ -331,16 +348,19 @@ impl Account {
                     PosSide::Long => m >= tp,
                     PosSide::Short => m <= tp,
                 });
+                // Исполняем по УРОВНЮ триггера — так было и так остаётся: это
+                // политика исполнения, и менять её без решения владельца
+                // нельзя. Наблюдённая `m` идёт рядом, в запись.
                 if sl_hit {
-                    to_close.push((pos.id, pos.sl.unwrap(), CloseCause::StopLoss));
+                    to_close.push((pos.id, pos.sl.unwrap(), m, CloseCause::StopLoss));
                 } else if tp_hit {
-                    to_close.push((pos.id, pos.tp.unwrap(), CloseCause::TakeProfit));
+                    to_close.push((pos.id, pos.tp.unwrap(), m, CloseCause::TakeProfit));
                 }
             }
         }
         let closed_any = !to_close.is_empty();
-        for (id, mark, cause) in to_close {
-            self.close_pos(id, mark, cause);
+        for (id, exec, observed, cause) in to_close {
+            self.close_pos(id, exec, Some(observed), across_gap, cause);
         }
         fired_any || closed_any
     }
@@ -423,7 +443,10 @@ impl Broker {
 
     /// Закрыть позицию по марк-цене. Возвращает реализованный P&L.
     pub fn close(&mut self, user: UserId, id: u64, mark: i64) -> Result<Cents, BrokerError> {
-        self.acct(user).close_pos(id, mark, CloseCause::Command).ok_or(BrokerError::UnknownPosition)
+        // Закрытие по команде исполняется по той же цене, которую видели:
+        // расхождения нет, и `observed` здесь молчит — не потому что неизвестно,
+        // а потому что назвать нечего.
+        self.acct(user).close_pos(id, mark, None, false, CloseCause::Command).ok_or(BrokerError::UnknownPosition)
     }
 
     /// Пополнить счёт (демо: бумажные деньги). Возвращает новый баланс.
@@ -476,11 +499,13 @@ impl Broker {
     /// Возвращает **id счетов, состояние которых изменилось**. Обычный случай — цена
     /// движется, но ничего не сработало → пустой вектор, сохранять нечего. Без этого
     /// пришлось бы писать в БД все счета на каждом тике монитора (ADR-016).
-    pub fn check(&mut self, marks: &HashMap<u32, i64>) -> Vec<UserId> {
+    /// `across_gap` — первый прогон после молчания фида (Р-073). Передаёт его
+    /// вызывающий: о свежести цен знает тот, кто их принимает, а не брокер.
+    pub fn check(&mut self, marks: &HashMap<u32, i64>, across_gap: bool) -> Vec<UserId> {
         let lev = self.leverage;
         let mut changed = Vec::new();
         for (user, a) in self.accounts.iter_mut() {
-            if a.run_triggers(lev, marks) {
+            if a.run_triggers(lev, marks, across_gap) {
                 changed.push(*user);
             }
         }

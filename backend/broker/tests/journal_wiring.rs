@@ -119,7 +119,7 @@ fn stop_loss_is_recorded_with_its_cause_and_the_balance_replays() {
     r.record(Origin::Client);
 
     let marks: HashMap<u32, i64> = HashMap::from([(1, 48_500)]);
-    assert_eq!(r.b.check(&marks), vec![U], "стоп обязан сработать");
+    assert_eq!(r.b.check(&marks, false), vec![U], "стоп обязан сработать");
     // Источник — движок: человека в этот момент нет, и в записи этого не должно быть.
     r.record(Origin::System);
     r.must_reconcile("после срабатывания стопа");
@@ -134,7 +134,7 @@ fn take_profit_is_recorded_separately_from_stop_loss() {
     let mut r = Rig::new();
     r.b.open(U, 1, PosSide::Long, 1000, 50_000, PD, QD, None, Some(52_000)).unwrap();
     r.record(Origin::Client);
-    r.b.check(&HashMap::from([(1, 52_500)]));
+    r.b.check(&HashMap::from([(1, 52_500)]), false);
     r.record(Origin::System);
     r.must_reconcile("после тейка");
     assert!(matches!(
@@ -158,7 +158,7 @@ fn pending_lifecycle_is_recorded_place_cancel_and_fill() {
 
     r.b.place_pending(U, 1, PosSide::Long, 100, 4000, PD, QD, None, None);
     r.record(Origin::Client);
-    r.b.check(&HashMap::from([(1, 3_900)]));
+    r.b.check(&HashMap::from([(1, 3_900)]), false);
     r.record(Origin::System);
     r.must_reconcile("после исполнения ордера");
 
@@ -254,7 +254,7 @@ fn a_long_mixed_sequence_replays_to_the_same_account() {
     r.record(Origin::Client);
     r.b.place_pending(U, 3, PosSide::Long, 50, 1_000, PD, QD, None, None);
     r.record(Origin::Client);
-    r.b.check(&HashMap::from([(1, 48_000), (3, 900)]));
+    r.b.check(&HashMap::from([(1, 48_000), (3, 900)]), false);
     r.record(Origin::System);
     r.b.withdraw(U, 10_000).unwrap();
     r.record(Origin::Client);

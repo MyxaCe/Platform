@@ -64,6 +64,14 @@ pub struct AppState {
     /// по которому ничего не идёт, — это молчащий фид при бодром `connected`. Здоровье
     /// процесса не означает наличия связи.
     feed_last_msg: Arc<std::sync::atomic::AtomicI64>,
+    /// Фид молчал дольше порога, и этот перерыв ещё не отмечен в журнале.
+    ///
+    /// Снимается первым же прогоном триггеров по свежим ценам: именно он идёт
+    /// по РАЗОРВАННОМУ ряду (Р-073, TRM-19), и именно его записи обязаны быть
+    /// отличимы. Взводится один раз на перерыв, а не держится всё время
+    /// молчания: иначе «разрывом» оказался бы каждый тик простоя, и признак
+    /// перестали бы читать — как перестают читать молчание.
+    feed_gap_pending: Arc<std::sync::atomic::AtomicBool>,
     klines_cache: Arc<Mutex<KlineCache>>,
     depth_cache: Arc<Mutex<DepthCache>>,
     stats_cache: Arc<Mutex<StatsCache>>,
@@ -142,6 +150,7 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         symbols: Arc::new(symbols),
         tickers: Arc::new(Mutex::new(HashMap::new())),
         feed_last_msg: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        feed_gap_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         klines_cache: Arc::new(Mutex::new(HashMap::new())),
         depth_cache: Arc::new(Mutex::new(HashMap::new())),
         stats_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -339,6 +348,26 @@ impl AppState {
     /// Отметить, что от Binance пришло опознанное сообщение (см. `feed_last_msg`).
     pub(crate) fn mark_feed_alive(&self) {
         self.feed_last_msg.store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Разорван ли ряд цены к этому прогону триггеров (Р-073, TRM-19).
+    ///
+    /// Пока фид молчит дольше порога — взводим признак и отвечаем `false`:
+    /// цены старые, новых событий они не породят, и помечать нечего. Как
+    /// только фид ожил, ПЕРВЫЙ прогон получает `true` и признак гаснет — он
+    /// и идёт по разорванному ряду. Дальше ряд снова непрерывен.
+    ///
+    /// Порог один с `/health`: два числа для одного вопроса однажды разойдутся,
+    /// и тогда здоровье и журнал будут рассказывать разное об одном молчании.
+    pub(crate) fn note_feed_gap(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let last = self.feed_last_msg.load(Relaxed);
+        let stale = last == 0 || now_secs() - last > FEED_STALE_AFTER_SECS;
+        if stale {
+            self.feed_gap_pending.store(true, Relaxed);
+            return false;
+        }
+        self.feed_gap_pending.swap(false, Relaxed)
     }
 }
 
@@ -1323,7 +1352,13 @@ pub async fn monitor_tick(st: &AppState) {
             if m.is_empty() {
                 return;
             }
-            let changed = { st.broker.lock().await.check(&m) };
+            // Разрыв ряда определяет тот, кто принимает цены (Р-073, TRM-19).
+            // Молчание дольше порога взводит признак; первый же прогон по
+            // свежим ценам его СНИМАЕТ и помечает свои записи — дальше ряд
+            // снова непрерывен. Порог тот же, что у `/health`: два разных
+            // числа для одного вопроса однажды разойдутся.
+            let across_gap = st.note_feed_gap();
+            let changed = { st.broker.lock().await.check(&m, across_gap) };
             for user in changed {
                 let lock = account_lock(st, user).await;
                 let _guard = lock.lock().await;

@@ -173,7 +173,21 @@ pub enum EventKind {
     /// Частичное сворачивание: закрыта часть объёма по цене `exit`.
     PositionReduced { id: u64, qty: i64, exit: i64 },
     /// Позиция закрыта целиком.
-    PositionClosed { id: u64, exit: i64, cause: CloseCause },
+    ///
+    /// `exit` — цена, по которой **исполнено** (у стопа и тейка это уровень
+    /// триггера). `observed` — цена, которая в этот момент была **на рынке**.
+    /// На спокойном рынке они совпадают; на разрыве — нет, и тогда `exit`
+    /// называет цену, по которой никто не торговал.
+    ///
+    /// Журнал обязан писать **произошедшее** (TRM-31): «закрыто по 100», когда
+    /// рынок на 100 не торговался, — неправда в неизменяемой записи, которая
+    /// лежит в основании ручных проводок и разбора претензий. Политику
+    /// исполнения это НЕ меняет: чем закрывать — уровнем триггера или
+    /// наблюдённой ценой — решает владелец, и до его ответа `exit` прежний.
+    ///
+    /// `across_gap` — закрытие случилось на первом тике после молчания фида,
+    /// то есть ряд цены был разорван (Р-073).
+    PositionClosed { id: u64, exit: i64, cause: CloseCause, observed: Option<i64>, across_gap: bool },
     /// Размещён отложенный ордер.
     PendingPlaced {
         id: u64,
@@ -189,7 +203,12 @@ pub enum EventKind {
     /// Отложенный ордер снят.
     PendingCancelled { id: u64 },
     /// Отложенный ордер сработал: сам ордер исчез, а открытие позиции — отдельной записью.
-    PendingTriggered { id: u64, price: i64 },
+    ///
+    /// `price` — уровень ордера, по которому он исполнен; `observed` — цена на
+    /// рынке в тот момент. Та же причина, что у [`EventKind::PositionClosed`]:
+    /// у отложенного ордера разрыв лжёт ровно так же, и молчать об этом в
+    /// журнале нельзя только потому, что спорят чаще о стопах.
+    PendingTriggered { id: u64, price: i64, observed: Option<i64>, across_gap: bool },
 }
 
 // ------------------------- Каноническая запись -------------------------------
@@ -202,6 +221,14 @@ fn opt(v: Option<i64>) -> String {
     match v {
         Some(x) => x.to_string(),
         None => "-".to_string(),
+    }
+}
+
+fn flag(v: bool) -> &'static str {
+    if v {
+        "1"
+    } else {
+        "0"
     }
 }
 
@@ -231,6 +258,32 @@ fn num_opt(fs: &[(&str, &str)], key: &str) -> Result<Option<i64>, BadRecord> {
     match pick(fs, key)? {
         "-" => Ok(None),
         v => v.parse().map(Some).map_err(|_| BadRecord("поле записи не число")),
+    }
+}
+
+/// Поле, которого в записи могло не быть вовсе: оно появилось позже самой записи.
+///
+/// Отсутствие — **не порча**. Журнал неизменяем: записи, сделанные до
+/// расширения формата, обязаны читаться и после него, иначе первая же правка
+/// формата обнулила бы историю, то есть ровно то, ради чего журнал заведён.
+/// Поэтому «нет поля» и «поле пустое» здесь одно и то же, а вот «поле есть, но
+/// не разбирается» — по-прежнему порча.
+fn num_opt_added_later(fs: &[(&str, &str)], key: &str) -> Result<Option<i64>, BadRecord> {
+    match fs.iter().find(|(k, _)| *k == key) {
+        None => Ok(None),
+        Some((_, "-")) => Ok(None),
+        Some((_, v)) => v.parse().map(Some).map_err(|_| BadRecord("поле записи не число")),
+    }
+}
+
+/// Признак, появившийся позже записи. Та же терпимость, что и выше: нет поля —
+/// значит, о нём тогда не знали, и это «нет», а не «испорчено».
+fn flag_added_later(fs: &[(&str, &str)], key: &str) -> Result<bool, BadRecord> {
+    match fs.iter().find(|(k, _)| *k == key) {
+        None => Ok(false),
+        Some((_, "0")) => Ok(false),
+        Some((_, "1")) => Ok(true),
+        Some(_) => Err(BadRecord("поле-признак не 0 и не 1")),
     }
 }
 
@@ -279,14 +332,14 @@ impl EventKind {
                 opt(*tp)
             ),
             EventKind::PositionReduced { id, qty, exit } => format!("position_reduced id={id} qty={qty} exit={exit}"),
-            EventKind::PositionClosed { id, exit, cause } => {
+            EventKind::PositionClosed { id, exit, cause, observed, across_gap } => {
                 let c = match cause {
                     CloseCause::Command => "command",
                     CloseCause::StopLoss => "stop_loss",
                     CloseCause::TakeProfit => "take_profit",
                     CloseCause::Netting => "netting",
                 };
-                format!("position_closed id={id} exit={exit} cause={c}")
+                format!("position_closed id={id} exit={exit} cause={c} observed={} gap={}", opt(*observed), flag(*across_gap))
             }
             EventKind::PendingPlaced { id, instrument, side, qty, price, pd, qd, sl, tp } => format!(
                 "pending_placed id={id} instrument={instrument} side={} qty={qty} price={price} pd={pd} qd={qd} sl={} tp={}",
@@ -295,7 +348,9 @@ impl EventKind {
                 opt(*tp)
             ),
             EventKind::PendingCancelled { id } => format!("pending_cancelled id={id}"),
-            EventKind::PendingTriggered { id, price } => format!("pending_triggered id={id} price={price}"),
+            EventKind::PendingTriggered { id, price, observed, across_gap } => {
+                format!("pending_triggered id={id} price={price} observed={} gap={}", opt(*observed), flag(*across_gap))
+            }
         }
     }
 
@@ -345,6 +400,8 @@ impl EventKind {
                     "netting" => CloseCause::Netting,
                     _ => return Err(BadRecord("неизвестная причина закрытия")),
                 },
+                observed: num_opt_added_later(&f, "observed")?,
+                across_gap: flag_added_later(&f, "gap")?,
             },
             "pending_placed" => EventKind::PendingPlaced {
                 id: num(&f, "id")?,
@@ -358,7 +415,12 @@ impl EventKind {
                 tp: num_opt(&f, "tp")?,
             },
             "pending_cancelled" => EventKind::PendingCancelled { id: num(&f, "id")? },
-            "pending_triggered" => EventKind::PendingTriggered { id: num(&f, "id")?, price: num(&f, "price")? },
+            "pending_triggered" => EventKind::PendingTriggered {
+                id: num(&f, "id")?,
+                price: num(&f, "price")?,
+                observed: num_opt_added_later(&f, "observed")?,
+                across_gap: flag_added_later(&f, "gap")?,
+            },
             _ => return Err(BadRecord("неизвестный вид события")),
         })
     }
@@ -553,7 +615,12 @@ impl ReplayState {
                 self.balance += pnl;
                 self.closed.push(deal);
             }
-            EventKind::PositionClosed { id, exit, cause: _ } => {
+            // Свёртка считает деньги по ИСПОЛНЕННОЙ цене `exit`. `observed` и
+            // `across_gap` — свидетельство, а не вход расчёта: пока политику
+            // исполнения не изменили, баланс обязан получаться тот же, что и
+            // до появления этих полей, иначе расширение журнала молча
+            // переписало бы историю счетов.
+            EventKind::PositionClosed { id, exit, cause: _, observed: _, across_gap: _ } => {
                 let Some(i) = self.positions.iter().position(|p| p.id == *id) else {
                     self.orphans.push(*id);
                     return;
@@ -939,7 +1006,7 @@ mod tests {
             },
             EventKind::PositionIncreased { id: 1, add_qty: 300, add_entry: 5400, sl: None, tp: Some(5500) },
             EventKind::PositionReduced { id: 1, qty: 150, exit: 5600 },
-            EventKind::PositionClosed { id: 1, exit: 5100, cause: CloseCause::StopLoss },
+            EventKind::PositionClosed { id: 1, exit: 5100, cause: CloseCause::StopLoss, observed: Some(5050), across_gap: true },
             EventKind::PendingPlaced {
                 id: 2,
                 instrument: 3,
@@ -952,7 +1019,7 @@ mod tests {
                 tp: None,
             },
             EventKind::PendingCancelled { id: 2 },
-            EventKind::PendingTriggered { id: 2, price: 4000 },
+            EventKind::PendingTriggered { id: 2, price: 4000, observed: Some(3990), across_gap: false },
         ]
     }
 
@@ -974,14 +1041,76 @@ mod tests {
     fn close_causes_are_distinguishable() {
         let causes = [CloseCause::Command, CloseCause::StopLoss, CloseCause::TakeProfit, CloseCause::Netting];
         let mut texts: Vec<String> =
-            causes.iter().map(|c| EventKind::PositionClosed { id: 1, exit: 1, cause: *c }.encode()).collect();
+            causes.iter().map(|c| EventKind::PositionClosed { id: 1, exit: 1, cause: *c, observed: None, across_gap: false }.encode()).collect();
         texts.sort();
         texts.dedup();
         assert_eq!(texts.len(), causes.len(), "причины закрытия обязаны различаться в записи");
         for c in causes {
-            let k = EventKind::PositionClosed { id: 1, exit: 1, cause: c };
+            let k = EventKind::PositionClosed { id: 1, exit: 1, cause: c, observed: None, across_gap: false };
             assert_eq!(EventKind::decode(&k.encode()), Ok(k));
         }
+    }
+
+    /// Записи, сделанные ДО появления `observed`/`gap`, обязаны читаться.
+    ///
+    /// Журнал неизменяем и лежит в основании балансов. Если расширение формата
+    /// сделает вчерашние записи нечитаемыми, свёртка остановится на первой из
+    /// них — то есть правка формата обнулит историю счетов. Это не
+    /// снисходительность разбора: отсутствующее поле означает «тогда о нём не
+    /// знали», и это ответ, а не порча.
+    #[test]
+    fn records_written_before_the_new_fields_still_read() {
+        let old_close = "position_closed id=7 exit=5100 cause=stop_loss";
+        assert_eq!(
+            EventKind::decode(old_close),
+            Ok(EventKind::PositionClosed {
+                id: 7,
+                exit: 5100,
+                cause: CloseCause::StopLoss,
+                observed: None,
+                across_gap: false,
+            }),
+            "старая запись закрытия перестала читаться — это стёртая история, а не строгость"
+        );
+
+        let old_fill = "pending_triggered id=9 price=4000";
+        assert_eq!(
+            EventKind::decode(old_fill),
+            Ok(EventKind::PendingTriggered { id: 9, price: 4000, observed: None, across_gap: false })
+        );
+    }
+
+    /// Терпимость к ОТСУТСТВИЮ поля — не терпимость к мусору в нём.
+    #[test]
+    fn present_but_unreadable_new_field_is_still_corruption() {
+        assert!(EventKind::decode("position_closed id=7 exit=5100 cause=stop_loss observed=кот").is_err());
+        assert!(
+            EventKind::decode("position_closed id=7 exit=5100 cause=stop_loss gap=может_быть").is_err(),
+            "признак разрыва принимает только 0 и 1: «может быть» в журнале не бывает"
+        );
+    }
+
+    /// Наблюдённая цена и факт разрыва обязаны быть РАЗЛИЧИМЫ в тексте: иначе
+    /// закрытие по уровню и закрытие на дыре выглядят в журнале одинаково, а
+    /// спорят именно о втором.
+    #[test]
+    fn gap_close_is_distinguishable_from_a_quiet_one() {
+        let quiet = EventKind::PositionClosed {
+            id: 1,
+            exit: 5000,
+            cause: CloseCause::StopLoss,
+            observed: Some(5000),
+            across_gap: false,
+        };
+        let gapped = EventKind::PositionClosed {
+            id: 1,
+            exit: 5000,
+            cause: CloseCause::StopLoss,
+            observed: Some(4200),
+            across_gap: true,
+        };
+        assert_ne!(quiet.encode(), gapped.encode());
+        assert_eq!(EventKind::decode(&gapped.encode()), Ok(gapped));
     }
 
     #[test]
