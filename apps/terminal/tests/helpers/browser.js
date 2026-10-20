@@ -49,12 +49,19 @@ const CHARTS = path.join(
  * внятным текстом, а не возвращается `null`.
  */
 const CANDIDATES = [
+  // Windows — рабочие машины команды.
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  // Linux — CI и контейнеры. Имён несколько, потому что пакет называется
+  // по-разному в разных дистрибутивах, и промах по имени выглядел бы как
+  // «браузера нет» там, где он есть.
   '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
   '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+  '/snap/bin/chromium',
 ];
 
 function findBrowser() {
