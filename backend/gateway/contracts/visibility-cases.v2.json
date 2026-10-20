@@ -48,9 +48,7 @@
     },
     {
       "name": "совпадение — видно",
-      "restrictions": [
-        "eu-mifid"
-      ],
+      "restrictions": ["eu-mifid"],
       "jurisdiction": "eu-mifid",
       "visible": true,
       "reason": null,
@@ -58,10 +56,7 @@
     },
     {
       "name": "совпадение одного из нескольких — видно",
-      "restrictions": [
-        "uk-fca",
-        "eu-mifid"
-      ],
+      "restrictions": ["uk-fca", "eu-mifid"],
       "jurisdiction": "eu-mifid",
       "visible": true,
       "reason": null,
@@ -69,9 +64,7 @@
     },
     {
       "name": "несовпадение — не видно, юрисдикции нет в списке",
-      "restrictions": [
-        "uk-fca"
-      ],
+      "restrictions": ["uk-fca"],
       "jurisdiction": "eu-mifid",
       "visible": false,
       "reason": "jurisdiction-not-listed",
@@ -79,9 +72,7 @@
     },
     {
       "name": "ограничение есть, юрисдикция не задана — НЕ видно, юрисдикция неизвестна",
-      "restrictions": [
-        "uk-fca"
-      ],
+      "restrictions": ["uk-fca"],
       "jurisdiction": null,
       "visible": false,
       "reason": "jurisdiction-unknown",
@@ -90,9 +81,7 @@
     },
     {
       "name": "ограничение есть, юрисдикция пустой строкой — НЕ видно, и отказ тот же, что у незаданной",
-      "restrictions": [
-        "uk-fca"
-      ],
+      "restrictions": ["uk-fca"],
       "jurisdiction": "",
       "visible": false,
       "reason": "jurisdiction-unknown",
@@ -101,10 +90,7 @@
     },
     {
       "name": "пустая строка в ограничении не превращается в совпадение с пустой юрисдикцией",
-      "restrictions": [
-        "",
-        "uk-fca"
-      ],
+      "restrictions": ["", "uk-fca"],
       "jurisdiction": "",
       "visible": false,
       "reason": "jurisdiction-unknown",
@@ -113,9 +99,7 @@
     },
     {
       "name": "неизвестный код в ограничении — не видно никому",
-      "restrictions": [
-        "uk-fcaa"
-      ],
+      "restrictions": ["uk-fcaa"],
       "jurisdiction": "uk-fca",
       "visible": false,
       "reason": "jurisdiction-not-listed",
@@ -164,9 +148,7 @@
     },
     {
       "name": "пробелы по краям кода не меняют решения",
-      "restrictions": [
-        " eu-mifid "
-      ],
+      "restrictions": [" eu-mifid "],
       "jurisdiction": "eu-mifid",
       "visible": true,
       "reason": null,
@@ -187,11 +169,7 @@
     },
     {
       "name": "пустые и мусорные значения в списке не создают ограничения",
-      "restrictions": [
-        "",
-        null,
-        42
-      ],
+      "restrictions": ["", null, 42],
       "jurisdiction": "eu-mifid",
       "visible": true,
       "reason": null,
@@ -227,9 +205,7 @@
     },
     {
       "name": "регистр имеет значение",
-      "restrictions": [
-        "EU-MIFID"
-      ],
+      "restrictions": ["EU-MIFID"],
       "jurisdiction": "eu-mifid",
       "visible": false,
       "reason": "jurisdiction-not-listed",
@@ -245,9 +221,7 @@
       "tree": [
         {
           "label": "Только Британия",
-          "jurisdictions": [
-            "uk-fca"
-          ],
+          "jurisdictions": ["uk-fca"],
           "children": [
             {
               "label": "Внутри",
@@ -271,9 +245,7 @@
           "children": [
             {
               "label": "CFD",
-              "jurisdictions": [
-                "uk-fca"
-              ],
+              "jurisdictions": ["uk-fca"],
               "children": []
             },
             {
@@ -308,9 +280,7 @@
           "children": [
             {
               "label": "CFD",
-              "jurisdictions": [
-                "uk-fca"
-              ],
+              "jurisdictions": ["uk-fca"],
               "children": []
             }
           ]
@@ -343,9 +313,7 @@
               "children": [
                 {
                   "label": "CFD",
-                  "jurisdictions": [
-                    "uk-fca"
-                  ],
+                  "jurisdictions": ["uk-fca"],
                   "children": []
                 },
                 {
@@ -383,9 +351,7 @@
       "tree": [
         {
           "label": "Только Британия",
-          "jurisdictions": [
-            "uk-fca"
-          ],
+          "jurisdictions": ["uk-fca"],
           "children": [
             {
               "label": "Первый",
@@ -430,9 +396,7 @@
           "children": [
             {
               "label": "CFD",
-              "jurisdictions": [
-                "uk-fca"
-              ],
+              "jurisdictions": ["uk-fca"],
               "children": []
             },
             {

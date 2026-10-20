@@ -3,7 +3,9 @@
   "private": true,
   "description": "Фронт терминала. Зависимостей в рантайме нет и не будет (ADR-015): всё, что здесь перечислено, — инструменты разработки и в поставку не входят (решение владельца Р-020: «Разрешаем только для разработки»). Образ собирается из public/ как есть, npm в Dockerfile не участвует.",
   "scripts": {
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js && node --test --test-concurrency=1 tests/browser/*.test.js",
+    "test:unit": "node --test tests/*.test.js",
+    "test:browser": "node --test --test-concurrency=1 tests/browser/*.test.js"
   },
   "devDependencies": {
     "jsdom": "^26.1.0",

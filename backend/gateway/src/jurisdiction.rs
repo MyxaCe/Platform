@@ -91,18 +91,22 @@ impl RefusalCode {
 pub struct Verdict {
     pub visible: bool,
     /// Машинный признак отказа. `None` — видно.
-    pub code: Option<RefusalCode>,
+    ///
+    /// Называется `reason` вслед за контрактом: в таблице это поле несёт
+    /// именно код. Расхождение в словах между двумя реализациями одного
+    /// правила — первый шаг к расхождению в поведении.
+    pub reason: Option<RefusalCode>,
     /// Подпись для человека. `None` — видно.
-    pub reason: Option<String>,
+    pub explanation: Option<String>,
 }
 
 impl Verdict {
     fn shown() -> Self {
-        Self { visible: true, code: None, reason: None }
+        Self { visible: true, reason: None, explanation: None }
     }
 
-    fn hidden(code: RefusalCode, reason: String) -> Self {
-        Self { visible: false, code: Some(code), reason: Some(reason) }
+    fn hidden(reason: RefusalCode, explanation: String) -> Self {
+        Self { visible: false, reason: Some(reason), explanation: Some(explanation) }
     }
 }
 
@@ -374,7 +378,7 @@ mod cases_tests {
 
             assert_eq!(verdict.visible, expected, "случай «{name}»");
             assert_eq!(
-                verdict.code.map(RefusalCode::as_str),
+                verdict.reason.map(RefusalCode::as_str),
                 expected_code,
                 "случай «{name}»: машинный код отказа"
             );
@@ -382,12 +386,12 @@ mod cases_tests {
             // Подпись для человека — отдельное поле, и она есть ровно у
             // скрытого: иначе пользователю достанется пустая панель без причины.
             assert_eq!(
-                verdict.reason.is_none(),
+                verdict.explanation.is_none(),
                 expected,
                 "случай «{name}»: подпись обязана быть ровно у скрытого"
             );
-            if let Some(reason) = &verdict.reason {
-                assert!(!reason.trim().is_empty(), "случай «{name}»: подпись пуста");
+            if let Some(text) = &verdict.explanation {
+                assert!(!text.trim().is_empty(), "случай «{name}»: подпись пуста");
             }
         }
     }
