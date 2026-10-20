@@ -28,7 +28,7 @@ const settle = (page, ms) => page.evaluate((d) => new Promise((r) => setTimeout(
 
 /** Сколько непрозрачных пикселей на слое рисования. */
 const ink = (page) => page.evaluate(() => {
-  const c = document.querySelector('canvas.drawlayer');
+  const c = /** @type {HTMLCanvasElement} */ (document.querySelector('canvas.drawlayer'));
   const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
   let n = 0;
   for (let i = 3; i < d.length; i += 4) if (d[i] !== 0) n += 1;

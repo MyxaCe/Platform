@@ -26,6 +26,7 @@
    * называет её MDS в своём ответе. Сводить две оси в один словарь нельзя,
    * иначе «нет связи» и «источник выключен» окажутся одним словом.
    */
+  /** @type {Record<string, { badge: string, why: string }>} */
   const CHANNEL = {
     'not-configured': { badge: 'НЕ НАСТРОЕНО', why: 'адрес источника не задан' },
     network: { badge: 'НЕТ СВЯЗИ', why: 'источник не ответил' },
@@ -40,6 +41,10 @@
    * Молчаливый пропуск и есть тот способ, которым два словаря расходятся
    * годами: один пишет `unreachable`, другой `network`, фильтр глотает оба, и
    * половина отказов перестаёт находиться поиском. Поэтому здесь бросаем.
+   */
+  /**
+   * @param {string} reason
+   * @returns {{ badge: string, why: string }}
    */
   function describe(reason) {
     const found = CHANNEL[reason];
@@ -56,13 +61,14 @@
   /**
    * Завести докладчика для одного источника.
    *
-   * @param {object} cfg
    *   `subject` — чьё это состояние, попадает в строку лога («stats», «orderbook»);
    *   `onError` — необязательный слушатель хоста, зовётся на КАЖДОМ отказе;
    *   `every`   — необязательная замена политики: писать в лог каждый N-й отказ
    *               подряд, а не только первый. Задаётся явно и только там, где
    *               частота этого требует.
    *   `log`     — подмена вывода, нужна тестам; по умолчанию console.
+   *
+   * @param {{ subject?: string, onError?: (e: { reason: string, detail: any, count: number, first: boolean }) => void, every?: number, log?: { error: Function, info: Function } }} [cfg]
    */
   function reporter(cfg) {
     const subject = (cfg && cfg.subject) || 'diag';
@@ -70,6 +76,7 @@
     const every = cfg && cfg.every;
     const log = (cfg && cfg.log) || console;
 
+    /** @type {string|null} */
     let kind = null;
     let count = 0;
 
@@ -84,6 +91,10 @@
       /**
        * Отказ. Возвращает `{ badge, why, first }` — виджету остаётся только
        * нарисовать; решать, писать ли в лог, он больше не должен.
+       */
+      /**
+       * @param {string} reason
+       * @param {any} [detail]
        */
       fail(reason, detail) {
         const info = describe(reason);

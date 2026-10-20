@@ -292,9 +292,9 @@ function startServer(opts) {
 
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
-      state.origin = `http://127.0.0.1:${server.address().port}`;
+      state.origin = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`;
       resolve({
-        server, port: server.address().port, push, clients: () => sockets.size, seen,
+        server, port: /** @type {import('node:net').AddressInfo} */ (server.address()).port, push, clients: () => sockets.size, seen,
         closeWs: () => new Promise((r) => wss.close(r)),
       });
     });

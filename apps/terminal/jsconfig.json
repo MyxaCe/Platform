@@ -1,0 +1,26 @@
+{
+  "// Зачем": [
+    "Проверка типов фронта без переписывания на TypeScript и без сборки (TRM-21).",
+    "Типы берутся из JSDoc; tsc ничего не выпускает — только проверяет.",
+    "`strict` выключен сознательно: цель захода — поймать опечатки в именах",
+    "полей и несуществующие свойства, а не переписать 11 модулей под строгие",
+    "null-проверки. Включать по одному флагу отдельными заходами, иначе",
+    "проверка, которую нельзя пройти, начнёт обходиться."
+  ],
+  "compilerOptions": {
+    "checkJs": true,
+    "allowJs": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "strict": false,
+    "strictNullChecks": false,
+    "skipLibCheck": true,
+    "maxNodeModuleJsDepth": 0,
+    "types": ["node"]
+  },
+  "include": ["public/**/*.js", "tests/**/*.js", "types/**/*.d.ts"],
+  "exclude": ["node_modules"]
+}

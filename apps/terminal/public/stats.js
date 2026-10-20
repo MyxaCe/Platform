@@ -37,6 +37,10 @@
   }
 
   window.AssetStats = {
+    /**
+     * @param {HTMLElement} root
+     * @param {any} ctx
+     */
     mount(root, ctx) {
       root.classList.add('statbar');
 
@@ -74,6 +78,10 @@
        */
       const diag = window.Diag.reporter({ subject: 'stats', onError: ctx.onError, log: ctx.log });
 
+      /**
+       * @param {string} reason
+       * @param {any} [detail]
+       */
       function fail(reason, detail) {
         const { badge, why } = diag.fail(reason, detail);
         root.setAttribute('data-stale', reason);
@@ -119,7 +127,7 @@
           return;
         }
 
-        const list = got.data;
+        const list = /** @type {Array<{ tf: number|string, change: number|null }>} */ (got.data);
         succeeded();
         root.innerHTML = list.map((st) => {
           const label = (ctx.labels && ctx.labels[st.tf]) || st.tf;

@@ -163,10 +163,10 @@ test('инструменты без котировки уходят вниз, а
 test('поиск прячет строки, но не удаляет их', async (t) => {
   const env = await mounted(t);
   const input = env.root.querySelector('.wl-search');
-  input.value = 'eth';
+  /** @type {HTMLInputElement} */ (input).value = 'eth';
   input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
-  const visible = [...env.root.querySelectorAll('.irow')].filter((el) => el.style.display !== 'none');
-  assert.deepEqual(visible.map((el) => Number(el.dataset.id)), [2]);
+  const visible = [...env.root.querySelectorAll('.irow')].filter((el) => /** @type {HTMLElement} */ (el).style.display !== 'none');
+  assert.deepEqual(visible.map((el) => Number(/** @type {HTMLElement} */ (el).dataset.id)), [2]);
   assert.equal(env.root.querySelectorAll('.irow').length, 3, 'фильтр не должен перестраивать DOM');
 });
 

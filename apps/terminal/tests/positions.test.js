@@ -275,14 +275,14 @@ test('открыта ровно одна вкладка, и клик её мен
 
   const visible = () => [...env.root.querySelectorAll('.pane')]
     .filter((p) => !p.classList.contains('hidden'))
-    .map((p) => p.dataset.pane);
+    .map((p) => /** @type {HTMLElement} */ (p).dataset.pane);
 
   assert.deepEqual(visible(), ['deals']);
 
   click(env.window, env.root.querySelector('.bottom__tabs [data-pane="pending"]'));
   assert.deepEqual(visible(), ['pending'], 'ровно одна, а не две');
   assert.equal(
-    env.root.querySelector('.bottom__tabs .active').dataset.pane,
+    /** @type {HTMLElement} */ (env.root.querySelector('.bottom__tabs .active')).dataset.pane,
     'pending',
     'подсветка вкладки идёт за содержимым',
   );

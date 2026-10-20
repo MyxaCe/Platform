@@ -46,6 +46,10 @@
   })();
 
   // ---- Цвет: hex → каналы, яркость, осветление -----------------------------
+  /**
+   * @param {string} hex
+   * @returns {[number, number, number] | null} ровно три канала или `null`
+   */
   function hexToChannels(hex) {
     const m = /^#([0-9a-fA-F]{6})$/.exec(hex);
     if (!m) return null;
@@ -265,7 +269,7 @@
     // иконки по причине, к вкладке отношения не имеющей.
     const fav = brand.favicon || brand.logoLight;
     if (fav) {
-      let link = document.querySelector('link[rel="icon"]');
+      let link = /** @type {HTMLLinkElement} */ (document.querySelector('link[rel="icon"]'));
       if (!link) { link = document.createElement('link'); link.rel = 'icon'; document.head.appendChild(link); }
       link.href = fav.url;
     }
