@@ -156,3 +156,71 @@ test('сделка из прошлого интервала не сдвигае�
   assert.equal(late, null, 'опоздавшая сделка отброшена');
   assert.equal(s.forming().high, 100, 'текущая свеча не переписана прошлым');
 });
+
+// --- объём (TRM-32) --------------------------------------------------------
+//
+// Эталон берётся из ОПРЕДЕЛЕНИЯ свечи: объём бара — сумма количеств всех
+// сделок, случившихся в его интервале. Не из того, как считал код: он
+// присваивал количество первой сделки и на этом останавливался, то есть поле
+// называлось «объём», а хранило другую величину.
+
+test('объём бара — сумма количеств всех сделок интервала', () => {
+  const s = Series.create();
+  s.seed(bar({ time: 1020, volume: 0 }));
+  s.onTrade({ now: 1030, tf: TF, price: 100, qty: 3 });
+  s.onTrade({ now: 1040, tf: TF, price: 101, qty: 5 });
+  const f = s.onTrade({ now: 1050, tf: TF, price: 102, qty: 2 });
+
+  assert.equal(f.volume, 10, '3 + 5 + 2 — и ни одна сделка не потеряна');
+});
+
+test('новый интервал начинает объём со своей первой сделки, а не уносит чужой', () => {
+  const s = Series.create();
+  s.seed(bar({ time: 1020, volume: 0 }));
+  s.onTrade({ now: 1030, tf: TF, price: 100, qty: 7 });
+  const next = s.onTrade({ now: 1081, tf: TF, price: 100, qty: 2 });
+
+  assert.equal(next.volume, 2, 'объём предыдущей свечи в новую не перетекает');
+});
+
+test('пересев ЗАМЕЩАЕТ объём авторитетным значением, а не прибавляет к нему', () => {
+  // Иначе накопленное локально сложилось бы с тем же, уже посчитанным биржей,
+  // и объём рос бы вдвое при каждой синхронизации.
+  const s = Series.create();
+  s.seed(bar({ time: 1020, volume: 0 }));
+  s.onTrade({ now: 1030, tf: TF, price: 100, qty: 7 });
+  s.seed(bar({ time: 1020, volume: 40 }));
+
+  assert.equal(s.forming().volume, 40, 'взято значение биржи, а не сумма с ним');
+});
+
+test('сделка, отброшенная разрывом, объём не меняет', () => {
+  const s = Series.create();
+  s.seed(bar({ time: 1020, volume: 4 }));
+  s.markBreak('feed-lost');
+  s.onTrade({ now: 1050, tf: TF, price: 100, qty: 99 });
+
+  assert.equal(s.forming().volume, 4, 'в дыре наблюдений не было — значит и объёма нет');
+});
+
+test('опоздавшая сделка из прошлого интервала объём не меняет', () => {
+  const s = Series.create();
+  s.seed(bar({ time: 1080, volume: 4 }));
+  s.onTrade({ now: 1030, tf: TF, price: 100, qty: 99 });
+
+  assert.equal(s.forming().volume, 4);
+});
+
+test('внутри интервала объём не убывает ни на одной сделке', () => {
+  // Свойство, а не числа: объём — накопительная величина, уменьшиться он может
+  // только сменой интервала или пересевом.
+  const s = Series.create();
+  s.seed(bar({ time: 1020, volume: 0 }));
+  let prev = 0;
+  for (const qty of [3, 1, 8, 2, 5]) {
+    const f = s.onTrade({ now: 1030, tf: TF, price: 100, qty });
+    assert.ok(f.volume >= prev, `объём упал с ${prev} до ${f.volume}`);
+    prev = f.volume;
+  }
+  assert.equal(prev, 19, 'и в сумме — все сделки');
+});
