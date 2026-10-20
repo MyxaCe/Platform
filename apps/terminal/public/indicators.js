@@ -27,13 +27,84 @@ function momentum(v, p) { const o = new Array(v.length).fill(null); for (let i =
 function roc(v, p) { const o = new Array(v.length).fill(null); for (let i = p; i < v.length; i++) o[i] = v[i - p] ? 100 * (v[i] - v[i - p]) / v[i - p] : 0; return o; }
 function williams(cs, p) { const o = new Array(cs.length).fill(null); for (let i = p - 1; i < cs.length; i++) { const h = highest(cs, p, i), l = lowest(cs, p, i); o[i] = h === l ? -50 : -100 * (h - cs[i].close) / (h - l); } return o; }
 function ao(cs) { const m = cs.map(HL2); const f = sma(m, 5), s = sma(m, 34); return m.map((_, i) => (f[i] != null && s[i] != null ? f[i] - s[i] : null)); }
-function acOsc(cs) { const a = ao(cs); const s = sma(a.map((x) => x ?? 0), 5); return a.map((x, i) => (x != null && s[i] != null ? x - s[i] : null)); }
+/* ---------------------------------------------------------------------------
+ * Сглаживание рядов с ПРОПУСКАМИ в начале (TRM-23).
+ *
+ * Производные индикаторы (AC, Force Index, сигнальная MACD) считаются поверх
+ * другого индикатора, а у того первые значения не определены. Раньше пропуск
+ * подменялся нулём — `.map((x) => x ?? 0)`, — и сглаживание получало ряд, в
+ * котором до настоящих данных стоит частокол выдуманных нулей.
+ *
+ * Чем это плохо: результат считался частично из выдуманных данных **и
+ * показывался** как результат. Маска возвращала `null` только там, где он был
+ * у исходного ряда, поэтому первые настоящие значения — самые свежие для
+ * глаза — оказывались смещены к нулю. Сигнальная линия MACD сходилась к
+ * правильной за десятки баров, а человек читал её как сигнал с первого.
+ *
+ * Правило простое и взято из определения, а не из кода: **сглаживание
+ * начинается с первого определённого значения ряда.** Ни одного числа до него
+ * не существует, и выдумывать их нельзя — ни нулём, ни чем-либо ещё.
+ * ------------------------------------------------------------------------- */
+
+/** Индекс первого определённого значения или -1, если ряд пуст целиком. */
+function firstDefined(v) {
+  for (let i = 0; i < v.length; i++) if (v[i] != null) return i;
+  return -1;
+}
+
+/**
+ * EMA ряда с пропусками в начале.
+ *
+ * Затравка — первое определённое значение (так же, как `ema` берёт `v[0]`).
+ * Первое выданное значение стоит на `p - 1` шагов позже затравки: столько же,
+ * сколько у `ema` от начала ряда. Пропуски ПОСЛЕ начала не допускаются — у
+ * наших производных рядов их не бывает, а молча их заглаживать значило бы
+ * вернуть ту же выдумку другим способом.
+ */
+function emaFrom(v, p) {
+  const o = new Array(v.length).fill(null);
+  const start = firstDefined(v);
+  if (start < 0) return o;
+
+  const k = 2 / (p + 1);
+  // Затравка задаётся РОВНО В ОДНОМ месте. В первой редакции она стояла и
+  // здесь, и в теле цикла (`i === start ? v[start] : …`), и внешняя оказалась
+  // мёртвой: мутация «затравить нулём» не красила ни одного теста, потому что
+  // тело её тут же перезаписывало. Два места для одного решения — это способ
+  // спрятать от проверки то из них, которое ошибётся.
+  let e = v[start];
+  for (let i = start; i < v.length; i++) {
+    if (v[i] == null) return o; // дыра в середине — дальше считать нечего
+    if (i > start) e = v[i] * k + e * (1 - k);
+    if (i >= start + p - 1) o[i] = e;
+  }
+  return o;
+}
+
+/** SMA ряда с пропусками в начале. Первое значение — на `p - 1` шагов позже. */
+function smaFrom(v, p) {
+  const o = new Array(v.length).fill(null);
+  const start = firstDefined(v);
+  if (start < 0) return o;
+
+  let s = 0;
+  for (let i = start; i < v.length; i++) {
+    if (v[i] == null) return o;
+    s += v[i];
+    if (i - start >= p) s -= v[i - p];
+    if (i >= start + p - 1) o[i] = s / p;
+  }
+  return o;
+}
+
+/** AC = AO − SMA(AO, 5). SMA считается по определённым значениям AO. */
+function acOsc(cs) { const a = ao(cs); const s = smaFrom(a, 5); return a.map((x, i) => (x != null && s[i] != null ? x - s[i] : null)); }
 function obv(cs) { const o = new Array(cs.length).fill(null); let v = 0; o[0] = 0; for (let i = 1; i < cs.length; i++) { v += Math.sign(cs[i].close - cs[i - 1].close) * cs[i].volume; o[i] = v; } return o; }
 function adLine(cs) { const o = new Array(cs.length).fill(null); let v = 0; for (let i = 0; i < cs.length; i++) { const r = cs[i].high - cs[i].low; v += r ? ((cs[i].close - cs[i].low) - (cs[i].high - cs[i].close)) / r * cs[i].volume : 0; o[i] = v; } return o; }
 function cmf(cs, p) { const o = new Array(cs.length).fill(null); for (let i = p - 1; i < cs.length; i++) { let mfv = 0, vol = 0; for (let j = i - p + 1; j <= i; j++) { const r = cs[j].high - cs[j].low; mfv += r ? ((cs[j].close - cs[j].low) - (cs[j].high - cs[j].close)) / r * cs[j].volume : 0; vol += cs[j].volume; } o[i] = vol ? mfv / vol : 0; } return o; }
 function mfi(cs, p) { const o = new Array(cs.length).fill(null); const tp = cs.map(HLC3); for (let i = p; i < cs.length; i++) { let pos = 0, neg = 0; for (let j = i - p + 1; j <= i; j++) { const rmf = tp[j] * cs[j].volume; if (tp[j] > tp[j - 1]) pos += rmf; else if (tp[j] < tp[j - 1]) neg += rmf; } o[i] = neg === 0 ? 100 : 100 - 100 / (1 + pos / neg); } return o; }
-function forceIndex(cs, p) { const f = new Array(cs.length).fill(null); for (let i = 1; i < cs.length; i++) f[i] = (cs[i].close - cs[i - 1].close) * cs[i].volume; const e = ema(f.map((x) => x ?? 0), p); return e.map((x, i) => (f[i] == null ? null : x)); }
-function macdFull(v) { const e12 = ema(v, 12), e26 = ema(v, 26); const line = v.map((_, i) => (e12[i] != null && e26[i] != null ? e12[i] - e26[i] : null)); const sig = ema(line.map((x) => x ?? 0), 9).map((x, i) => (line[i] == null ? null : x)); return [line, sig]; }
+function forceIndex(cs, p) { const f = new Array(cs.length).fill(null); for (let i = 1; i < cs.length; i++) f[i] = (cs[i].close - cs[i - 1].close) * cs[i].volume; const e = emaFrom(f, p); return e; }
+function macdFull(v) { const e12 = ema(v, 12), e26 = ema(v, 26); const line = v.map((_, i) => (e12[i] != null && e26[i] != null ? e12[i] - e26[i] : null)); const sig = emaFrom(line, 9); return [line, sig]; }
 function adxDI(cs, p) {
   const n = cs.length, tr = [], pdm = [], ndm = [];
   for (let i = 0; i < n; i++) { if (i === 0) { tr.push(0); pdm.push(0); ndm.push(0); continue; } const up = cs[i].high - cs[i - 1].high, dn = cs[i - 1].low - cs[i].low; pdm.push(up > dn && up > 0 ? up : 0); ndm.push(dn > up && dn > 0 ? dn : 0); tr.push(Math.max(cs[i].high - cs[i].low, Math.abs(cs[i].high - cs[i - 1].close), Math.abs(cs[i].low - cs[i - 1].close))); }
