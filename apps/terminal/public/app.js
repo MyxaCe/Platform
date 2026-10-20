@@ -67,7 +67,29 @@ function updateLegend(id, t, c, forming) {
   document.getElementById('lgTime').textContent = fmtDT(t) + (forming ? ' · бар не закрыт' : '');
   document.getElementById('lgOhlc').innerHTML = `O <b>${rf(c.open)}</b>  H <b>${rf(c.high)}</b>  L <b>${rf(c.low)}</b>  C <b class="${c.close >= c.open ? 'up' : 'down'}">${rf(c.close)}</b>`;
 }
-function refreshLegend() { if (selected == null) return; let c, forming = false; const f = priceSeries.forming(); if (f) { const s = pscale(selected); c = { time: f.time, open: f.open / s, high: f.high / s, low: f.low / s, close: f.close / s }; forming = true; } else if (rawCandles.length) c = rawCandles[rawCandles.length - 1]; if (c) updateLegend(selected, c.time, c, forming); }
+/**
+ * Формирующийся бар В ТОМ ВИДЕ, В КАКОМ ОН НАРИСОВАН (TRM-34).
+ *
+ * Хейкин-аши — не настройка показа, а ДРУГОЙ РАСЧЁТ: его свеча выводится из
+ * всей цепочки предыдущих. Поэтому формирующийся бар нельзя просто поделить
+ * на масштаб и отдать — его надо пересчитать тем же способом, каким посчитан
+ * остальной ряд, иначе последняя свеча жила бы по другим правилам, чем те,
+ * рядом с которыми она стоит.
+ *
+ * @param {any} b формирующийся бар в raw-единицах
+ */
+function formingDisplayBar(b) {
+  const s = pscale(selected), v = qscale(selected);
+  const real = { time: b.time, open: b.open / s, high: b.high / s, low: b.low / s, close: b.close / s, volume: b.volume / v };
+  if (chartType !== 'heikin') return real;
+  // Цепочку берём ту же, что у нарисованного ряда. Последний бар REST — это и
+  // есть формирующийся, поэтому он ЗАМЕЩАЕТСЯ, а не добавляется вторым.
+  const n = rawCandles.length;
+  const src = n && rawCandles[n - 1].time === real.time ? rawCandles.slice(0, n - 1).concat([real]) : rawCandles.concat([real]);
+  const ha = heikin(src);
+  return ha[ha.length - 1];
+}
+function refreshLegend() { if (selected == null) return; let c, forming = false; const f = priceSeries.forming(); if (f) { c = formingDisplayBar(f); forming = true; } else if (rawCandles.length) { const n = rawCandles.length; c = chartType === 'heikin' ? heikin(rawCandles)[n - 1] : rawCandles[n - 1]; } if (c) updateLegend(selected, c.time, c, forming); }
 
 // ===== Indicators — вынесены в модуль indicators.js (ADR-015), подключается до app.js =====
 // toSeries — чартовый глюкод (значения → {time,value} для Lightweight Charts), остаётся здесь.
@@ -234,11 +256,16 @@ function drawForming(bar) {
   const b = bar || priceSeries.forming();
   if (!b) return;
   // Объём от типа графика не зависит: хейкин-аши пересчитывает цену, а сделки
-  // остаются теми же. Поэтому обновление объёма идёт ДО возврата по типу.
+  // остаются теми же.
   volume.update({ time: b.time, value: b.volume / qscale(selected), color: volColor(b) });
-  if (!mainSeries || chartType === 'heikin') return;
-  const s = pscale(selected);
-  mainSeries.update(isLineType() ? { time: b.time, value: b.close / s } : { time: b.time, open: b.open / s, high: b.high / s, low: b.low / s, close: b.close / s });
+  if (!mainSeries) return;
+  // Здесь стоял выход для хейкин-аши (TRM-34): в этом режиме график не
+  // обновлялся живьём ВООБЩЕ — ни свеча, ни легенда, — и пометка «бар не
+  // закрыт» не появлялась никогда. Условие решения выполнялось не во всех
+  // режимах, то есть не выполнялось. Режим переключает пользователь, и это
+  // отдельный путь данных, а не настройка показа.
+  const d = formingDisplayBar(b);
+  mainSeries.update(isLineType() ? { time: d.time, value: d.close } : { time: d.time, open: d.open, high: d.high, low: d.low, close: d.close });
   refreshLegend();
 }
 // Агрегация живой сделки в свечу — в `series.js`. Отрисовка остаётся здесь:
