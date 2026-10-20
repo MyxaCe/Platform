@@ -1,0 +1,35 @@
+{
+  "// Зачем отдельный конфиг": [
+    "Широкий `jsconfig.json` проверяет всё, но с `noImplicitAny: false` —",
+    "и этого МАЛО: параметры функций становятся `any`, обращения к их полям не",
+    "проверяются вовсе. Проверено внесённой опечаткой: `setAttributte` вместо",
+    "`setAttribute` в `stats.js` широкую проверку проходит.",
+    "",
+    "Здесь `noImplicitAny` включён, но список файлов — тот, что уже размечен.",
+    "Охват объявлен списком, а не обещанием: растёт по файлу за заход.",
+    "Включить флаг разом на всех — 700 ошибок; проверка, которую нельзя пройти,",
+    "начинает обходиться, и тогда она не защищает ни от чего."
+  ],
+  "compilerOptions": {
+    "checkJs": true,
+    "allowJs": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "strict": false,
+    "strictNullChecks": false,
+    "noImplicitAny": true,
+    "skipLibCheck": true,
+    "maxNodeModuleJsDepth": 0,
+    "types": ["node"]
+  },
+  "include": [
+    "types/**/*.d.ts",
+    "public/diag.js",
+    "public/stats.js",
+    "public/trades.js"
+  ],
+  "exclude": ["node_modules"]
+}

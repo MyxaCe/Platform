@@ -244,14 +244,14 @@ test('открыта ровно одна вкладка, и клик её мен
 
   const visible = () => [...env.root.querySelectorAll('.trades__pane')]
     .filter((p) => !p.classList.contains('hidden'))
-    .map((p) => p.dataset.t);
+    .map((p) => /** @type {HTMLElement} */ (p).dataset.t);
 
   assert.deepEqual(visible(), ['market']);
 
   click(env.window, env.root.querySelector('.trades__tabs [data-t="mine"]'));
 
   assert.deepEqual(visible(), ['mine'], 'ровно одна, а не две');
-  assert.equal(env.root.querySelector('.trades__tabs button.active').dataset.t, 'mine');
+  assert.equal(/** @type {HTMLElement} */ (env.root.querySelector('.trades__tabs button.active')).dataset.t, 'mine');
 });
 
 test('destroy останавливает опрос и очищает виджет', async (t) => {

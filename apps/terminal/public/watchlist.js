@@ -162,7 +162,9 @@
     function reorder() {
       Object.keys(rowEls).map(Number).sort((a, b) => {
         const fa = favs.has(a), fb = favs.has(b);
-        if (fa !== fb) return fb - fa;
+        // Number(): признак избранного — булев, а вычитание булевых хоть и
+        // работает в JS, читается как опечатка и не проходит проверку типов.
+        if (fa !== fb) return Number(fb) - Number(fa);
         if (sortKey && meta[a] && meta[b]) {
           const m = SORT_METRIC[sortKey];
           const d = (m(meta[a]) - m(meta[b])) * sortDir;

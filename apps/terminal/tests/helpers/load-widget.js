@@ -26,7 +26,7 @@ const PUBLIC_DIR = path.join(__dirname, '..', '..', 'public');
  * Поднять jsdom и выполнить в нём модули виджетов.
  *
  * @param {string[]} files имена файлов из public/, например ['watchlist.js']
- * @returns {{ window: Window, document: Document, root: Element, cleanup: () => void }}
+ * @returns {{ window: Window, document: Document, root: HTMLElement, cleanup: () => void }}
  */
 function loadWidget(files) {
   const dom = new JSDOM('<!doctype html><html><head></head><body><div id="root"></div></body></html>', {

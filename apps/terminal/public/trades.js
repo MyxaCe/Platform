@@ -39,28 +39,37 @@
     document.head.appendChild(s);
   }
 
+  /** @param {number} ms */
   const hhmmss = (ms) => new Date(ms).toISOString().slice(11, 19);
 
+  /**
+   * @param {HTMLElement} root
+   * @param {any} ctx
+   */
   function mount(root, ctx) {
     const max = ctx.max || 60;
-    const fmtUsd = ctx.fmtUsd || ((c) => `${(c / 100).toFixed(2)}`);
+    const fmtUsd = ctx.fmtUsd || ((/** @type {number} */ c) => `${(c / 100).toFixed(2)}`);
     root.classList.add('trades');
     root.innerHTML =
       '<div class="trades__tabs"><button data-t="market" class="active">MARKET TRADES</button><button data-t="mine">MY TRADES</button></div>' +
       '<div class="trades__pane" data-t="market"><div class="trades__head"><span>PRICE</span><span>QTY</span><span>TIME</span></div><div class="trades__rows" data-rows="market"></div></div>' +
       '<div class="trades__pane hidden" data-t="mine"><div class="trades__head"><span>SIDE / QTY</span><span>ENTRY → EXIT</span><span>P&L</span></div><div class="trades__rows" data-rows="mine"></div></div>';
 
-    const rows = (k) => root.querySelector(`[data-rows="${k}"]`);
-    root.querySelector('.trades__tabs').addEventListener('click', (e) => {
-      const b = e.target.closest('[data-t]'); if (b) show(b.dataset.t);
+    const rows = (/** @type {string} */ k) => root.querySelector(`[data-rows="${k}"]`);
+    root.querySelector('.trades__tabs').addEventListener('click', (/** @type {Event} */ e) => {
+      const b = /** @type {HTMLElement} */ (/** @type {Element} */ (e.target).closest('[data-t]'));
+      if (b) show(b.dataset.t);
     });
+    /** @param {string} tab */
     function show(tab) {
-      root.querySelectorAll('.trades__tabs button').forEach((b) => b.classList.toggle('active', b.dataset.t === tab));
-      root.querySelectorAll('.trades__pane').forEach((p) => p.classList.toggle('hidden', p.dataset.t !== tab));
+      root.querySelectorAll('.trades__tabs button').forEach((b) => b.classList.toggle('active', /** @type {HTMLElement} */ (b).dataset.t === tab));
+      root.querySelectorAll('.trades__pane').forEach((p) => p.classList.toggle('hidden', /** @type {HTMLElement} */ (p).dataset.t !== tab));
     }
 
     // ---- Лента рынка: тики приходят от хоста, храним последние `max` -----------
+    /** @type {Array<{ price: number, qty: number, side: string, at: number }>} */
     let tape = [];
+    /** @param {{ instrument: number, price: number, qty: number, side: string }} t */
     function pushMarket(t) {
       const id = ctx.instrument();
       if (id == null || t.instrument !== id) return; // лента только по выбранной паре
@@ -109,7 +118,7 @@
         return;
       }
       rows('mine').innerHTML = list.map((d) => {
-        const f = (raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals);
+        const f = (/** @type {number} */ raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals);
         const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals);
         const pos = d.pnl >= 0;
         return `<div class="trow"><span class="tp ${d.side === 'sell' ? 'sell' : 'buy'}">${d.side.toUpperCase()} ${lot}</span><span>${f(d.entry)} → ${f(d.exit)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${fmtUsd(d.pnl)}</span></div>`;

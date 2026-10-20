@@ -47,7 +47,7 @@ const ICONS = {
   fullscreen: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>',
   settings: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.6v1.8M8 12.6v1.8M1.6 8h1.8M12.6 8h1.8M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>',
 };
-function renderIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { const n = el.dataset.icon; if (ICONS[n]) el.innerHTML = ICONS[n]; }); }
+function renderIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { const n = /** @type {HTMLElement} */ (el).dataset.icon; if (ICONS[n]) el.innerHTML = ICONS[n]; }); }
 
 // ---- Legend (chart info card) ---------------------------------------------
 function fmtDT(t) { return new Date(t * 1000).toLocaleString('en-GB', { timeZone: 'UTC', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) + ' UTC'; }
@@ -214,7 +214,7 @@ function updateDealPanel() {
   document.getElementById('watermark').textContent = it.symbol;
   const pips = document.getElementById('pipsInfo');
   if (showPips && it.bid != null && it.ask != null) { pips.classList.remove('hidden'); pips.textContent = `Spread: ${it.ask - it.bid} pips`; } else pips.classList.add('hidden');
-  if (orderMode === 'limit' && !document.getElementById('price').value && ref != null) document.getElementById('price').value = (ref / pscale(it.id)).toFixed(pdec(it.id));
+  if (orderMode === 'limit' && !/** @type {HTMLInputElement} */ (document.getElementById('price')).value && ref != null) /** @type {HTMLInputElement} */ (document.getElementById('price')).value = (ref / pscale(it.id)).toFixed(pdec(it.id));
   updateSizeEq();
 }
 
@@ -247,7 +247,7 @@ function markMarketData(kind, ok) {
 const book = OrderBook.mount(document.getElementById('book'), {
   instrument: () => selected,
   fetch: async (id, limit) => { const r = await api.depthDetailed(id, limit); markMarketData('depth', r.reason === null); return r; },
-  onPick: (price) => { setMode('limit'); const inp = document.getElementById('price'); inp.value = price; inp.classList.add('flash'); setTimeout(() => inp.classList.remove('flash'), 400); },
+  onPick: (price) => { setMode('limit'); const inp = /** @type {HTMLInputElement} */ (document.getElementById('price')); inp.value = price; inp.classList.add('flash'); setTimeout(() => inp.classList.remove('flash'), 400); },
   // Подписи колонок и марк-цена — из данных инструмента, которыми владеет хост.
   symbols: (id) => { const [base, quote] = (META[id]?.symbol || '-').split('-'); return { base, quote }; },
   markPrice: (id) => (META[id]?.last != null ? META[id].last / pscale(id) : null),
@@ -301,27 +301,27 @@ const watchlist = Watchlist.mount(document.querySelector('.watch'), {
   onSelect: (id) => selectInstrument(id),
   interval: 1000,
 });
-async function selectInstrument(id) { selected = id; watchlist.setActive(id); document.getElementById('price').value = ''; document.getElementById('sl').value = ''; document.getElementById('tp').value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.reset(); book.refresh(); stats.refresh(); trades.clearTape(); trades.refreshMine(); }
-document.getElementById('tfs').addEventListener('click', (e) => { const btn = e.target.closest('button'); if (!btn) return; tf = +btn.dataset.tf; document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
+async function selectInstrument(id) { selected = id; watchlist.setActive(id); /** @type {HTMLInputElement} */ (document.getElementById('price')).value = ''; /** @type {HTMLInputElement} */ (document.getElementById('sl')).value = ''; /** @type {HTMLInputElement} */ (document.getElementById('tp')).value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.reset(); book.refresh(); stats.refresh(); trades.clearTape(); trades.refreshMine(); }
+document.getElementById('tfs').addEventListener('click', (e) => { const btn = /** @type {Element} */ (e.target).closest('button'); if (!btn) return; tf = +btn.dataset.tf; document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
 
 // ============================ Toolbar (dropdowns) ==========================
 function closeDD() { document.querySelectorAll('.dd').forEach((d) => d.classList.add('hidden')); }
 function toggleDD(id) { const m = document.getElementById(id); const wasHidden = m.classList.contains('hidden'); closeDD(); if (wasHidden) m.classList.remove('hidden'); }
-document.addEventListener('click', (e) => { if (!e.target.closest('.tb-dd')) closeDD(); });
+document.addEventListener('click', (e) => { if (!/** @type {Element} */ (e.target).closest('.tb-dd')) closeDD(); });
 
 document.getElementById('ctBtn').addEventListener('click', () => toggleDD('ctMenu'));
-document.getElementById('ctMenu').addEventListener('click', (e) => { const it = e.target.closest('[data-ct]'); if (!it) return; chartType = it.dataset.ct; document.querySelectorAll('#ctMenu .dd-item').forEach((x) => x.classList.toggle('active', x === it)); const icName = it.querySelector('[data-icon]')?.dataset.icon || 'candles'; const btnIc = document.querySelector('#ctBtn .ic'); if (btnIc) { btnIc.dataset.icon = icName; btnIc.innerHTML = ICONS[icName]; } document.getElementById('ctLabel').textContent = it.textContent.trim(); closeDD(); makeMainSeries(); mainSeries.setData(mainData()); applyIndicators(); redrawPriceLines(); });
+document.getElementById('ctMenu').addEventListener('click', (e) => { const it = /** @type {Element} */ (e.target).closest('[data-ct]'); if (!it) return; chartType = /** @type {HTMLElement} */ (it).dataset.ct; document.querySelectorAll('#ctMenu .dd-item').forEach((x) => x.classList.toggle('active', x === it)); const icName = (/** @type {HTMLElement} */ (it.querySelector('[data-icon]')))?.dataset.icon || 'candles'; const btnIc = /** @type {HTMLElement} */ (document.querySelector('#ctBtn .ic')); if (btnIc) { btnIc.dataset.icon = icName; btnIc.innerHTML = ICONS[icName]; } document.getElementById('ctLabel').textContent = it.textContent.trim(); closeDD(); makeMainSeries(); mainSeries.setData(mainData()); applyIndicators(); redrawPriceLines(); });
 
 document.getElementById('indBtn').addEventListener('click', () => toggleDD('indMenu'));
 document.getElementById('indMenu').addEventListener('click', (e) => {
-  const ov = e.target.closest('[data-ov]');
-  const os = e.target.closest('[data-osc]');
-  if (ov) { const k = ov.dataset.ov; overlays[k] = overlays[k] ? 0 : 1; ov.classList.toggle('on', !!overlays[k]); applyIndicators(); }
-  else if (os) { oscillator = os.dataset.osc; document.querySelectorAll('#indMenu .osc').forEach((x) => x.classList.toggle('on', x === os)); applyIndicators(); }
+  const ov = /** @type {Element} */ (e.target).closest('[data-ov]');
+  const os = /** @type {Element} */ (e.target).closest('[data-osc]');
+  if (ov) { const k = /** @type {HTMLElement} */ (ov).dataset.ov; overlays[k] = overlays[k] ? 0 : 1; ov.classList.toggle('on', !!overlays[k]); applyIndicators(); }
+  else if (os) { oscillator = /** @type {HTMLElement} */ (os).dataset.osc; document.querySelectorAll('#indMenu .osc').forEach((x) => x.classList.toggle('on', x === os)); applyIndicators(); }
 });
 
 document.getElementById('ptBtn').addEventListener('click', () => toggleDD('ptMenu'));
-document.getElementById('ptMenu').addEventListener('click', (e) => { const it = e.target.closest('[data-pt]'); if (!it) return; priceType = it.dataset.pt; document.querySelectorAll('#ptMenu .dd-item').forEach((x) => x.classList.toggle('active', x === it)); document.getElementById('ptLabel').textContent = it.textContent.trim().toUpperCase(); closeDD(); updateDealPanel(); });
+document.getElementById('ptMenu').addEventListener('click', (e) => { const it = /** @type {Element} */ (e.target).closest('[data-pt]'); if (!it) return; priceType = /** @type {HTMLElement} */ (it).dataset.pt; document.querySelectorAll('#ptMenu .dd-item').forEach((x) => x.classList.toggle('active', x === it)); document.getElementById('ptLabel').textContent = it.textContent.trim().toUpperCase(); closeDD(); updateDealPanel(); });
 
 document.getElementById('sltpBtn').addEventListener('click', () => { showSLTP = !showSLTP; document.getElementById('sltpBtn').classList.toggle('on', showSLTP); redrawPriceLines(); });
 document.getElementById('pipsBtn').addEventListener('click', () => { showPips = !showPips; document.getElementById('pipsBtn').classList.toggle('on', showPips); updateDealPanel(); panel.refreshDeals(); });
@@ -332,9 +332,9 @@ function resetChart() {
   Object.keys(overlays).forEach((k) => (overlays[k] = 0));
   oscillator = '';
   document.querySelectorAll('#indMenu [data-ov]').forEach((x) => x.classList.remove('on'));
-  document.querySelectorAll('#indMenu .osc').forEach((x) => x.classList.toggle('on', x.dataset.osc === ''));
-  document.querySelectorAll('#ctMenu .dd-item').forEach((x) => x.classList.toggle('active', x.dataset.ct === 'candles'));
-  const btnIc = document.querySelector('#ctBtn .ic'); if (btnIc) { btnIc.dataset.icon = 'candles'; btnIc.innerHTML = ICONS.candles; }
+  document.querySelectorAll('#indMenu .osc').forEach((x) => x.classList.toggle('on', /** @type {HTMLElement} */ (x).dataset.osc === ''));
+  document.querySelectorAll('#ctMenu .dd-item').forEach((x) => x.classList.toggle('active', /** @type {HTMLElement} */ (x).dataset.ct === 'candles'));
+  const btnIc = document.querySelector('#ctBtn .ic'); if (btnIc) { /** @type {HTMLElement} */ (btnIc).dataset.icon = 'candles'; btnIc.innerHTML = ICONS.candles; }
   document.getElementById('ctLabel').textContent = 'Candles';
   makeMainSeries(); mainSeries.setData(mainData()); applyIndicators(); redrawPriceLines();
   const n = rawCandles.length; if (n) chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 });
@@ -344,15 +344,15 @@ document.getElementById('fullBtn').addEventListener('click', () => { const cw = 
 document.getElementById('setBtn').addEventListener('click', () => toggleDD('setMenu'));
 function bindSetting(id, key, kind) {
   const el = document.getElementById(id); if (!el) return;
-  if (kind === 'bool') el.checked = settings[key]; else el.value = settings[key];
-  el.addEventListener('change', () => { settings[key] = kind === 'bool' ? el.checked : (kind === 'num' ? Number(el.value) : el.value); saveSettings(); applySettings(); });
+  if (kind === 'bool') /** @type {HTMLInputElement} */ (el).checked = settings[key]; else /** @type {HTMLInputElement} */ (el).value = settings[key];
+  el.addEventListener('change', () => { settings[key] = kind === 'bool' ? /** @type {HTMLInputElement} */ (el).checked : (kind === 'num' ? Number(/** @type {HTMLInputElement} */ (el).value) : /** @type {HTMLInputElement} */ (el).value); saveSettings(); applySettings(); });
 }
 bindSetting('sHollow', 'hollowColor', 'str'); bindSetting('sShadows', 'shadows', 'bool'); bindSetting('sShadowCustom', 'shadowCustom', 'bool'); bindSetting('sShadowColor', 'shadowColor', 'str');
 bindSetting('sPlw', 'priceLineWidth', 'num'); bindSetting('sAddLine', 'addLine', 'bool'); bindSetting('sAlw', 'addLineWidth', 'num'); bindSetting('sMinChange', 'minChange', 'str');
 
 // Видимость колонок списка: состояние и отрисовка — внутри виджета, страница лишь
 // связывает свои чекбоксы с его публичным API.
-function bindCol(id, key) { const el = document.getElementById(id); if (!el) return; el.checked = !!watchlist.columns()[key]; el.addEventListener('change', () => watchlist.setColumns({ [key]: el.checked ? 1 : 0 })); }
+function bindCol(id, key) { const el = document.getElementById(id); if (!el) return; /** @type {HTMLInputElement} */ (el).checked = !!watchlist.columns()[key]; el.addEventListener('change', () => watchlist.setColumns({ [key]: /** @type {HTMLInputElement} */ (el).checked ? 1 : 0 })); }
 bindCol('cChange', 'change'); bindCol('cSell', 'sell'); bindCol('cBuy', 'buy'); bindCol('cSpread', 'spread'); bindCol('cHigh', 'high');
 
 // Panel/toolbar resizing
@@ -362,18 +362,18 @@ bindCol('cChange', 'change'); bindCol('cSell', 'sell'); bindCol('cBuy', 'buy'); 
 // Сохранённый пользователем размер (localStorage) имеет приоритет над этим дефолтом.
 const layout = Object.assign({ leftW: 300, rightW: 340, bottomH: 190, toolbarH: 42, dealH: 150, tradesH: 240 }, JSON.parse(localStorage.getItem('layout') || '{}'));
 function applyLayout() {
-  document.querySelector('.grid').style.gridTemplateColumns = `${layout.leftW}px 6px 1fr 6px ${layout.rightW}px`;
-  document.querySelector('.bottom').style.height = layout.bottomH + 'px';
-  document.querySelector('.deal').style.height = layout.dealH + 'px';
+  /** @type {HTMLElement} */ (document.querySelector('.grid')).style.gridTemplateColumns = `${layout.leftW}px 6px 1fr 6px ${layout.rightW}px`;
+  /** @type {HTMLElement} */ (document.querySelector('.bottom')).style.height = layout.bottomH + 'px';
+  /** @type {HTMLElement} */ (document.querySelector('.deal')).style.height = layout.dealH + 'px';
   document.getElementById('trades').style.height = layout.tradesH + 'px';
   // minHeight, а не height: тулбар должен иметь право вырасти, когда кнопки не влезли
   // в одну строку. Жёсткая высота выталкивала их поверх панели метрик (BUG-010).
-  document.querySelector('.toolbar').style.minHeight = layout.toolbarH + 'px';
+  /** @type {HTMLElement} */ (document.querySelector('.toolbar')).style.minHeight = layout.toolbarH + 'px';
 }
 function initResizers() {
   document.querySelectorAll('[data-rsz]').forEach((h) => h.addEventListener('mousedown', (e) => {
     e.preventDefault(); h.classList.add('drag');
-    const type = h.dataset.rsz, sx = e.clientX, sy = e.clientY, sl = layout.leftW, sr = layout.rightW, sb = layout.bottomH, stH = layout.toolbarH, sd = layout.dealH, str = layout.tradesH;
+    const type = /** @type {HTMLElement} */ (h).dataset.rsz, sx = /** @type {MouseEvent} */ (e).clientX, sy = /** @type {MouseEvent} */ (e).clientY, sl = layout.leftW, sr = layout.rightW, sb = layout.bottomH, stH = layout.toolbarH, sd = layout.dealH, str = layout.tradesH;
     const mv = (ev) => {
       if (type === 'left') layout.leftW = Math.min(520, Math.max(180, sl + (ev.clientX - sx)));
       else if (type === 'right') layout.rightW = Math.min(560, Math.max(220, sr - (ev.clientX - sx)));
@@ -391,8 +391,8 @@ function initResizers() {
 
 // ============================ Tooltip ======================================
 const tip = document.getElementById('tip');
-document.addEventListener('mouseover', (e) => { const t = e.target.closest('[data-tip]'); if (!t) return; tip.textContent = t.dataset.tip; tip.classList.remove('hidden'); const r = t.getBoundingClientRect(); tip.style.left = r.left + r.width / 2 + 'px'; tip.style.top = r.bottom + 7 + 'px'; });
-document.addEventListener('mouseout', (e) => { if (e.target.closest('[data-tip]')) tip.classList.add('hidden'); });
+document.addEventListener('mouseover', (e) => { const t = /** @type {Element} */ (e.target).closest('[data-tip]'); if (!t) return; tip.textContent = /** @type {HTMLElement} */ (t).dataset.tip; tip.classList.remove('hidden'); const r = t.getBoundingClientRect(); tip.style.left = r.left + r.width / 2 + 'px'; tip.style.top = r.bottom + 7 + 'px'; });
+document.addEventListener('mouseout', (e) => { if (/** @type {Element} */ (e.target).closest('[data-tip]')) tip.classList.add('hidden'); });
 
 // ============================ WebSocket ====================================
 // Индикатор живости горит по ПРИХОДУ ДАННЫХ, а не по открытому сокету. Открытый
@@ -477,12 +477,12 @@ document.getElementById('tabLimit').addEventListener('click', () => setMode('lim
 function setMode(m) { orderMode = m; document.getElementById('tabDeal').classList.toggle('active', m === 'market'); document.getElementById('tabLimit').classList.toggle('active', m === 'limit'); document.getElementById('priceRow').classList.toggle('hidden', m !== 'limit'); updateDealPanel(); }
 document.getElementById('lotMinus').addEventListener('click', () => stepLot(-1));
 document.getElementById('lotPlus').addEventListener('click', () => stepLot(1));
-function stepLot(d) { const i = document.getElementById('lot'); if (sizeUnit === 'usd') i.value = Math.max(1, (parseFloat(i.value) || 0) + d * 10).toFixed(0); else i.value = Math.max(0.001, (parseFloat(i.value) || 0) + d * 0.01).toFixed(3); updateSizeEq(); }
-function readSlTp(id) { const sl = parseFloat(document.getElementById('sl').value), tp = parseFloat(document.getElementById('tp').value); return { sl: sl > 0 ? Math.round(sl * pscale(id)) : null, tp: tp > 0 ? Math.round(tp * pscale(id)) : null }; }
+function stepLot(d) { const i = document.getElementById('lot'); if (sizeUnit === 'usd') /** @type {HTMLInputElement} */ (i).value = Math.max(1, (parseFloat(/** @type {HTMLInputElement} */ (i).value) || 0) + d * 10).toFixed(0); else /** @type {HTMLInputElement} */ (i).value = Math.max(0.001, (parseFloat(/** @type {HTMLInputElement} */ (i).value) || 0) + d * 0.01).toFixed(3); updateSizeEq(); }
+function readSlTp(id) { const sl = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('sl')).value), tp = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('tp')).value); return { sl: sl > 0 ? Math.round(sl * pscale(id)) : null, tp: tp > 0 ? Math.round(tp * pscale(id)) : null }; }
 // Размер сделки в базовых единицах (учитывает выбор LOT/USD).
-function sizeBaseQty(id) { const v = parseFloat(document.getElementById('lot').value) || 0; if (v <= 0) return 0; if (sizeUnit === 'usd') { const p = refPrice(META[id]) / pscale(id); return p > 0 ? v / p : 0; } return v; }
-function updateSizeEq() { const it = META[selected]; const el = document.getElementById('sizeEq'); if (!it) { el.textContent = ''; return; } const p = refPrice(it) / pscale(it.id); const v = parseFloat(document.getElementById('lot').value) || 0; const base = it.symbol.split('-')[0]; el.textContent = sizeUnit === 'usd' ? `≈ ${(p > 0 ? v / p : 0).toFixed(qdec(it.id))} ${base}` : `≈ $${(v * p).toLocaleString('en-US', { maximumFractionDigits: 2 })}`; }
-function setUnit(u) { if (sizeUnit === u) return; const it = META[selected]; const inp = document.getElementById('lot'); const v = parseFloat(inp.value) || 0; const p = it ? refPrice(it) / pscale(it.id) : 0; if (u === 'usd') { inp.value = (p > 0 ? v * p : 0).toFixed(0); inp.step = '1'; } else { inp.value = (p > 0 ? v / p : 0).toFixed(3); inp.step = '0.001'; } sizeUnit = u; document.getElementById('unitLot').classList.toggle('active', u === 'lot'); document.getElementById('unitUsd').classList.toggle('active', u === 'usd'); updateSizeEq(); }
+function sizeBaseQty(id) { const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('lot')).value) || 0; if (v <= 0) return 0; if (sizeUnit === 'usd') { const p = refPrice(META[id]) / pscale(id); return p > 0 ? v / p : 0; } return v; }
+function updateSizeEq() { const it = META[selected]; const el = document.getElementById('sizeEq'); if (!it) { el.textContent = ''; return; } const p = refPrice(it) / pscale(it.id); const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('lot')).value) || 0; const base = it.symbol.split('-')[0]; el.textContent = sizeUnit === 'usd' ? `≈ ${(p > 0 ? v / p : 0).toFixed(qdec(it.id))} ${base}` : `≈ $${(v * p).toLocaleString('en-US', { maximumFractionDigits: 2 })}`; }
+function setUnit(u) { if (sizeUnit === u) return; const it = META[selected]; const inp = document.getElementById('lot'); const v = parseFloat(/** @type {HTMLInputElement} */ (inp).value) || 0; const p = it ? refPrice(it) / pscale(it.id) : 0; if (u === 'usd') { /** @type {HTMLInputElement} */ (inp).value = (p > 0 ? v * p : 0).toFixed(0); /** @type {HTMLInputElement} */ (inp).step = '1'; } else { /** @type {HTMLInputElement} */ (inp).value = (p > 0 ? v / p : 0).toFixed(3); /** @type {HTMLInputElement} */ (inp).step = '0.001'; } sizeUnit = u; document.getElementById('unitLot').classList.toggle('active', u === 'lot'); document.getElementById('unitUsd').classList.toggle('active', u === 'usd'); updateSizeEq(); }
 document.getElementById('unitLot').addEventListener('click', () => setUnit('lot'));
 document.getElementById('unitUsd').addEventListener('click', () => setUnit('usd'));
 document.getElementById('lot').addEventListener('input', updateSizeEq);
@@ -503,7 +503,7 @@ async function submit(side) {
   if (!(baseQty > 0)) { msg.textContent = 'Enter size'; msg.style.color = 'var(--down)'; return; }
   const { sl, tp } = readSlTp(id); const qty = Math.round(baseQty * qscale(id)); let body;
   const isLimit = orderMode === 'limit';
-  if (isLimit) { const price = parseFloat(document.getElementById('price').value); if (!(price > 0)) { msg.textContent = 'Enter price'; msg.style.color = 'var(--down)'; return; } body = { instrument: id, side, qty, price: Math.round(price * pscale(id)), sl, tp }; }
+  if (isLimit) { const price = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('price')).value); if (!(price > 0)) { msg.textContent = 'Enter price'; msg.style.color = 'var(--down)'; return; } body = { instrument: id, side, qty, price: Math.round(price * pscale(id)), sl, tp }; }
   else body = { instrument: id, side, qty, sl, tp };
   const { ok, status, data } = isLimit ? await api.placePending(body) : await api.openDeal(body);
   if (ok) { msg.textContent = isLimit ? `Limit order #${data.id}` : `Opened #${data.id}: ${side.toUpperCase()} @ ${fmtP(id, data.entry)}`; msg.style.color = 'var(--up)'; panel.show(isLimit ? 'pending' : 'deals'); pollAccount(); panel.refresh(); }

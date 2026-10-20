@@ -313,14 +313,14 @@ test('фавикон не зависит от темы и берёт logoLight',
   t.after(cleanup);
 
   window.Theming.applyBrand(v2());
-  assert.equal(document.querySelector('link[rel="icon"]').href, 'https://media/apex.ico');
+  assert.equal(/** @type {HTMLLinkElement} */ (document.querySelector('link[rel="icon"]')).href, 'https://media/apex.ico');
 
   const noFav = v2();
   noFav.brand.favicon = null;
   noFav.brand.logoDark = null;
   window.Theming.applyBrand(noFav); // тема тёмная, знака в шапке нет
 
-  assert.equal(document.querySelector('link[rel="icon"]').href, 'https://media/apex-light.svg');
+  assert.equal(/** @type {HTMLLinkElement} */ (document.querySelector('link[rel="icon"]')).href, 'https://media/apex-light.svg');
 });
 
 // ---- Адрес ресурса ---------------------------------------------------------
