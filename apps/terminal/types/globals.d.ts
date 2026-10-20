@@ -32,6 +32,8 @@ interface Window {
   Positions?: any;
   Trades?: any;
   Drawings?: any;
+  /** Ряд цены и его разрыв (TRM-19). */
+  Series?: any;
   LightweightCharts?: any;
   /** Журнал родителя в браузерных проверках SSO. */
   __got?: any[];
@@ -52,5 +54,6 @@ declare const Watchlist: any;
 declare const Positions: any;
 declare const Trades: any;
 declare const Drawings: any;
+declare const Series: any;
 /** Вендорная библиотека графика: вшивается в образ, типов не поставляет. */
 declare const LightweightCharts: any;

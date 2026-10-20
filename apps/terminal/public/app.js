@@ -58,7 +58,7 @@ function updateLegend(id, t, c) {
   document.getElementById('lgTime').textContent = fmtDT(t);
   document.getElementById('lgOhlc').innerHTML = `O <b>${rf(c.open)}</b>  H <b>${rf(c.high)}</b>  L <b>${rf(c.low)}</b>  C <b class="${c.close >= c.open ? 'up' : 'down'}">${rf(c.close)}</b>`;
 }
-function refreshLegend() { if (selected == null) return; let c; if (formingRaw) { const s = pscale(selected); c = { time: formingRaw.time, open: formingRaw.open / s, high: formingRaw.high / s, low: formingRaw.low / s, close: formingRaw.close / s }; } else if (rawCandles.length) c = rawCandles[rawCandles.length - 1]; if (c) updateLegend(selected, c.time, c); }
+function refreshLegend() { if (selected == null) return; let c; const f = priceSeries.forming(); if (f) { const s = pscale(selected); c = { time: f.time, open: f.open / s, high: f.high / s, low: f.low / s, close: f.close / s }; } else if (rawCandles.length) c = rawCandles[rawCandles.length - 1]; if (c) updateLegend(selected, c.time, c); }
 
 // ===== Indicators — вынесены в модуль indicators.js (ADR-015), подключается до app.js =====
 // toSeries — чартовый глюкод (значения → {time,value} для Lightweight Charts), остаётся здесь.
@@ -112,7 +112,10 @@ volume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 const draw = Drawings.mount(chartEl.parentElement, { chart, series: () => mainSeries });
 
 let mainSeries = null, overlaySeries = [], oscSeriesList = [], priceLines = [];
-let lastBarTime = 0, formingRaw = null;
+// Формирующаяся свеча и её РАЗРЫВ живут в `series.js` (TRM-19, Р-073). Здесь
+// лежала пара модульных переменных, которую правили из четырёх мест, — и
+// именно поэтому бар переживал обрыв связи: сбрасывать его было некому.
+const priceSeries = window.Series.create();
 const volColor = (c) => (c.close >= c.open ? rgbaT('--positive', '.4') : rgbaT('--negative', '.4'));
 const isLineType = () => (chartType === 'line' || chartType === 'area');
 
@@ -192,14 +195,27 @@ async function loadCandles(id, timeframe) {
     mainSeries.setData(mainData());
     volume.setData(rawCandles.map((c) => ({ time: c.time, value: c.volume, color: volColor(c) })));
     applyIndicators(); redrawPriceLines(); panel.refreshSignals();
-    if (rawCandles.length) { const last = raw[raw.length - 1]; lastBarTime = last.time; formingRaw = { ...last }; const n = rawCandles.length; chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 }); } else { lastBarTime = 0; formingRaw = null; }
+    // Загрузка с сервера — авторитетный пересев ряда: ответ REST видел и дыру
+    // тоже, поэтому он же снимает разрыв.
+    priceSeries.seed(rawCandles.length ? raw[raw.length - 1] : null);
+    if (rawCandles.length) { const n = rawCandles.length; chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 }); }
     refreshLegend();
     draw.clear(); // logical-якоря объектов рисования после setData невалидны
   } finally { load.classList.add('hidden'); }
 }
-function drawForming() { if (!formingRaw || !mainSeries || chartType === 'heikin') return; const s = pscale(selected); mainSeries.update(isLineType() ? { time: formingRaw.time, value: formingRaw.close / s } : { time: formingRaw.time, open: formingRaw.open / s, high: formingRaw.high / s, low: formingRaw.low / s, close: formingRaw.close / s }); refreshLegend(); }
-function onLiveTrade(id, price, qty) { if (id !== selected) return; const now = Math.floor(Date.now() / 1000); const b = now - (now % tf); if (!formingRaw || b > formingRaw.time) formingRaw = { time: b, open: price, high: price, low: price, close: price, volume: qty }; else { formingRaw.high = Math.max(formingRaw.high, price); formingRaw.low = Math.min(formingRaw.low, price); formingRaw.close = price; } if (formingRaw.time >= lastBarTime) { lastBarTime = formingRaw.time; drawForming(); } }
-async function syncLast() { const id = selected; if (id == null) return; const raw = (await api.candles(id, tf, 2)) || []; if (!raw.length) return; const last = raw[raw.length - 1]; if (last.time >= lastBarTime) { lastBarTime = last.time; formingRaw = { ...last }; drawForming(); } }
+/** @param {any} [bar] свеча к отрисовке; без неё — текущая формирующаяся. */
+function drawForming(bar) { const b = bar || priceSeries.forming(); if (!b || !mainSeries || chartType === 'heikin') return; const s = pscale(selected); mainSeries.update(isLineType() ? { time: b.time, value: b.close / s } : { time: b.time, open: b.open / s, high: b.high / s, low: b.low / s, close: b.close / s }); refreshLegend(); }
+// Агрегация живой сделки в свечу — в `series.js`. Отрисовка остаётся здесь:
+// пока ряд разорван, модуль не возвращает ничего, и рисовать нечего.
+function onLiveTrade(id, price, qty) { if (id !== selected) return; const b = priceSeries.onTrade({ now: Math.floor(Date.now() / 1000), tf, price, qty }); if (b) drawForming(b); }
+async function syncLast() {
+  const id = selected; if (id == null) return;
+  const raw = (await api.candles(id, tf, 2)) || []; if (!raw.length) return;
+  const last = raw[raw.length - 1];
+  // Разорванный ряд пересевается БЕЗУСЛОВНО: это и есть возвращение в работу,
+  // и ждать его дольше одного такта (2 с) не приходится.
+  if (priceSeries.isBroken() || last.time >= priceSeries.lastBarTime()) { priceSeries.seed(last); drawForming(); }
+}
 
 // ============================ Instruments ==================================
 function refPrice(it) { if (!it || it.bid == null || it.ask == null) return it?.last; if (priceType === 'ask') return it.ask; if (priceType === 'bid') return it.bid; return Math.round((it.bid + it.ask) / 2); }
@@ -428,10 +444,31 @@ let wsOpen = false;
 let feedDropped = 0;
 const feedDiag = window.Diag.reporter({ subject: 'feed', every: 50 });
 
+/**
+ * Разрыв ряда цены (TRM-19, Р-073): свеча закрывается, живые сделки до
+ * пересева с сервера не принимаются.
+ *
+ * Непрерывность ломает не только свечу: направление в стакане считается от
+ * предыдущей середины, и через дыру это сравнение с ценой из другого времени.
+ * Ленту сделок НЕ чистим — она не ряд, а список произошедшего, и стирать
+ * наблюдённое из-за обрыва связи нельзя.
+ *
+ * @param {string} reason одна из `Series.BREAK_REASONS`
+ */
+function breakPriceSeries(reason) {
+  if (priceSeries.isBroken()) return;
+  priceSeries.markBreak(reason);
+  book.reset();
+}
+
 function renderFeedStatus() {
   const st = document.getElementById('status');
   const age = lastFeedMsgAt ? Date.now() - lastFeedMsgAt : Infinity;
   const live = wsOpen && age < FEED_STALE_MS;
+  // Молчание дольше порога — такой же разрыв, как обрыв сокета: сокет цел, а
+  // данных нет, и следующая сделка пришла бы в свечу из прошлого. Условие
+  // `lastFeedMsgAt` отсекает старт страницы: там ряд ещё не начинался.
+  if (lastFeedMsgAt && !live) breakPriceSeries('feed-stale');
   // Транспорт и данные — разные вопросы, и подсказка их различает: «сокет молчит»
   // и «шлюза нет» лечатся по-разному, хотя оба гасят точку.
   const why = !wsOpen
@@ -457,7 +494,7 @@ function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/stream`);
   ws.onopen = () => { wsOpen = true; renderFeedStatus(); };
-  ws.onclose = () => { wsOpen = false; renderFeedStatus(); setTimeout(connectWS, 1500); };
+  ws.onclose = () => { wsOpen = false; breakPriceSeries('feed-lost'); renderFeedStatus(); setTimeout(connectWS, 1500); };
   ws.onmessage = (ev) => {
     let e;
     try {
