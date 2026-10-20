@@ -51,14 +51,23 @@ function renderIcons(root = document) { root.querySelectorAll('[data-icon]').for
 
 // ---- Legend (chart info card) ---------------------------------------------
 function fmtDT(t) { return new Date(t * 1000).toLocaleString('en-GB', { timeZone: 'UTC', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) + ' UTC'; }
-function updateLegend(id, t, c) {
+/**
+ * @param {number} id @param {number} t @param {any} c
+ * @param {boolean} [forming] бар ещё не закрыт — и обязан сказать это сам.
+ *
+ * Это условие решения по TRM-33, а не украшение. Гистограмма объёма теперь
+ * живая, а индикаторы считаются по закрытым барам; без пометки расхождение
+ * «индикатор отстаёт на один бар» читалось бы как поломка — ровно та
+ * необъяснимость, которую мы только что нашли у объёма.
+ */
+function updateLegend(id, t, c, forming) {
   const rf = (x) => x.toLocaleString('en-US', { minimumFractionDigits: pdec(id), maximumFractionDigits: pdec(id) });
   document.getElementById('lgSym').textContent = META[id]?.symbol || '';
   document.getElementById('lgTf').textContent = TFN[tf] || '';
-  document.getElementById('lgTime').textContent = fmtDT(t);
+  document.getElementById('lgTime').textContent = fmtDT(t) + (forming ? ' · бар не закрыт' : '');
   document.getElementById('lgOhlc').innerHTML = `O <b>${rf(c.open)}</b>  H <b>${rf(c.high)}</b>  L <b>${rf(c.low)}</b>  C <b class="${c.close >= c.open ? 'up' : 'down'}">${rf(c.close)}</b>`;
 }
-function refreshLegend() { if (selected == null) return; let c; const f = priceSeries.forming(); if (f) { const s = pscale(selected); c = { time: f.time, open: f.open / s, high: f.high / s, low: f.low / s, close: f.close / s }; } else if (rawCandles.length) c = rawCandles[rawCandles.length - 1]; if (c) updateLegend(selected, c.time, c); }
+function refreshLegend() { if (selected == null) return; let c, forming = false; const f = priceSeries.forming(); if (f) { const s = pscale(selected); c = { time: f.time, open: f.open / s, high: f.high / s, low: f.low / s, close: f.close / s }; forming = true; } else if (rawCandles.length) c = rawCandles[rawCandles.length - 1]; if (c) updateLegend(selected, c.time, c, forming); }
 
 // ===== Indicators — вынесены в модуль indicators.js (ADR-015), подключается до app.js =====
 // toSeries — чартовый глюкод (значения → {time,value} для Lightweight Charts), остаётся здесь.
@@ -174,7 +183,7 @@ function redrawPriceLines() {
 }
 
 new ResizeObserver(() => chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight })).observe(chartEl);
-chart.subscribeCrosshairMove((p) => { const id = selected; if (id == null) return; const d = p.seriesData?.get(mainSeries); if (p.time && d) { const c = d.close != null ? d : { open: d.value, high: d.value, low: d.value, close: d.value }; updateLegend(id, p.time, c); } else refreshLegend(); });
+chart.subscribeCrosshairMove((p) => { const id = selected; if (id == null) return; const d = p.seriesData?.get(mainSeries); if (p.time && d) { const c = d.close != null ? d : { open: d.value, high: d.value, low: d.value, close: d.value }; const f = priceSeries.forming(); updateLegend(id, p.time, c, !!f && p.time === f.time); } else refreshLegend(); });
 
 async function loadCandles(id, timeframe) {
   const load = document.getElementById('loading'); load.classList.remove('hidden');
@@ -203,18 +212,49 @@ async function loadCandles(id, timeframe) {
     draw.clear(); // logical-якоря объектов рисования после setData невалидны
   } finally { load.classList.add('hidden'); }
 }
-/** @param {any} [bar] свеча к отрисовке; без неё — текущая формирующаяся. */
-function drawForming(bar) { const b = bar || priceSeries.forming(); if (!b || !mainSeries || chartType === 'heikin') return; const s = pscale(selected); mainSeries.update(isLineType() ? { time: b.time, value: b.close / s } : { time: b.time, open: b.open / s, high: b.high / s, low: b.low / s, close: b.close / s }); refreshLegend(); }
+/**
+ * @param {any} [bar] свеча к отрисовке; без неё — текущая формирующаяся.
+ *
+ * Объём обновляется ЖИВЬЁМ (TRM-33). Раньше серия объёма менялась только
+ * полной загрузкой: цена рисовала новые свечи, а столбцов под ними не
+ * появлялось — гистограмма обрывалась на моменте выбора инструмента, и ничто
+ * на экране об этом не говорило.
+ *
+ * ИНДИКАТОРЫ ЖИВЫМИ НЕ СТАНОВЯТСЯ, и это решение, а не недоделка. Гистограмма
+ * показывает НАБЛЮДЁННОЕ: сделки произошли, не показать их — скрыть факт.
+ * Индикатор показывает ПРОИЗВОДНУЮ величину, и на незакрытом баре она
+ * перерисовывается на каждом тике: человек решал бы по линии, которой через
+ * секунду не будет. Поэтому они считаются по `rawCandles`, то есть по
+ * закрытым барам, и дозакрывать это ради единообразия не надо.
+ *
+ * Плата за решение — расхождение на один бар, и оно названо вслух пометкой
+ * «бар не закрыт» в легенде (см. `updateLegend`).
+ */
+function drawForming(bar) {
+  const b = bar || priceSeries.forming();
+  if (!b) return;
+  // Объём от типа графика не зависит: хейкин-аши пересчитывает цену, а сделки
+  // остаются теми же. Поэтому обновление объёма идёт ДО возврата по типу.
+  volume.update({ time: b.time, value: b.volume / qscale(selected), color: volColor(b) });
+  if (!mainSeries || chartType === 'heikin') return;
+  const s = pscale(selected);
+  mainSeries.update(isLineType() ? { time: b.time, value: b.close / s } : { time: b.time, open: b.open / s, high: b.high / s, low: b.low / s, close: b.close / s });
+  refreshLegend();
+}
 // Агрегация живой сделки в свечу — в `series.js`. Отрисовка остаётся здесь:
 // пока ряд разорван, модуль не возвращает ничего, и рисовать нечего.
 function onLiveTrade(id, price, qty) { if (id !== selected) return; const b = priceSeries.onTrade({ now: Math.floor(Date.now() / 1000), tf, price, qty }); if (b) drawForming(b); }
 async function syncLast() {
   const id = selected; if (id == null) return;
+  // Разорванный ряд возвращается ПОЛНОЙ перезагрузкой, а не заплаткой на два
+  // бара. Заплатка здесь опасна: после разрыва авторитетный бар может
+  // оказаться СТАРШЕ уже нарисованного (наши часы открыли новый интервал, а
+  // биржа ещё нет), а график назад не обновляется — он на это падает.
+  // Перезагрузка кладёт ряд целиком и такого порядка не знает.
+  if (priceSeries.isBroken()) { await loadCandles(id, tf); return; }
   const raw = (await api.candles(id, tf, 2)) || []; if (!raw.length) return;
   const last = raw[raw.length - 1];
-  // Разорванный ряд пересевается БЕЗУСЛОВНО: это и есть возвращение в работу,
-  // и ждать его дольше одного такта (2 с) не приходится.
-  if (priceSeries.isBroken() || last.time >= priceSeries.lastBarTime()) { priceSeries.seed(last); drawForming(); }
+  if (last.time >= priceSeries.lastBarTime()) { priceSeries.seed(last); drawForming(); }
 }
 
 // ============================ Instruments ==================================
@@ -427,6 +467,8 @@ document.addEventListener('mouseout', (e) => { if (/** @type {Element} */ (e.tar
 const FEED_STALE_MS = 20000;
 let lastFeedMsgAt = 0;
 let wsOpen = false;
+/** Было ли живо на прошлой перерисовке — чтобы рвать ряд на переходе, а не постоянно. */
+let wasFeedLive = false;
 /**
  * Сколько сообщений фида не разобралось **за сессию**. Ноль — не «всё хорошо»,
  * а «пока ни одного»: различать их помогает возраст последнего сообщения.
@@ -466,9 +508,15 @@ function renderFeedStatus() {
   const age = lastFeedMsgAt ? Date.now() - lastFeedMsgAt : Infinity;
   const live = wsOpen && age < FEED_STALE_MS;
   // Молчание дольше порога — такой же разрыв, как обрыв сокета: сокет цел, а
-  // данных нет, и следующая сделка пришла бы в свечу из прошлого. Условие
-  // `lastFeedMsgAt` отсекает старт страницы: там ряд ещё не начинался.
-  if (lastFeedMsgAt && !live) breakPriceSeries('feed-stale');
+  // данных нет, и следующая сделка пришла бы в свечу из прошлого.
+  //
+  // Рвём НА ПЕРЕХОДЕ «было живо → стало молчать», а не всё время, пока молчит.
+  // Разрыв снимается пересевом, и без перехода мы рвали бы ряд заново каждые
+  // две секунды простоя, а каждое возвращение тянет полную перезагрузку свечей:
+  // получился бы опрос тем чаще, чем хуже связь. Условие `lastFeedMsgAt`
+  // отсекает старт страницы: там ряд ещё не начинался.
+  if (lastFeedMsgAt && wasFeedLive && !live) breakPriceSeries('feed-stale');
+  wasFeedLive = live;
   // Транспорт и данные — разные вопросы, и подсказка их различает: «сокет молчит»
   // и «шлюза нет» лечатся по-разному, хотя оба гасят точку.
   const why = !wsOpen

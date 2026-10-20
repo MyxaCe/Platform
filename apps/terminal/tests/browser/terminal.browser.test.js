@@ -448,3 +448,27 @@ test('сессия без названного срока жизни не при
   const authed = term.seen.filter((r) => r.auth && r.auth.includes('сессия-без-срока'));
   assert.equal(authed.length, 0, 'сессия без срока не принимается');
 });
+
+// ---- 9. Незакрытый бар называет себя незакрытым (TRM-33) -------------------
+
+test('пока бар не закрыт, легенда говорит об этом, а живые сделки не роняют график', async (t) => {
+  // Условие решения по TRM-33: гистограмма объёма теперь обновляется живыми
+  // сделками, а индикаторы считаются по закрытым барам. Расхождение на один
+  // бар допустимо только названное — иначе оно читается как поломка.
+  //
+  // Второй половиной проверяется, что живое обновление серии объёма не роняет
+  // график: ошибка порядка времени в Lightweight Charts — исключение, а не
+  // кривая картинка, и молча её не заметить.
+  const term = await openTerminal({ query: '?site=apex-ru' });
+  t.after(term.cleanup);
+  await settle(term.page, 1500);
+
+  term.push([{ type: 'trade', instrument: 1, price: 6500000, qty: 100, side: 'buy' }]);
+  term.push([{ type: 'trade', instrument: 1, price: 6501000, qty: 250, side: 'sell' }]);
+  await settle(term.page, 800);
+
+  const shown = await term.page.evaluate(() => document.getElementById('lgTime').textContent);
+  assert.match(shown, /не закрыт/, `легенда обязана назвать бар незакрытым, а показывает «${shown}»`);
+
+  assert.deepEqual(term.errors, [], `живые сделки не должны ронять график: ${term.errors.join(' | ')}`);
+});
