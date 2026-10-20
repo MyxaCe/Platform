@@ -15,7 +15,7 @@ const { loadWidget } = require('./helpers/load-widget');
 const settle = () => new Promise((r) => setImmediate(r));
 
 function setup() {
-  return loadWidget(['stats.js']);
+  return loadWidget(['diag.js', 'stats.js']);
 }
 
 function mount(env, over) {
@@ -169,7 +169,7 @@ test('источник не ответил — на полосе метка, а 
   await widget.refresh();
   await settle();
 
-  assert.equal(env.root.getAttribute('data-stale'), 'unreachable');
+  assert.equal(env.root.getAttribute('data-stale'), 'network', 'обрыв связи зовётся network (КОНТРАКТЫ §4г)');
   assert.match(env.root.getAttribute('data-stale-label'), /НЕТ СВЯЗИ/);
   assert.match(env.root.title, /не ответил/);
   assert.equal(cells(env.root)[0].value, '+2.00%', 'числа остаются: они были верны');
@@ -231,7 +231,7 @@ test('отказ уходит наружу хосту, а не только на
   const seen = [];
   let mode = 'ok';
   const { widget } = mount(env, {
-    onError: (e) => seen.push(e.kind),
+    onError: (e) => seen.push(e.reason),
     fetch: async () => {
       if (mode === 'throw') throw new Error('сеть');
       return [{ tf: 60, change: 1 }];
@@ -245,7 +245,7 @@ test('отказ уходит наружу хосту, а не только на
   await widget.refresh();
   await settle();
 
-  assert.deepEqual(seen, ['unreachable', 'unreachable'], 'каждый неудачный тик — наружу');
+  assert.deepEqual(seen, ['network', 'network'], 'каждый неудачный тик — наружу');
 });
 
 test('после восстановления метка снимается', async (t) => {
@@ -262,7 +262,7 @@ test('после восстановления метка снимается', as
     },
   });
   await settle();
-  assert.equal(env.root.getAttribute('data-stale'), 'unreachable');
+  assert.equal(env.root.getAttribute('data-stale'), 'network');
 
   mode = 'ok';
   await widget.refresh();

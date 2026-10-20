@@ -40,7 +40,7 @@ function depth(over) {
 }
 
 function setup() {
-  return loadWidget(['orderbook.js']);
+  return loadWidget(['diag.js', 'orderbook.js']);
 }
 
 function mount(env, over) {
@@ -485,7 +485,7 @@ test('источник не ответил — метка на стакане, �
   await book.refresh();
   await settle();
 
-  assert.equal(env.root.getAttribute('data-stale'), 'unreachable');
+  assert.equal(env.root.getAttribute('data-stale'), 'network', 'обрыв связи зовётся network (КОНТРАКТЫ §4г)');
   assert.match(env.root.title, /не ответил/);
   assert.equal(side(env.root, 'bids').length, 3, 'уровни на месте');
 });
@@ -521,7 +521,7 @@ test('отказ стакана уходит наружу хосту', async (t)
   const seen = [];
   let mode = 'ok';
   const { book } = mount(env, {
-    onError: (e) => seen.push(e.kind),
+    onError: (e) => seen.push(e.reason),
     fetch: async () => {
       if (mode === 'throw') throw new Error('сеть');
       return depth();
@@ -534,7 +534,7 @@ test('отказ стакана уходит наружу хосту', async (t)
   await book.refresh();
   await settle();
 
-  assert.deepEqual(seen, ['unreachable']);
+  assert.deepEqual(seen, ['network']);
 });
 
 test('после восстановления метка со стакана снимается', async (t) => {
@@ -549,7 +549,7 @@ test('после восстановления метка со стакана с�
     },
   });
   await settle();
-  assert.equal(env.root.getAttribute('data-stale'), 'unreachable');
+  assert.equal(env.root.getAttribute('data-stale'), 'network');
 
   mode = 'ok';
   await book.refresh();

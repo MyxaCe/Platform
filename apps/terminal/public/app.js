@@ -246,7 +246,7 @@ function markMarketData(kind, ok) {
 
 const book = OrderBook.mount(document.getElementById('book'), {
   instrument: () => selected,
-  fetch: async (id, limit) => { const d = await api.depth(id, limit); markMarketData('depth', d !== null); return d; },
+  fetch: async (id, limit) => { const r = await api.depthDetailed(id, limit); markMarketData('depth', r.reason === null); return r; },
   onPick: (price) => { setMode('limit'); const inp = document.getElementById('price'); inp.value = price; inp.classList.add('flash'); setTimeout(() => inp.classList.remove('flash'), 400); },
   // Подписи колонок и марк-цена — из данных инструмента, которыми владеет хост.
   symbols: (id) => { const [base, quote] = (META[id]?.symbol || '-').split('-'); return { base, quote }; },
@@ -256,7 +256,7 @@ const book = OrderBook.mount(document.getElementById('book'), {
 });
 const stats = AssetStats.mount(document.getElementById('statbar'), {
   instrument: () => selected,
-  fetch: async (id) => { const v = await api.stats(id); markMarketData('stats', v !== null); return v; },
+  fetch: async (id) => { const r = await api.statsDetailed(id); markMarketData('stats', r.reason === null); return r; },
   labels: TFN,
   interval: 5000,
 });
@@ -274,7 +274,12 @@ const trades = Trades.mount(document.getElementById('trades'), {
   instrument: () => selected,
   decimals: (id) => ({ pd: pdec(id), qd: qdec(id) }),
   // «Мои сделки» — по выбранному инструменту; общая история живёт в нижней панели.
-  myTrades: async (id) => ((await api.closedDeals()) || []).filter((d) => d.instrument === id),
+  // `null` пропускаем как есть: виджет обязан отличить «не прочитали» от
+  // «сделок нет». Прежнее `|| []` превращало отказ в утверждение о счёте.
+  myTrades: async (id) => {
+    const all = await api.closedDeals();
+    return all === null ? null : all.filter((d) => d.instrument === id);
+  },
   fmtUsd: usd,
   interval: 2500,
 });
@@ -396,9 +401,22 @@ document.addEventListener('mouseout', (e) => { if (e.target.closest('[data-tip]'
 const FEED_STALE_MS = 20000;
 let lastFeedMsgAt = 0;
 let wsOpen = false;
-/** Сколько сообщений фида не разобралось за сессию. Ноль — не «всё хорошо», а
- *  «пока ни одного»: различать их помогает возраст последнего сообщения. */
+/**
+ * Сколько сообщений фида не разобралось **за сессию**. Ноль — не «всё хорошо»,
+ * а «пока ни одного»: различать их помогает возраст последнего сообщения.
+ *
+ * Счётчик НЕ взят из общего помощника сознательно, и это не недосмотр.
+ * Помощник считает отказы **подряд** и обнуляет их при восстановлении — это
+ * верно для опроса, где важно «источник лежит сейчас». Здесь же величина
+ * другая: сколько сообщений **потеряно** за сессию. Обнулять её на первом
+ * здоровом сообщении значило бы стирать след ровно тогда, когда он нужен.
+ *
+ * Политику ВЫВОДА при этом берём общую (TRM-17), с явно заданной частотой:
+ * поток сообщений фида на порядок чаще опроса, и «на смене состояния» здесь
+ * означало бы одну строку за всю сессию.
+ */
 let feedDropped = 0;
+const feedDiag = window.Diag.reporter({ subject: 'feed', every: 50 });
 
 function renderFeedStatus() {
   const st = document.getElementById('status');
@@ -441,9 +459,7 @@ function connectWS() {
       // друг от друга и от «биржа молчит». Счёт виден в подсказке индикатора
       // фида, так что след остаётся и в интерфейсе, а не только в консоли.
       feedDropped += 1;
-      if (feedDropped === 1 || feedDropped % 50 === 0) {
-        console.error(`[feed] сообщение не разобрано (всего ${feedDropped})`, err, String(ev.data).slice(0, 200));
-      }
+      feedDiag.fail('malformed', String(ev.data).slice(0, 200));
       renderFeedStatus();
       return;
     }

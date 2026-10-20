@@ -29,15 +29,44 @@
       return t ? { Authorization: 'Bearer ' + t } : {};
     }
 
-    /** GET с разбором JSON. Возвращает данные либо null (ошибка сети / не-2xx). */
-    async function read(url) {
+    /**
+     * GET с разбором JSON и **названной причиной отказа** (КОНТРАКТЫ §4г).
+     *
+     * Возвращает `{ data, reason }`; `reason === null` — успех.
+     *
+     * Имена — ось канала, общая для всех потребителей платформы:
+     * `network` (наша сеть не донесла), `http-error` (сосед ответил отказом),
+     * `malformed` (ответил не тем). `not-configured` называет вызывающий: он
+     * знает, задан ли адрес, а сюда без адреса не приходят.
+     *
+     * Почему `network` и `http-error` разведены: первое чинит наша сторона,
+     * второе — сосед. Схлопнутые, они отправляют чинить наугад.
+     *
+     * Прежний `read` возвращал `null` на все три случая сразу — и это был не
+     * косметический дефект: виджеты, умеющие различать причины, получали от
+     * него одно `null` и показывали «ответ не тот» при оборванной сети.
+     * Различие, построенное выше по течению, здесь и терялось.
+     */
+    async function readDetailed(url) {
+      let r;
       try {
-        const r = await fetch(url, { headers: authHeaders() });
-        if (!r.ok) return null;
-        return await r.json();
+        r = await fetch(url, { headers: authHeaders() });
       } catch {
-        return null;
+        return { data: null, reason: 'network', status: 0 };
       }
+      if (!r.ok) {
+        return { data: null, reason: 'http-error', status: r.status };
+      }
+      try {
+        return { data: await r.json(), reason: null, status: r.status };
+      } catch {
+        return { data: null, reason: 'malformed', status: r.status };
+      }
+    }
+
+    /** Короткая форма для вызывающих, которым причина не нужна. */
+    async function read(url) {
+      return (await readDetailed(url)).data;
     }
 
     /** POST/DELETE с телом. Возвращает { ok, status, data }; data может быть null. */
@@ -127,6 +156,11 @@
       candles: (id, tf, limit) => read(`/candles/${id}?tf=${tf}&limit=${limit}`),
       depth: (id, limit) => read(`/depth/${id}${limit ? `?limit=${limit}` : ''}`),
       stats: (id) => read(`/stats/${id}`),
+
+      // Те же ручки с названной причиной отказа — для виджетов, которые
+      // показывают метку устаревания и обязаны сказать, что именно сломалось.
+      depthDetailed: (id, limit) => readDetailed(`/depth/${id}${limit ? `?limit=${limit}` : ''}`),
+      statsDetailed: (id) => readDetailed(`/stats/${id}`),
 
       // ---- Счёт пользователя (требует сессию) ----------------------------
       account: () => authedRead('/account'),

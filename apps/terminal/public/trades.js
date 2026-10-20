@@ -89,7 +89,25 @@
     // ---- Мои сделки по инструменту -------------------------------------------
     async function refreshMine() {
       const id = ctx.instrument(); if (id == null) return;
-      const list = (ctx.myTrades && (await ctx.myTrades(id))) || [];
+      if (!ctx.myTrades) return;
+
+      const list = await ctx.myTrades(id);
+
+      /**
+       * `null` — прочитать не смогли. Раньше здесь стояло `|| []`, и панель
+       * писала «No trades on this instrument» — **утверждение о счёте
+       * человека**, сделанное по чтению, которого не было. Пустой список и
+       * неудавшееся чтение — разные вещи, и вторая ни при каких условиях не
+       * должна выглядеть как первая (QA-05, та же семья, что `change`).
+       *
+       * Прежние строки не стираем: они были верны на момент чтения.
+       */
+      if (!Array.isArray(list)) {
+        if (!rows('mine').innerHTML) {
+          rows('mine').innerHTML = '<div class="trades__empty">Не удалось прочитать сделки</div>';
+        }
+        return;
+      }
       rows('mine').innerHTML = list.map((d) => {
         const f = (raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals);
         const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals);

@@ -169,11 +169,45 @@ test('метка устаревания видна человеку, а не т�
     };
   });
 
-  assert.equal(stale.stale, 'malformed', 'не-2xx доходит до виджета как «ответ не тот»');
-  assert.match(stale.badge, /ОТВЕТ НЕ ТОТ/, 'плашка нарисована и несёт текст причины');
+  // 503 — это ОТКАЗ СОСЕДА, а не «ответ не тот»: разные неполадки у разных
+  // людей (КОНТРАКТЫ §4г). Раньше виджет называл это `malformed`, потому что
+  // `api.js` схлопывал всё в `null`.
+  assert.equal(stale.stale, 'http-error', 'не-2xx зовётся http-error');
+  assert.match(stale.badge, /ОТКАЗ ИСТОЧНИКА/, 'плашка нарисована и несёт текст причины');
   assert.ok(stale.valueOpacity < 0.6, `числа обязаны погаснуть, прозрачность ${stale.valueOpacity}`);
   assert.notEqual(stale.stillThere, '', 'но остаться: они были верны на момент чтения');
   assert.match(stale.title, /не обновляется/);
+});
+
+test('оборванная сеть зовётся network, а не отказом соседа (КОНТРАКТЫ §4г)', async (t) => {
+  // Мутация «network → http-error» пережила весь набор: ветку сети не
+  // исполнял никто. Здесь запрос рвётся по-настоящему — браузер отказывает в
+  // соединении, `fetch` отклоняется, — и это единственный способ отличить
+  // «наша сеть не донесла» от «сосед ответил отказом», не подменяя `fetch`.
+  const term = await openTerminal({ query: '?site=apex-ru' });
+  t.after(term.cleanup);
+  await settle(term.page, 1500);
+
+  await term.page.setRequestInterception(true);
+  term.page.on('request', (req) => {
+    if (req.url().includes('/stats/')) req.abort('connectionrefused').catch(() => {});
+    else req.continue().catch(() => {});
+  });
+
+  await settle(term.page, 6500); // ждём естественный опрос полосы статистики
+
+  const stale = await term.page.evaluate(() => {
+    const bar = document.getElementById('statbar');
+    return {
+      stale: bar.getAttribute('data-stale'),
+      badge: getComputedStyle(bar, '::after').content,
+      title: bar.title,
+    };
+  });
+
+  assert.equal(stale.stale, 'network', 'оборванная сеть — это network');
+  assert.match(stale.badge, /НЕТ СВЯЗИ/);
+  assert.match(stale.title, /не ответил/);
 });
 
 // ---- 4. postMessage-половина SSO --------------------------------------------
