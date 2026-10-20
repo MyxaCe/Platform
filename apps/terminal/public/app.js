@@ -208,7 +208,17 @@ function updateDealPanel() {
   document.getElementById('dealSym').textContent = it.symbol;
   const ref = refPrice(it);
   document.getElementById('dealSub').textContent = `${priceType.toUpperCase()} ${ref != null ? fmtP(it.id, ref) : '—'}`;
-  const chg = document.getElementById('dealChange'); const up = it.change >= 0; chg.textContent = `${up ? '+' : ''}${it.change.toFixed(2)}%`; chg.className = `deal__change ${up ? 'up' : 'down'}`;
+  // `change` обнуляемо, как и остальные поля котировки. Здесь стоял
+  // незащищённый `it.change.toFixed(2)` — и когда шлюз начал честно отдавать
+  // null, панель сделки **падала целиком**, обрывая `selectInstrument`.
+  // Это второй потребитель поля; первый (витрина инструментов) был поправлен
+  // сразу, а этот пропущен — правку границы данных надо проводить по ВСЕМ
+  // потребителям, а не по тому, который попался первым.
+  const chg = document.getElementById('dealChange');
+  const chgKnown = it.change != null;
+  const chgUp = chgKnown && it.change >= 0;
+  chg.textContent = chgKnown ? `${chgUp ? '+' : ''}${it.change.toFixed(2)}%` : '—';
+  chg.className = `deal__change${chgKnown ? (chgUp ? ' up' : ' down') : ''}`;
   document.getElementById('askPx').textContent = it.ask != null ? fmtP(it.id, it.ask) : '—';
   document.getElementById('bidPx').textContent = it.bid != null ? fmtP(it.id, it.bid) : '—';
   document.getElementById('watermark').textContent = it.symbol;
@@ -481,8 +491,67 @@ function stepLot(d) { const i = document.getElementById('lot'); if (sizeUnit ===
 function readSlTp(id) { const sl = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('sl')).value), tp = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('tp')).value); return { sl: sl > 0 ? Math.round(sl * pscale(id)) : null, tp: tp > 0 ? Math.round(tp * pscale(id)) : null }; }
 // Размер сделки в базовых единицах (учитывает выбор LOT/USD).
 function sizeBaseQty(id) { const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('lot')).value) || 0; if (v <= 0) return 0; if (sizeUnit === 'usd') { const p = refPrice(META[id]) / pscale(id); return p > 0 ? v / p : 0; } return v; }
-function updateSizeEq() { const it = META[selected]; const el = document.getElementById('sizeEq'); if (!it) { el.textContent = ''; return; } const p = refPrice(it) / pscale(it.id); const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('lot')).value) || 0; const base = it.symbol.split('-')[0]; el.textContent = sizeUnit === 'usd' ? `≈ ${(p > 0 ? v / p : 0).toFixed(qdec(it.id))} ${base}` : `≈ $${(v * p).toLocaleString('en-US', { maximumFractionDigits: 2 })}`; }
-function setUnit(u) { if (sizeUnit === u) return; const it = META[selected]; const inp = document.getElementById('lot'); const v = parseFloat(/** @type {HTMLInputElement} */ (inp).value) || 0; const p = it ? refPrice(it) / pscale(it.id) : 0; if (u === 'usd') { /** @type {HTMLInputElement} */ (inp).value = (p > 0 ? v * p : 0).toFixed(0); /** @type {HTMLInputElement} */ (inp).step = '1'; } else { /** @type {HTMLInputElement} */ (inp).value = (p > 0 ? v / p : 0).toFixed(3); /** @type {HTMLInputElement} */ (inp).step = '0.001'; } sizeUnit = u; document.getElementById('unitLot').classList.toggle('active', u === 'lot'); document.getElementById('unitUsd').classList.toggle('active', u === 'usd'); updateSizeEq(); }
+/**
+ * Эквивалент размера: сколько это в другой валюте (TRM-24).
+ *
+ * Цена может быть НЕИЗВЕСТНА — тикера по инструменту ещё нет. Раньше в этом
+ * случае печаталось «≈ 0»: ноль читается как «ноль объёма», а не «цены не
+ * знаем», и стоит это в панели ввода ордера, где человек принимает решение о
+ * деньгах. Та же семья, что `change` с нулём вместо прочерка.
+ */
+function updateSizeEq() {
+  const it = META[selected];
+  const el = document.getElementById('sizeEq');
+  if (!it) { el.textContent = ''; el.title = ''; return; }
+
+  const p = priceOrNull(it);
+  const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('lot')).value) || 0;
+  const base = it.symbol.split('-')[0];
+
+  if (p === null) {
+    el.textContent = sizeUnit === 'usd' ? `≈ — ${base}` : '≈ $—';
+    el.title = 'Цена инструмента неизвестна — пересчитать нечем';
+    return;
+  }
+
+  el.title = '';
+  el.textContent = sizeUnit === 'usd'
+    ? `≈ ${(v / p).toFixed(qdec(it.id))} ${base}`
+    : `≈ $${(v * p).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+}
+
+/** Цена инструмента в единицах отображения или `null`, если её нет. */
+function priceOrNull(it) {
+  const raw = refPrice(it);
+  if (raw == null) return null;
+  const p = raw / pscale(it.id);
+  return Number.isFinite(p) && p > 0 ? p : null;
+}
+/**
+ * Смена единицы ввода. При неизвестной цене пересчитать нечем — и тогда мы
+ * **не трогаем введённое число** (TRM-24).
+ *
+ * Раньше пересчёт шёл через `p = 0`, и поле молча становилось нулём: человек
+ * набрал объём, переключил единицу и потерял его без единого сообщения. Это
+ * хуже неверной подписи — это правка того, что ввёл человек.
+ */
+function setUnit(u) {
+  if (sizeUnit === u) return;
+  const it = META[selected];
+  const inp = /** @type {HTMLInputElement} */ (document.getElementById('lot'));
+  const v = parseFloat(inp.value) || 0;
+  const p = it ? priceOrNull(it) : null;
+
+  if (p !== null) {
+    inp.value = u === 'usd' ? (v * p).toFixed(0) : (v / p).toFixed(3);
+  }
+  inp.step = u === 'usd' ? '1' : '0.001';
+
+  sizeUnit = u;
+  document.getElementById('unitLot').classList.toggle('active', u === 'lot');
+  document.getElementById('unitUsd').classList.toggle('active', u === 'usd');
+  updateSizeEq();
+}
 document.getElementById('unitLot').addEventListener('click', () => setUnit('lot'));
 document.getElementById('unitUsd').addEventListener('click', () => setUnit('usd'));
 document.getElementById('lot').addEventListener('input', updateSizeEq);
