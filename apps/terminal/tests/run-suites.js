@@ -25,11 +25,52 @@
  * написано.
  * ========================================================================== */
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
 
 /** Наборы в порядке запуска. Состав прогона — здесь, а не в шаблоне путей. */
+/**
+ * Формат вывода ЗАКРЕПЛЁН явно, и это не косметика.
+ *
+ * Без `--test-reporter` node выбирает формат по тому, вывод в терминал или в
+ * трубу: в терминале — `spec` со сводкой «ℹ tests N», без него — TAP с
+ * «# tests N». Запускатель судит по сводке, значит в CI он читал бы не тот
+ * формат и объявлял **здоровый набор не отработавшим**.
+ *
+ * Нашлось прогоном в контейнере Linux, а не рассуждением: на рабочей машине
+ * вывод шёл в терминал, и подмены формата не было видно. Это тот же класс,
+ * что уже дважды ловил сам запускатель, — измеритель, зависящий от
+ * обстановки, перестаёт быть измерителем.
+ */
+const REPORTER = ['--test-reporter=spec', '--test-reporter-destination=stdout'];
+
+/**
+ * Файлы набора ищем САМИ, а не шаблоном в аргументах `node --test`.
+ *
+ * Разворачивать шаблоны `node --test` научился не сразу: на node 20 он
+ * отвечает «Could not find 'tests/*.test.js'» и не запускает ничего. Раньше
+ * шаблон разворачивала оболочка в CI, а запускатель зовёт node напрямую —
+ * и набор молча переставал существовать. Поймано прогоном в контейнере с
+ * node 20, на рабочей машине (node 24) этого не видно.
+ *
+ * Пустой список — **ошибка, а не пустой набор**: «нечего запускать» и «всё
+ * прошло» обязаны различаться.
+ */
+function filesIn(dir, { recurse = false } = {}) {
+  const full = path.join(__dirname, '..', dir);
+  if (!fs.existsSync(full)) return [];
+  return fs.readdirSync(full, { withFileTypes: true })
+    .flatMap((e) => {
+      const p = path.join(full, e.name);
+      if (e.isDirectory()) return recurse ? filesIn(path.join(dir, e.name), { recurse }) : [];
+      return e.isFile() && e.name.endsWith('.test.js') ? [p] : [];
+    })
+    .sort();
+}
+
 const SUITES = [
-  { name: 'модульные', args: ['--test', 'tests/*.test.js'] },
-  { name: 'браузерные', args: ['--test', '--test-concurrency=1', 'tests/browser/*.test.js'] },
+  { name: 'модульные', dir: 'tests', args: ['--test'] },
+  { name: 'браузерные', dir: 'tests/browser', args: ['--test', '--test-concurrency=1'] },
 ];
 
 /** Сводка `node --test`: по ней и только по ней видно, что набор доработал. */
@@ -108,7 +149,25 @@ function runSuite(suite) {
     const env = Object.assign({}, process.env);
     delete env.NODE_TEST_CONTEXT;
 
-    const child = spawn(process.execPath, suite.args, { env });
+    const files = suite.files || filesIn(suite.dir);
+    if (!files.length) {
+      resolve({
+        suite, stderr: '', outcome: 'НЕ ОТРАБОТАЛ', code: null, signal: null,
+        why: `в каталоге ${suite.dir} не найдено ни одного файла *.test.js — ` +
+             'запускать нечего, и это не «ноль отказов»',
+      });
+      return;
+    }
+
+    // Формат добавляет САМ запускатель, а не записи наборов. Первая редакция
+    // полагалась на то, что его пропишет каждая запись, — и мои же проверки
+    // его не прописали, а на Windows это не проявилось: там дочерний процесс
+    // всё равно получал `spec`. На Linux тот же вызов дал TAP, и здоровый
+    // набор снова объявился мёртвым.
+    //
+    // Решение, которое должны помнить все вызывающие, однажды забудут. Здесь
+    // его помнить некому: оно одно и в одном месте.
+    const child = spawn(process.execPath, [...suite.args, ...REPORTER, ...files], { env });
 
     let stdout = '';
     let stderr = '';
@@ -186,4 +245,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { classify, runSuite, exitCodeFor, SUITES };
+module.exports = { classify, runSuite, exitCodeFor, filesIn, SUITES, REPORTER };
