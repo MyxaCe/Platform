@@ -194,12 +194,17 @@
     }
 
     function renderRow(el, it) {
-      const up = it.change >= 0;
+      // `change` обнуляемо так же, как `bid`/`ask`/`high`: `null` означает «тикера
+      // нет, изменение неизвестно». Раньше шлюз отдавал в этом случае 0, и строка
+      // рисовала зелёное «+0.00%» — «рынок стоял» вместо «мы не знаем», — рядом с
+      // четырьмя честными прочерками. Теперь шлюз говорит null, а прочерк здесь.
+      const known = it.change != null;
+      const up = known && it.change >= 0;
       const [base, quote] = it.symbol.split('-');
       el.innerHTML =
         `<span class="star ${favs.has(it.id) ? 'on' : ''}">${STAR}</span>` +
         `<div class="sym">${coinHtml(base)}<span class="symtxt">${base}<small>/${quote || 'USDT'}</small></span></div>` +
-        `<div class="num chg c-change ${up ? 'up' : 'down'}">${up ? '+' : ''}${it.change.toFixed(2)}%</div>` +
+        `<div class="num chg c-change ${known ? (up ? 'up' : 'down') : ''}">${known ? `${up ? '+' : ''}${it.change.toFixed(2)}%` : '—'}</div>` +
         `<div class="num sell c-sell">${it.bid != null ? fmtPrice(it, it.bid) : '—'}</div>` +
         `<div class="num buy c-buy">${it.ask != null ? fmtPrice(it, it.ask) : '—'}</div>` +
         `<div class="num muted c-spread">${it.bid != null && it.ask != null ? it.ask - it.bid : '—'}</div>` +

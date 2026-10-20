@@ -20,7 +20,9 @@ function fixture() {
   return [
     { id: 1, symbol: 'BTC-USDT', price_decimals: 2, change: 1.5, bid: 8576000, ask: 8576100, high: 8600000 },
     { id: 2, symbol: 'ETH-USDT', price_decimals: 2, change: -2.25, bid: 270400, ask: 270450, high: 272000 },
-    { id: 3, symbol: 'BNB-USDT', price_decimals: 2, change: 0.4, bid: null, ask: null, high: null },
+    // Инструмент без тикера: шлюз отдаёт null во ВСЕХ пяти полях котировки.
+    // Раньше `change` было единственным из пяти, что врало нулём.
+    { id: 3, symbol: 'BNB-USDT', price_decimals: 2, change: null, bid: null, ask: null, high: null },
   ];
 }
 
@@ -81,6 +83,11 @@ test('отсутствующая котировка рисуется проче�
   assert.equal(row.querySelector('.c-sell').textContent, '—');
   assert.equal(row.querySelector('.c-buy').textContent, '—');
   assert.equal(row.querySelector('.c-high').textContent, '—');
+  // Пятое поле той же строки. Оно врало дольше четырёх остальных: шлюз отдавал
+  // 0 вместо «неизвестно», и строка рисовала зелёное «+0.00%» — «рынок стоял».
+  assert.equal(row.querySelector('.c-change').textContent, '—');
+  const chg = row.querySelector('.c-change').classList;
+  assert.ok(!chg.contains('up') && !chg.contains('down'), 'без направления не красим ни вверх, ни вниз');
   assert.ok(!/0\.00/.test(row.querySelector('.c-sell').textContent),
     'ноль — правдоподобная цена, по ней принимают решение; прочерк — нет');
 });

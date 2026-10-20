@@ -59,20 +59,54 @@ use serde_json::Value;
 /// Решение о видимости. `reason` непуст ровно тогда, когда `visible == false`:
 /// скрытое содержимое обязано уметь объяснить, почему оно скрыто, иначе отказ
 /// неотличим от отсутствия функции (Р-025).
+/// Почему содержимое скрыто — **машинным признаком**.
+///
+/// Отдельно от подписи для человека, и это требование таблицы v2, а не наша
+/// любовь к перечислениям: признак, по которому проверка отличает состояния,
+/// не должен ходить через перевод. Пока отказ различался только русской
+/// строкой, две разные причины было нечем сравнить — и эталонная таблица,
+/// смотревшая одно булево, не отличала их вовсе.
+///
+/// Чинятся они по-разному, и в этом весь смысл различия: `JurisdictionUnknown`
+/// чинится знанием о посетителе, `JurisdictionNotListed` — составом списка.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalCode {
+    /// Ограничение есть, а юрисдикция посетителя неизвестна или пуста.
+    JurisdictionUnknown,
+    /// Юрисдикция известна, и в списке ограничений её нет.
+    JurisdictionNotListed,
+}
+
+impl RefusalCode {
+    /// Строка контракта — ровно те коды, что перечислены в таблице.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::JurisdictionUnknown => "jurisdiction-unknown",
+            Self::JurisdictionNotListed => "jurisdiction-not-listed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
     pub visible: bool,
-    /// `None` — видно.
-    pub reason: Option<String>,
+    /// Машинный признак отказа. `None` — видно.
+    ///
+    /// Называется `reason` вслед за контрактом: в таблице это поле несёт
+    /// именно код. Расхождение в словах между двумя реализациями одного
+    /// правила — первый шаг к расхождению в поведении.
+    pub reason: Option<RefusalCode>,
+    /// Подпись для человека. `None` — видно.
+    pub explanation: Option<String>,
 }
 
 impl Verdict {
     fn shown() -> Self {
-        Self { visible: true, reason: None }
+        Self { visible: true, reason: None, explanation: None }
     }
 
-    fn hidden(reason: String) -> Self {
-        Self { visible: false, reason: Some(reason) }
+    fn hidden(reason: RefusalCode, explanation: String) -> Self {
+        Self { visible: false, reason: Some(reason), explanation: Some(explanation) }
     }
 }
 
@@ -140,11 +174,14 @@ pub fn visibility_in(restrictions: &Value, jurisdiction: Option<&str>) -> Verdic
     let visitor = match jurisdiction {
         Some(j) if !j.is_empty() => j,
         _ => {
-            return Verdict::hidden(format!(
-                "Ограничено юрисдикциями ({}), а юрисдикция не задана: показывать нельзя — \
-                 неизвестность не разрешение.",
-                list.join(", ")
-            ))
+            return Verdict::hidden(
+                RefusalCode::JurisdictionUnknown,
+                format!(
+                    "Ограничено юрисдикциями ({}), а юрисдикция не задана: показывать нельзя — \
+                     неизвестность не разрешение.",
+                    list.join(", ")
+                ),
+            )
         }
     };
 
@@ -157,10 +194,10 @@ pub fn visibility_in(restrictions: &Value, jurisdiction: Option<&str>) -> Verdic
         return Verdict::shown();
     }
 
-    Verdict::hidden(format!(
-        "Ограничено юрисдикциями ({}) — в «{visitor}» не показывается.",
-        list.join(", ")
-    ))
+    Verdict::hidden(
+        RefusalCode::JurisdictionNotListed,
+        format!("Ограничено юрисдикциями ({}) — в «{visitor}» не показывается.", list.join(", ")),
+    )
 }
 
 /// Результат фильтрации дерева меню.
@@ -228,12 +265,12 @@ mod cases_tests {
 
     /// Копия таблицы. Вшита в бинарь: тест не должен зависеть от того, из
     /// какого каталога его запустили.
-    const COPY: &str = include_str!("../contracts/visibility-cases.v1.json");
+    const COPY: &str = include_str!("../contracts/visibility-cases.v2.json");
 
     /// Где лежит источник таблицы. Каталог монтируется прогоном
     /// (`scripts/test.sh`): репозитории разные, общего дерева у них нет.
     const SOURCE_ENV: &str = "CMS_CONTRACTS_DIR";
-    const SOURCE_FILE: &str = "visibility-cases.v1.json";
+    const SOURCE_FILE: &str = "visibility-cases.v2.json";
 
     fn table() -> Value {
         serde_json::from_str(COPY).expect("копия таблицы обязана разбираться")
@@ -281,36 +318,29 @@ mod cases_tests {
         );
     }
 
-    /// Что произойдёт при выходе таблицы v2 (Р-061).
+    /// Версия таблицы, против которой мы сверялись.
     ///
-    /// Штаб принял три наших добавления — ограничивающий случай на форму
-    /// `{code}`, машиночитаемый код отказа и метки потомков в случаях на
-    /// дерево, — и бумпает таблицу до **v2**: добавление случаев несовместимо,
-    /// реализация, проходившая v1, может не пройти v2.
+    /// v1 заменена на v2 (Р-061): штаб принял все три наших добавления —
+    /// ограничивающий случай на форму `{code}`, машиночитаемый код отказа и
+    /// полное ожидаемое дерево вместо меток верхнего уровня. Переход сделан не
+    /// по уведомлению, а потому что **сверка по содержимому покраснела сама**:
+    /// источник тронули, и копия это показала.
     ///
-    /// Нам ничего делать заранее не нужно и не следует. Сверка по содержимому
-    /// покраснеет сама в тот момент, когда `cms` тронет файл, — и это ровно то
-    /// поведение, ради которого её писали. Тогда:
+    /// Три проверки, жившие рядом с таблицей, после перехода **удалены** — их
+    /// содержание теперь внутри неё. Удалены не на веру: мутации, которые их
+    /// красили, прогнаны заново против одной только таблицы, и каждая
+    /// по-прежнему краснеет. Держать два источника одного ожидания значило бы
+    /// завести ещё один производный список.
     ///
-    /// 1. перенести источник целиком (имя файла сменится на `v2`),
-    /// 2. перечитать новые случаи и прогнать их,
-    /// 3. **убрать отсюда три проверки**, написанные рядом с таблицей, —
-    ///    `repeatable_group_form_actually_restricts`,
-    ///    `two_refusals_are_told_apart_by_reason` и
-    ///    `hidden_child_is_removed_from_its_parent`: их содержание войдёт
-    ///    внутрь таблицы, и держать два источника одного ожидания значило бы
-    ///    завести ещё один производный список.
-    ///
-    /// До выхода v2 они остаются здесь.
+    /// Когда появится v3 — этот тест снова покраснеет и скажет, что делать.
     #[test]
     fn table_version_is_the_one_we_checked_against() {
         let t = table();
         let id = t["$id"].as_str().unwrap_or_default();
 
         assert!(
-            id.ends_with("/v1/visibility-cases.json"),
-            "таблица больше не v1 ({id}) — перечитай новые случаи и перенеси три \
-             проверки, написанные рядом, внутрь таблицы (Р-061)"
+            id.ends_with("/v2/visibility-cases.json"),
+            "таблица больше не v2 ({id}) — перенеси источник целиком, перечитай новые              случаи и проверь мутациями, не осталось ли рядом проверок, которые таблица              уже содержит (Р-061)"
         );
     }
 
@@ -323,11 +353,15 @@ mod cases_tests {
         let items = t["items"].as_array().expect("items — список").len();
         let trees = t["trees"].as_array().expect("trees — список").len();
 
-        assert!(items >= 14, "случаев на пункт осмотрено {items}, в контракте их было 14");
-        assert!(trees >= 3, "случаев на дерево осмотрено {trees}, в контракте их было 3");
+        assert!(items >= 19, "случаев на пункт осмотрено {items}, в v2 их было 19");
+        assert!(trees >= 6, "случаев на дерево осмотрено {trees}, в v2 их было 6");
     }
 
-    /// Все случаи на одиночное ограничение.
+    /// Все случаи на одиночное ограничение — вместе с машинным кодом отказа.
+    ///
+    /// Код сверяется наравне с булевым: ради него v2 и заводилась. Пока
+    /// сверялось одно `visible`, два разных отказа были неотличимы, и мутация
+    /// «пустая строка — особая юрисдикция» не красила ничего.
     #[test]
     fn single_restriction_cases() {
         let t = table();
@@ -338,164 +372,64 @@ mod cases_tests {
             let restrictions = case.get("restrictions").cloned().unwrap_or(Value::Null);
             let jurisdiction = case["jurisdiction"].as_str();
             let expected = case["visible"].as_bool().expect("visible — булево");
+            let expected_code = case["reason"].as_str();
 
             let verdict = visibility_in(&restrictions, jurisdiction);
 
             assert_eq!(verdict.visible, expected, "случай «{name}»");
-
-            // Скрытое обязано объяснять себя, видимое — молчать: иначе «не
-            // видно» и «видно» различались бы только булевым полем, а
-            // пользователю показалась бы пустая панель без причины.
             assert_eq!(
-                verdict.reason.is_none(),
-                expected,
-                "случай «{name}»: причина обязана быть ровно у скрытого"
+                verdict.reason.map(RefusalCode::as_str),
+                expected_code,
+                "случай «{name}»: машинный код отказа"
             );
-            if let Some(reason) = &verdict.reason {
-                assert!(!reason.trim().is_empty(), "случай «{name}»: причина пуста");
+
+            // Подпись для человека — отдельное поле, и она есть ровно у
+            // скрытого: иначе пользователю достанется пустая панель без причины.
+            assert_eq!(
+                verdict.explanation.is_none(),
+                expected,
+                "случай «{name}»: подпись обязана быть ровно у скрытого"
+            );
+            if let Some(text) = &verdict.explanation {
+                assert!(!text.trim().is_empty(), "случай «{name}»: подпись пуста");
             }
         }
     }
 
-    /// Все случаи на дерево меню.
+    /// Ожидаемое дерево целиком, а не метки верхнего уровня.
+    ///
+    /// В v1 сверялся только верхний уровень, и реализация, считающая `hidden`
+    /// верно, но возвращающая потомков нетронутыми, проходила таблицу целиком.
+    /// v2 возит полное `visibleTree`, поэтому глубина фильтрации проверяется
+    /// самой таблицей — и отдельная проверка рядом больше не нужна.
     #[test]
     fn tree_cases() {
+        /// Сводит отфильтрованный узел к тому, что сверяет таблица: метка и дети.
+        fn shape(items: &[Value]) -> Value {
+            Value::Array(
+                items
+                    .iter()
+                    .map(|i| {
+                        let kids = i["children"].as_array().cloned().unwrap_or_default();
+                        serde_json::json!({ "label": i["label"], "children": shape(&kids) })
+                    })
+                    .collect(),
+            )
+        }
+
         let t = table();
         let trees = t["trees"].as_array().expect("trees — список");
 
         for case in trees {
             let name = case["name"].as_str().unwrap_or("<без имени>");
             let jurisdiction = case["jurisdiction"].as_str();
-            let expected_labels: Vec<&str> = case["visibleLabels"]
-                .as_array()
-                .expect("visibleLabels — список")
-                .iter()
-                .map(|v| v.as_str().expect("метка — строка"))
-                .collect();
             let expected_hidden = case["hidden"].as_u64().expect("hidden — число") as usize;
 
             let result = filter_nav_by_jurisdiction(&case["tree"], jurisdiction);
 
-            let labels: Vec<&str> =
-                result.items.iter().filter_map(|i| i["label"].as_str()).collect();
-
-            assert_eq!(labels, expected_labels, "дерево «{name}»: верхний уровень");
+            assert_eq!(shape(&result.items), case["visibleTree"], "дерево «{name}»");
             assert_eq!(result.hidden, expected_hidden, "дерево «{name}»: число скрытого");
         }
-    }
-
-    /// Форма `[{ "code": … }]` обязана **ограничивать**, а не только «читаться».
-    ///
-    /// Нашлось мутацией. В таблице случай на повторяемую группу записан так:
-    /// `[{"code": "eu-mifid"}]` в юрисдикции `eu-mifid` → видно. Мутация
-    /// «форму `{code}` не читаем вовсе» этот случай **не красит**: нечитанный
-    /// код даёт пустой список, пустой список означает «во всех», и ответ
-    /// совпадает с ожидаемым по неверной причине. То есть эталонный случай,
-    /// написанный ради второй формы записи, к её отсутствию слеп.
-    ///
-    /// Ловит только ограничивающий случай: чужая юрисдикция в форме группы
-    /// обязана скрыть. Предложение добавить его в таблицу — в отчёте штабу;
-    /// менять контракт в одиночку нельзя.
-    #[test]
-    fn repeatable_group_form_actually_restricts() {
-        let restrictions = serde_json::json!([{ "code": "uk-fca" }]);
-
-        assert!(
-            !visibility_in(&restrictions, Some("eu-mifid")).visible,
-            "ограничение в форме повторяемой группы обязано скрывать, а не только читаться"
-        );
-    }
-
-    /// Два отказа обязаны быть различимы по причине.
-    ///
-    /// Тоже нашлось мутацией. «Юрисдикция не задана» и «юрисдикция чужая» дают
-    /// один и тот же `visible: false`, и таблица различить их не может: она
-    /// смотрит только булево. Мутация «пустая строка — особая юрисдикция»
-    /// поэтому не красила ничего — вердикт не менялся, менялась только причина.
-    ///
-    /// Защита без наблюдаемого следа непроверяема, поэтому след проверяется
-    /// здесь: иначе два разных отказа слились бы в один, и чинить их пришлось
-    /// бы наугад.
-    #[test]
-    fn two_refusals_are_told_apart_by_reason() {
-        let restrictions = serde_json::json!(["uk-fca"]);
-
-        let not_set = visibility_in(&restrictions, None).reason.expect("отказ обязан объясниться");
-        let empty = visibility_in(&restrictions, Some("")).reason.expect("отказ обязан объясниться");
-        let foreign =
-            visibility_in(&restrictions, Some("eu-mifid")).reason.expect("отказ обязан объясниться");
-
-        assert!(
-            not_set.contains("юрисдикция не задана"),
-            "незаданная юрисдикция обязана называться своей причиной: {not_set}"
-        );
-        assert_eq!(empty, not_set, "пустая строка — та же незаданность, и причина у неё та же");
-        assert!(
-            foreign.contains("eu-mifid") && !foreign.contains("не задана"),
-            "чужая юрисдикция — другая причина, и в ней названа она сама: {foreign}"
-        );
-    }
-
-    /// Чего таблица **не** проверяет, и почему это закрыто здесь.
-    ///
-    /// Эталон сверяет только метки верхнего уровня (`visibleLabels`) — так его
-    /// читает и CMS. Фильтрация подпунктов попадает в него лишь косвенно, через
-    /// счётчик `hidden`, а сам отфильтрованный список потомков не смотрит никто.
-    /// Реализация, которая считает скрытое правильно, но возвращает детей
-    /// нетронутыми, прошла бы таблицу целиком.
-    ///
-    /// Проверка добавлена рядом, а не в таблицу: менять контракт в одиночку
-    /// нельзя, предложение — в отчёте штабу.
-    #[test]
-    fn hidden_child_is_removed_from_its_parent() {
-        let tree = serde_json::json!([
-            {
-                "label": "Торговля",
-                "jurisdictions": [],
-                "children": [
-                    { "label": "CFD", "jurisdictions": ["uk-fca"], "children": [] },
-                    { "label": "Акции", "jurisdictions": [], "children": [] }
-                ]
-            }
-        ]);
-
-        let result = filter_nav_by_jurisdiction(&tree, Some("eu-mifid"));
-
-        let children: Vec<&str> = result.items[0]["children"]
-            .as_array()
-            .expect("children — список")
-            .iter()
-            .filter_map(|c| c["label"].as_str())
-            .collect();
-
-        assert_eq!(children, vec!["Акции"], "ограниченный подпункт обязан уйти из родителя");
-        assert_eq!(result.hidden, 1);
-    }
-
-    /// Скрытый узел уносит потомков — и потомки **не** досчитываются в `hidden`.
-    ///
-    /// Случай из таблицы закрепляет это числом `1` на узле с одним потомком:
-    /// там `1` совпало бы и при противоположном прочтении, если бы считали
-    /// только сам узел или только его детей. Здесь закреплено само свойство.
-    #[test]
-    fn hidden_subtree_counts_as_one() {
-        let tree = serde_json::json!([
-            {
-                "label": "Только Британия",
-                "jurisdictions": ["uk-fca"],
-                "children": [
-                    { "label": "А", "jurisdictions": [], "children": [] },
-                    { "label": "Б", "jurisdictions": [], "children": [
-                        { "label": "В", "jurisdictions": [], "children": [] }
-                    ] }
-                ]
-            }
-        ]);
-
-        let result = filter_nav_by_jurisdiction(&tree, Some("eu-mifid"));
-
-        assert!(result.items.is_empty());
-        assert_eq!(result.hidden, 1, "скрытое поддерево — один скрытый пункт, а не четыре");
     }
 
     /// **Мутация, которую прогнать не на чем, записана здесь.**
