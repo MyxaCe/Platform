@@ -325,3 +325,126 @@ test('здоровое сообщение фида счётчик не трог�
   const title = await term.page.evaluate(() => document.getElementById('status').title);
   assert.ok(!/не разобрано/.test(title), `здоровое сообщение не должно считаться поломкой: «${title}»`);
 });
+
+// ---- 6. Умолчания на границах: цена и время (TRM-24) -----------------------
+
+/**
+ * Состояние «цена ещё неизвестна» — то, в котором терминал открывается.
+ *
+ * Добраться до него переключением инструмента не вышло, и это выяснилось
+ * прогоном: выбрав инструмент, терминал берёт цену из последней свечи, а при
+ * пустых свечах переключение вовсе не доводится до конца — `selected` остаётся
+ * прежним, и проверка смотрела на чужой инструмент, показывая «≈ $650.01».
+ *
+ * Поэтому цены нет у инструмента, который выбран ПРИ ОТКРЫТИИ: ни тикера, ни
+ * свечей, ни стакана. Это и есть честный случай — первые секунды работы и
+ * любой отказ источника свечей.
+ */
+const PRICELESS = {
+  '/instruments': () => [
+    {
+      id: 1, symbol: 'BTC-USDT', base: 'BTC', quote: 'USDT',
+      price_decimals: 2, qty_decimals: 5,
+      last: null, bid: null, ask: null, high: null, change: null,
+    },
+  ],
+  '/candles/1': () => [],
+  '/depth/1': () => ({ price_decimals: 2, qty_decimals: 5, bids: [], asks: [] }),
+};
+
+test('неизвестная цена даёт прочерк в эквиваленте размера, а не «≈ 0»', async (t) => {
+  // Панель ввода ордера. Ноль читается как «ноль объёма», а не «цены не знаем»,
+  // и по нему человек принимает решение о деньгах.
+  const term = await openTerminal({ query: '?site=apex-ru', routes: PRICELESS });
+  t.after(term.cleanup);
+  await settle(term.page, 1800);
+
+  const shown = await term.page.evaluate(() => {
+    const el = document.getElementById('sizeEq');
+    return { text: el.textContent, title: el.title };
+  });
+
+  assert.match(shown.text, /—/, `ожидали прочерк, получили «${shown.text}»`);
+  assert.doesNotMatch(shown.text, /≈ 0|\$0/, 'ноль здесь — утверждение о величине');
+  assert.match(shown.title, /неизвестна/);
+
+  // Регресс на то, что нашлось этой же проверкой: панель сделки звала
+  // `it.change.toFixed(2)` без защиты. Когда шлюз начал честно отдавать null,
+  // она падала целиком и обрывала выбор инструмента — а снаружи это выглядело
+  // как «терминал не переключается».
+  assert.deepEqual(term.errors, [], 'без цены страница обязана работать, а не падать');
+});
+
+test('цена ноль — это не цена, а отсутствие цены', async (t) => {
+  // Найдено мутацией: ветка «разобрали, но величина негодная» фикстурой с
+  // `last: null` не исполнялась — там выход происходит раньше. А ноль здесь
+  // самый опасный из возможных входов: по марк-цене считают P&L и маржу, и
+  // «цена 0» у нас уже была отдельным дефектом в потоке котировок.
+  const term = await openTerminal({
+    query: '?site=apex-ru',
+    routes: {
+      '/instruments': () => [{
+        id: 1, symbol: 'BTC-USDT', base: 'BTC', quote: 'USDT',
+        price_decimals: 2, qty_decimals: 5,
+        last: 0, bid: null, ask: null, high: null, change: null,
+      }],
+      '/candles/1': () => [],
+      '/depth/1': () => ({ price_decimals: 2, qty_decimals: 5, bids: [], asks: [] }),
+    },
+  });
+  t.after(term.cleanup);
+  await settle(term.page, 1800);
+
+  const shown = await term.page.evaluate(() => document.getElementById('sizeEq').textContent);
+  assert.match(shown, /—/, `ноль обязан читаться как «цены нет», получили «${shown}»`);
+});
+
+test('смена единицы при неизвестной цене не стирает введённый объём', async (t) => {
+  // Пересчёт через p = 0 молча обнулял поле: человек набрал объём, переключил
+  // единицу и потерял его. Это хуже неверной подписи — это правка ввода.
+  const term = await openTerminal({ query: '?site=apex-ru', routes: PRICELESS });
+  t.after(term.cleanup);
+  await settle(term.page, 1800);
+
+  await term.page.evaluate(() => {
+    const i = /** @type {HTMLInputElement} */ (document.getElementById('lot'));
+    i.value = '0.750';
+  });
+  await term.page.click('#unitUsd');
+  await settle(term.page, 400);
+
+  const after = await term.page.evaluate(
+    () => /** @type {HTMLInputElement} */ (document.getElementById('lot')).value,
+  );
+  assert.equal(after, '0.750', 'введённое число обязано остаться нетронутым');
+});
+
+test('цена известна — эквивалент считается и пересчёт работает', async (t) => {
+  // Зеркало двух предыдущих: отказ касается неизвестной цены, а не функции
+  // вообще. Без этой пары «никогда не считать» выглядело бы так же зелено.
+  const term = await openTerminal({ query: '?site=apex-ru' });
+  t.after(term.cleanup);
+  await settle(term.page, 1800);
+
+  const shown = await term.page.evaluate(() => document.getElementById('sizeEq').textContent);
+  assert.doesNotMatch(shown, /—/, `для инструмента с ценой ожидали число: «${shown}»`);
+  assert.match(shown, /\d/);
+});
+
+test('сессия без названного срока жизни не принимается и не долбит кабинет', async (t) => {
+  // Было `(d.expires_in || 0)`: пустой срок превращался в «истекла только
+  // что», и терминал просил новый токен РАЗ В СЕКУНДУ. Умолчание на границе
+  // времени не показывает неправду, а производит работу.
+  const term = await withParent(t, { routes: { '/v1/session': () => ({ token: 'сессия-без-срока' }) } });
+
+  await term.page.evaluate(() => window.__send({ type: 'sso.token', token: 'handoff-no-ttl' }));
+  await settle(term.page, 3500);
+
+  const asked = await term.page.evaluate(
+    () => window.__got.filter((m) => m && m.type === 'token.refresh.request').length,
+  );
+  assert.equal(asked, 0, `шторма запросов быть не должно, их ${asked}`);
+
+  const authed = term.seen.filter((r) => r.auth && r.auth.includes('сессия-без-срока'));
+  assert.equal(authed.length, 0, 'сессия без срока не принимается');
+});

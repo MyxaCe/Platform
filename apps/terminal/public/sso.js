@@ -32,6 +32,8 @@
   function scheduleRefresh(cfg) {
     if (refreshTimer) clearTimeout(refreshTimer);
     const lead = 2 * 60 * 1000; // просим новый токен за 2 минуты до истечения
+    // Нижняя граница осталась, но теперь она страхует короткий срок, а не
+    // подменяет отсутствующий: пустой `expires_in` до сюда больше не доходит.
     const delay = Math.max(1000, (expiresAt - Date.now()) - lead);
     refreshTimer = setTimeout(() => postToParent({ type: 'token.refresh.request' }, cfg), delay);
   }
@@ -49,8 +51,35 @@
         sessionToken = null; emit(); return;
       }
       const d = await r.json();
+
+      /**
+       * Срок жизни сессии обязателен, и его отсутствие — отказ (TRM-24).
+       *
+       * Было `(d.expires_in || 0)`: пустой срок превращался в «истекла
+       * только что», `scheduleRefresh` считал задержку по нижней границе и
+       * терминал просил у кабинета новый токен **раз в секунду**, бесконечно.
+       *
+       * Это умолчание хуже обычного вранья: оно не показывает неправду, а
+       * **производит работу** — отказ, замаскированный под нагрузку. Со
+       * стороны кабинета это выглядит как исправно работающий клиент.
+       *
+       * Почему отказываем, а не берём сессию без обновления: контракт
+       * `sso-pack` требует тихого ре-handoff до истечения, а не зная срока,
+       * исполнить его нечем. Сессия, которая молча умрёт посреди работы, —
+       * тот же отказ, только отложенный и на стороне человека. Отказ громкий
+       * и сразу чинится, отложенный — объясняется.
+       */
+      const ttl = Number(d.expires_in);
+      if (!Number.isFinite(ttl) || ttl <= 0) {
+        console.error(
+          '[sso] шлюз не назвал срок жизни сессии (expires_in=' +
+          JSON.stringify(d.expires_in) + '): обновление исполнить нечем, сессия не принята',
+        );
+        sessionToken = null; emit(); return;
+      }
+
       sessionToken = d.token;
-      expiresAt = Date.now() + (d.expires_in || 0) * 1000;
+      expiresAt = Date.now() + ttl * 1000;
       scheduleRefresh(cfg);
       emit();
     } catch (e) {
