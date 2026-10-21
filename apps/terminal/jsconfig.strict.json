@@ -27,6 +27,7 @@
   },
   "include": [
     "types/**/*.d.ts",
+    "public/api.js",
     "public/diag.js",
     "public/stats.js",
     "public/trades.js"

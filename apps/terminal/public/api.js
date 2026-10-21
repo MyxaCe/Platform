@@ -47,6 +47,13 @@
      * него одно `null` и показывали «ответ не тот» при оборванной сети.
      * Различие, построенное выше по течению, здесь и терялось.
      */
+    /**
+     * @param {string} url
+     * @returns {Promise<{ data: any, reason: string | null, status: number }>}
+     *   `data` намеренно `any`: это разобранный JSON соседа, и притворяться,
+     *   что его форма известна здесь, значило бы проверять выдумку. Форму
+     *   знает вызывающий — он и обязан её описать у себя.
+     */
     async function readDetailed(url) {
       let r;
       try {
@@ -64,16 +71,35 @@
       }
     }
 
-    /** Короткая форма для вызывающих, которым причина не нужна. */
+    /**
+     * Короткая форма для вызывающих, которым причина не нужна.
+     * @param {string} url
+     * @returns {Promise<any>}
+     */
     async function read(url) {
       return (await readDetailed(url)).data;
     }
 
-    /** POST/DELETE с телом. Возвращает { ok, status, data }; data может быть null. */
+    /**
+     * POST/DELETE с телом. Возвращает { ok, status, data }; data может быть null.
+     *
+     * @param {string} url
+     * @param {string} method
+     * @param {any} [body] тело запроса; без него заголовок типа не ставится
+     * @returns {Promise<{ ok: boolean, status: number, data: any }>}
+     */
     async function mutate(url, method, body) {
-      const opts = { method, headers: authHeaders() };
+      // Заголовки собираются ДО создания `opts`, а не дописываются в него
+      // после. Прежний вид — `opts.headers['Content-Type'] = ...` — строгую
+      // проверку не проходит, и не по придирке: `authHeaders()` возвращает то
+      // объект с полем, то пустой, и дописывание в такой союз типов
+      // неразрешимо. Здесь форма объявлена один раз и дальше не меняется.
+      /** @type {Record<string, string>} */
+      const headers = { ...authHeaders() };
+      /** @type {RequestInit} */
+      const opts = { method, headers };
       if (body !== undefined) {
-        opts.headers['Content-Type'] = 'application/json';
+        headers['Content-Type'] = 'application/json';
         opts.body = JSON.stringify(body);
       }
       try {
@@ -108,7 +134,11 @@
     //   'unreachable' — сеть или не-2xx: связи нет, прежние данные ещё могут быть верны.
     let status = 'unknown';
 
-    /** Чтение торговой ручки: возвращает данные либо null, попутно ставя `status`. */
+    /**
+     * Чтение торговой ручки: возвращает данные либо null, попутно ставя `status`.
+     * @param {string} url
+     * @returns {Promise<any>}
+     */
     async function authedRead(url) {
       if (tradingBlocked()) {
         status = 'no-session';
@@ -132,6 +162,12 @@
       }
     }
 
+    /**
+     * @param {string} url
+     * @param {string} method
+     * @param {any} [body]
+     * @returns {Promise<{ ok: boolean, status: number, data: any }>}
+     */
     async function authedMutate(url, method, body) {
       if (tradingBlocked()) {
         status = 'no-session';
@@ -151,15 +187,23 @@
       // ---- Публичные данные (без авторизации) ----------------------------
       /** Состояние сервиса, в т.ч. режим хранилища: { storage, durable, sso }. */
       health: () => read('/health'),
-      /** Список инструментов. `site` — фильтр витрины по allow-list сайта (ADR-023 Т3). */
+      /**
+       * Список инструментов. `site` — фильтр витрины по allow-list сайта (ADR-023 Т3).
+       * @param {string} [site]
+       */
       instruments: (site) => read('/instruments' + (site ? `?site=${encodeURIComponent(site)}` : '')),
+      /** @param {number} id @param {number} tf @param {number} limit */
       candles: (id, tf, limit) => read(`/candles/${id}?tf=${tf}&limit=${limit}`),
+      /** @param {number} id @param {number} [limit] */
       depth: (id, limit) => read(`/depth/${id}${limit ? `?limit=${limit}` : ''}`),
+      /** @param {number} id */
       stats: (id) => read(`/stats/${id}`),
 
       // Те же ручки с названной причиной отказа — для виджетов, которые
       // показывают метку устаревания и обязаны сказать, что именно сломалось.
+      /** @param {number} id @param {number} [limit] */
       depthDetailed: (id, limit) => readDetailed(`/depth/${id}${limit ? `?limit=${limit}` : ''}`),
+      /** @param {number} id */
       statsDetailed: (id) => readDetailed(`/stats/${id}`),
 
       // ---- Счёт пользователя (требует сессию) ----------------------------
@@ -167,13 +211,17 @@
 
       // ---- Позиции (требуют сессию) ---------------------------------------
       deals: () => authedRead('/deals'),
+      /** @param {any} body */
       openDeal: (body) => authedMutate('/deals', 'POST', body),
+      /** @param {number} id */
       closeDeal: (id) => authedMutate(`/deals/${id}/close`, 'POST'),
       closedDeals: () => authedRead('/deals/closed'),
 
       // ---- Отложенные (лимитные) ордера (требуют сессию) ------------------
       pending: () => authedRead('/pending'),
+      /** @param {any} body */
       placePending: (body) => authedMutate('/pending', 'POST', body),
+      /** @param {number} id */
       cancelPending: (id) => authedMutate(`/pending/${id}`, 'DELETE'),
     };
   }
