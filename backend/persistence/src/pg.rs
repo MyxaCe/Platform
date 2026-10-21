@@ -147,6 +147,17 @@ CREATE TABLE IF NOT EXISTS closed_deals (
   PRIMARY KEY (user_id, idx)
 );
 CREATE INDEX IF NOT EXISTS closed_deals_user_idx ON closed_deals (user_id, idx DESC);
+-- Проскальзывание наружу (TRM-38). `exit` — цена ИСПОЛНЕНИЯ, `level` — уровень,
+-- который ставил человек; их разница и есть проскальзывание. Отдельным ALTER,
+-- а не полем в CREATE: у существующих баз таблица уже есть.
+--
+-- ОБА СТОЛБЦА NULLABLE И БЕЗ DEFAULT — это не недосмотр. У сделок, закрытых до
+-- этой правки, мы НЕ ЗНАЕМ ни уровня, ни было ли закрытие на разрыве. `DEFAULT
+-- false` для `across_gap` утверждал бы, что разрыва не было, — то есть отвечал
+-- бы за прошлое, которого не видел. NULL означает «неизвестно», и читатель
+-- обязан отличать его от «нет».
+ALTER TABLE closed_deals ADD COLUMN IF NOT EXISTS level BIGINT;
+ALTER TABLE closed_deals ADD COLUMN IF NOT EXISTS across_gap BOOLEAN;
 
 -- ===================== Журнал событий счёта (TRM-13) ========================
 -- Лента пополняется только добавлением. `kind` хранится ровно той канонической
@@ -300,7 +311,7 @@ impl Persistence for PgStore {
             .collect();
 
             let closed = sqlx::query(
-                "SELECT instrument, side, qty, entry, exit, pnl, pd, qd FROM closed_deals WHERE user_id = $1 ORDER BY idx",
+                "SELECT instrument, side, qty, entry, exit, pnl, pd, qd, level, across_gap FROM closed_deals WHERE user_id = $1 ORDER BY idx",
             )
             .bind(id_db)
             .fetch_all(&self.pool)
@@ -317,6 +328,10 @@ impl Persistence for PgStore {
                     pnl: from_numeric(&r.get::<BigDecimal, _>("pnl"))?,
                     pd: r.get::<i16, _>("pd") as u8,
                     qd: r.get::<i16, _>("qd") as u8,
+                    // NULL здесь означает «неизвестно», а не «нет»: так лежат
+                    // сделки, закрытые до появления этих столбцов (TRM-38).
+                    level: r.get::<Option<i64>, _>("level"),
+                    across_gap: r.get::<Option<bool>, _>("across_gap"),
                 })
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
@@ -434,12 +449,13 @@ impl Persistence for PgStore {
             .get("n");
         for (i, d) in snap.closed.iter().enumerate().skip(have as usize) {
             sqlx::query(
-                "INSERT INTO closed_deals (user_id, idx, instrument, side, qty, entry, exit, pnl, pd, qd)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (user_id, idx) DO NOTHING",
+                "INSERT INTO closed_deals (user_id, idx, instrument, side, qty, entry, exit, pnl, pd, qd, level, across_gap)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (user_id, idx) DO NOTHING",
             )
             .bind(id_db).bind(i as i64).bind(d.instrument as i32).bind(side_to_db(d.side))
             .bind(d.qty).bind(d.entry).bind(d.exit).bind(to_numeric(d.pnl))
             .bind(d.pd as i16).bind(d.qd as i16)
+            .bind(d.level).bind(d.across_gap)
             .execute(&mut *tx).await.map_err(db)?;
         }
 

@@ -697,6 +697,12 @@ impl ReplayState {
                     pnl,
                     pd: p.pd,
                     qd: p.qd,
+                    // Частичное сворачивание — встречная сделка, а не триггер:
+                    // уровня нет, разрыв ни при чём. Значения обязаны совпасть
+                    // с живым путём (`Account::merge`), иначе свёртка разойдётся
+                    // со слепком и сверка покраснеет на ровном месте.
+                    level: None,
+                    across_gap: Some(false),
                 };
                 p.qty -= qty;
                 let left = p.qty;
@@ -713,8 +719,8 @@ impl ReplayState {
                 id,
                 exit,
                 cause: _,
-                level: _,
-                across_gap: _,
+                level,
+                across_gap,
             } => {
                 let Some(i) = self.positions.iter().position(|p| p.id == *id) else {
                     self.orphans.push(*id);
@@ -732,6 +738,10 @@ impl ReplayState {
                     pnl,
                     pd: p.pd,
                     qd: p.qd,
+                    // Обе величины есть в самом событии — восстанавливаем их, а
+                    // не домысливаем: свёртка обязана дать то же, что живой путь.
+                    level: *level,
+                    across_gap: Some(*across_gap),
                 });
             }
             EventKind::PendingPlaced {

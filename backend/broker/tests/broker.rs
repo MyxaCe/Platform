@@ -508,3 +508,61 @@ fn pending_fill_on_a_gap_opens_at_the_market_not_at_the_level() {
         other => panic!("ожидался сработавший ордер, а не {other:?}"),
     }
 }
+
+/// Закрытая сделка несёт наружу **обе** цены и признак разрыва (TRM-38).
+///
+/// Витрина показывает проскальзывание, а восстановить его из одной `exit`
+/// нельзя. В журнале обе величины были и раньше, но журнал читает владелец
+/// счёта, а проекции — другие потребители: одна величина, записанная в одном
+/// месте, не становится доступной во всех.
+#[test]
+fn closed_deal_carries_the_level_and_the_gap_outward() {
+    let mut b = Broker::new(1_000_000, 1);
+    b.open(
+        ALICE,
+        1,
+        PosSide::Long,
+        1000,
+        6_000_000,
+        PD,
+        QD,
+        Some(5_950_000),
+        None,
+    )
+    .unwrap();
+    b.check(&marks(1, 5_400_000), true);
+
+    let d = &b.closed_deals(ALICE)[0];
+    assert_eq!(d.exit, 5_400_000, "цена исполнения");
+    assert_eq!(
+        d.level,
+        Some(5_950_000),
+        "и поставленный уровень — иначе проскальзывание не из чего считать"
+    );
+    assert_eq!(
+        d.across_gap,
+        Some(true),
+        "и признак разрыва, объясняющий разницу"
+    );
+}
+
+/// Закрытие по команде: уровня нет, разрыва нет — и это РАЗНЫЕ «нет».
+/// `level: None` означает «уровня не было вовсе», `across_gap: Some(false)` —
+/// «разрыв проверяли, его не было». Схлопнуть их в одно значило бы потерять
+/// различие между «не применимо» и «нет».
+#[test]
+fn manual_close_distinguishes_absent_level_from_absent_gap() {
+    let mut b = Broker::new(1_000_000, 1);
+    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, None)
+        .unwrap();
+    let id = b.positions(ALICE)[0].id;
+    b.close(ALICE, id, 6_010_000).unwrap();
+
+    let d = &b.closed_deals(ALICE)[0];
+    assert_eq!(d.level, None, "уровня не было вовсе");
+    assert_eq!(
+        d.across_gap,
+        Some(false),
+        "а разрыв проверяли — его не было"
+    );
+}

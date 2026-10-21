@@ -887,10 +887,27 @@ struct ClosedDto {
     side: String,
     qty: i64,
     entry: i64,
+    /// Цена ИСПОЛНЕНИЯ — по ней посчитаны деньги.
     exit: i64,
     pnl: i128,
     price_decimals: u8,
     qty_decimals: u8,
+    /// Уровень триггера, который ставил человек (TRM-38). Разница с `exit` и
+    /// есть **проскальзывание** — показать его может только тот, у кого обе
+    /// величины. Поля нет, когда закрытие не было по уровню: рыночное, по
+    /// команде, неттинг.
+    ///
+    /// Прежде наружу уходила одна `exit`. В журнале уровень был, но журнал
+    /// читает владелец счёта, а проекции — другие потребители: **одна
+    /// величина, записанная в одном месте, не становится доступной во всех**.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level: Option<i64>,
+    /// Закрытие на разорванном ряду цены (Р-073). Трёхзначно: `true` — разрыв
+    /// был, `false` — не было, **поля нет — неизвестно**. Последнее стоит у
+    /// сделок, закрытых до появления признака: `false` там утверждал бы, что
+    /// разрыва не было, то есть отвечал бы за прошлое, которого не видел.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    across_gap: Option<bool>,
 }
 #[derive(Serialize)]
 struct AccountDto {
@@ -1398,6 +1415,8 @@ async fn list_closed(
             entry: d.entry,
             exit: d.exit,
             pnl: d.pnl,
+            level: d.level,
+            across_gap: d.across_gap,
             price_decimals: d.pd,
             qty_decimals: d.qd,
         })
@@ -2531,6 +2550,41 @@ mod journal_wiring_tests {
     /// Сработавший стоп проходит через монитор, а не через запрос — и обязан
     /// записываться тем же механизмом, иначе журнал пропускает ровно те события,
     /// о которых спорят чаще всего.
+    /// Закрытая сделка отдаётся НАРУЖУ с уровнем и признаком разрыва (TRM-38).
+    ///
+    /// Проверяется именно ответ ручки, а не внутренняя запись: витрина читает
+    /// его, и до этой правки получала одну цену исполнения. Журнал обе
+    /// величины нёс и раньше — но журнал читает владелец счёта, а проекции
+    /// читают другие, и одна величина, записанная в одном месте, не
+    /// становится доступной во всех.
+    #[tokio::test]
+    async fn closed_deal_is_served_with_level_and_gap() {
+        let st = build_state();
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+        let body = serde_json::json!({"instrument": 1, "side": "buy", "qty": 1000, "sl": 49_000});
+        let (status, _) = send(&app, "POST", "/deals", Some(body)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Рынок перепрыгнул стоп: исполнение пойдёт по 48 000, а ставили 49 000.
+        with_price(&st, 1, 48_000).await;
+        monitor_tick(&st).await;
+
+        let (status, v) = send(&app, "GET", "/deals/closed", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let d = &v.as_array().expect("список сделок")[0];
+
+        assert_eq!(d["exit"], 48_000, "цена исполнения");
+        assert_eq!(
+            d["level"], 49_000,
+            "и поставленный уровень — без него проскальзывание не посчитать"
+        );
+        assert!(
+            !d["across_gap"].is_null(),
+            "признак разрыва обязан присутствовать: отсутствие означает «неизвестно», а здесь известно"
+        );
+    }
+
     #[tokio::test]
     async fn stop_loss_fired_by_the_monitor_is_recorded_as_a_system_event() {
         let st = build_state();
