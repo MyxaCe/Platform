@@ -49,9 +49,21 @@ impl InstrumentRegistry {
     /// Зарегистрировать инструмент. Параметры валидируются здесь (это конфиг-граница):
     /// шаги и минимум обязаны быть строго положительными.
     pub fn register(&mut self, inst: Instrument) {
-        assert!(inst.tick_size.0 > 0, "tick_size должен быть > 0 ({})", inst.symbol);
-        assert!(inst.lot_size.0 > 0, "lot_size должен быть > 0 ({})", inst.symbol);
-        assert!(inst.min_qty.0 > 0, "min_qty должен быть > 0 ({})", inst.symbol);
+        assert!(
+            inst.tick_size.0 > 0,
+            "tick_size должен быть > 0 ({})",
+            inst.symbol
+        );
+        assert!(
+            inst.lot_size.0 > 0,
+            "lot_size должен быть > 0 ({})",
+            inst.symbol
+        );
+        assert!(
+            inst.min_qty.0 > 0,
+            "min_qty должен быть > 0 ({})",
+            inst.symbol
+        );
         assert!(
             inst.min_qty.0 % inst.lot_size.0 == 0,
             "min_qty должен быть кратен lot_size ({})",

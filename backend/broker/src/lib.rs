@@ -61,7 +61,11 @@ pub fn merged_entry(qty_a: i64, entry_a: i64, qty_b: i64, entry_b: i64) -> i64 {
     }
     let sum = entry_a as i128 * qty_a as i128 + entry_b as i128 * qty_b as i128;
     let half = total / 2;
-    let rounded = if sum >= 0 { (sum + half) / total } else { (sum - half) / total };
+    let rounded = if sum >= 0 {
+        (sum + half) / total
+    } else {
+        (sum - half) / total
+    };
     rounded as i64
 }
 
@@ -177,24 +181,74 @@ impl Account {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn try_open(&mut self, lev: i128, instrument: u32, side: PosSide, qty: i64, entry: i64, pd: u8, qd: u8, sl: Option<i64>, tp: Option<i64>) -> Result<u64, BrokerError> {
+    fn try_open(
+        &mut self,
+        lev: i128,
+        instrument: u32,
+        side: PosSide,
+        qty: i64,
+        entry: i64,
+        pd: u8,
+        qd: u8,
+        sl: Option<i64>,
+        tp: Option<i64>,
+    ) -> Result<u64, BrokerError> {
         match self.model {
-            PositionModel::Hedging => self.open_new(lev, instrument, side, qty, entry, pd, qd, sl, tp),
-            PositionModel::Netting => self.open_netting(lev, instrument, side, qty, entry, pd, qd, sl, tp),
+            PositionModel::Hedging => {
+                self.open_new(lev, instrument, side, qty, entry, pd, qd, sl, tp)
+            }
+            PositionModel::Netting => {
+                self.open_netting(lev, instrument, side, qty, entry, pd, qd, sl, tp)
+            }
         }
     }
 
     /// Хеджирование: каждая сделка — новая независимая позиция.
     #[allow(clippy::too_many_arguments)]
-    fn open_new(&mut self, lev: i128, instrument: u32, side: PosSide, qty: i64, entry: i64, pd: u8, qd: u8, sl: Option<i64>, tp: Option<i64>) -> Result<u64, BrokerError> {
+    fn open_new(
+        &mut self,
+        lev: i128,
+        instrument: u32,
+        side: PosSide,
+        qty: i64,
+        entry: i64,
+        pd: u8,
+        qd: u8,
+        sl: Option<i64>,
+        tp: Option<i64>,
+    ) -> Result<u64, BrokerError> {
         let margin = margin_for(entry, qty, pd, qd, lev);
         if self.balance - self.used_margin() < margin {
             return Err(BrokerError::InsufficientMargin);
         }
         self.next_id += 1;
         let id = self.next_id;
-        self.positions.insert(id, Position { id, instrument, side, qty, entry, pd, qd, margin, sl, tp });
-        self.log(EventKind::PositionOpened { id, instrument, side, qty, entry, pd, qd, sl, tp });
+        self.positions.insert(
+            id,
+            Position {
+                id,
+                instrument,
+                side,
+                qty,
+                entry,
+                pd,
+                qd,
+                margin,
+                sl,
+                tp,
+            },
+        );
+        self.log(EventKind::PositionOpened {
+            id,
+            instrument,
+            side,
+            qty,
+            entry,
+            pd,
+            qd,
+            sl,
+            tp,
+        });
         Ok(id)
     }
 
@@ -208,12 +262,31 @@ impl Account {
     /// сделка свернула позицию ровно в ноль, возвращается id свёрнутой — вызывающему
     /// нужно чем-то ответить, а новой позиции не появилось.
     #[allow(clippy::too_many_arguments)]
-    fn open_netting(&mut self, lev: i128, instrument: u32, side: PosSide, qty: i64, entry: i64, pd: u8, qd: u8, sl: Option<i64>, tp: Option<i64>) -> Result<u64, BrokerError> {
-        let existing = self.positions.values().find(|p| p.instrument == instrument).map(|p| p.id);
+    fn open_netting(
+        &mut self,
+        lev: i128,
+        instrument: u32,
+        side: PosSide,
+        qty: i64,
+        entry: i64,
+        pd: u8,
+        qd: u8,
+        sl: Option<i64>,
+        tp: Option<i64>,
+    ) -> Result<u64, BrokerError> {
+        let existing = self
+            .positions
+            .values()
+            .find(|p| p.instrument == instrument)
+            .map(|p| p.id);
         let Some(pos_id) = existing else {
             return self.open_new(lev, instrument, side, qty, entry, pd, qd, sl, tp);
         };
-        let cur = self.positions.get(&pos_id).expect("позиция только что найдена").clone();
+        let cur = self
+            .positions
+            .get(&pos_id)
+            .expect("позиция только что найдена")
+            .clone();
 
         if cur.side == side {
             // Доливка: объёмы складываются, вход усредняется по объёму.
@@ -237,7 +310,13 @@ impl Account {
             if tp.is_some() {
                 p.tp = tp;
             }
-            self.log(EventKind::PositionIncreased { id: pos_id, add_qty: qty, add_entry: entry, sl, tp });
+            self.log(EventKind::PositionIncreased {
+                id: pos_id,
+                add_qty: qty,
+                add_entry: entry,
+                sl,
+                tp,
+            });
             return Ok(pos_id);
         }
 
@@ -263,12 +342,22 @@ impl Account {
             let p = self.positions.get_mut(&pos_id).expect("позиция на месте");
             p.qty = left;
             p.margin = margin_for(p.entry, left, p.pd, p.qd, lev);
-            self.log(EventKind::PositionReduced { id: pos_id, qty: closing, exit: entry });
+            self.log(EventKind::PositionReduced {
+                id: pos_id,
+                qty: closing,
+                exit: entry,
+            });
             return Ok(pos_id);
         }
 
         self.positions.remove(&pos_id);
-        self.log(EventKind::PositionClosed { id: pos_id, exit: entry, cause: CloseCause::Netting, level: None, across_gap: false });
+        self.log(EventKind::PositionClosed {
+            id: pos_id,
+            exit: entry,
+            cause: CloseCause::Netting,
+            level: None,
+            across_gap: false,
+        });
         let remainder = qty - closing;
         if remainder > 0 {
             // Встречный объём больше открытого: остаток открывает позицию в новую
@@ -289,12 +378,34 @@ impl Account {
     /// Обе нужны вместе: по одной `exec` нельзя отличить «рынок дошёл ровно до
     /// стопа» от «рынок перепрыгнул стоп на разрыве», а это разные разговоры
     /// с клиентом (TRM-31).
-    fn close_pos(&mut self, id: u64, exec: i64, level: Option<i64>, across_gap: bool, cause: CloseCause) -> Option<Cents> {
+    fn close_pos(
+        &mut self,
+        id: u64,
+        exec: i64,
+        level: Option<i64>,
+        across_gap: bool,
+        cause: CloseCause,
+    ) -> Option<Cents> {
         let pos = self.positions.remove(&id)?;
         let pnl = pos.unrealized(exec);
         self.balance += pnl;
-        self.closed.push(ClosedDeal { instrument: pos.instrument, side: pos.side, qty: pos.qty, entry: pos.entry, exit: exec, pnl, pd: pos.pd, qd: pos.qd });
-        self.log(EventKind::PositionClosed { id, exit: exec, cause, level, across_gap });
+        self.closed.push(ClosedDeal {
+            instrument: pos.instrument,
+            side: pos.side,
+            qty: pos.qty,
+            entry: pos.entry,
+            exit: exec,
+            pnl,
+            pd: pos.pd,
+            qd: pos.qd,
+        });
+        self.log(EventKind::PositionClosed {
+            id,
+            exit: exec,
+            cause,
+            level,
+            across_gap,
+        });
         Some(pnl)
     }
 
@@ -337,8 +448,23 @@ impl Account {
             // и это не щедрость, а то же самое правило: исполняется то, что на
             // рынке, а не то, что мы пообещали нарисовать.
             let exec = marks.get(&p.instrument).copied().unwrap_or(p.price);
-            self.log(EventKind::PendingTriggered { id: p.id, price: p.price, exec: Some(exec), across_gap });
-            let _ = self.try_open(lev, p.instrument, p.side, p.qty, exec, p.pd, p.qd, p.sl, p.tp);
+            self.log(EventKind::PendingTriggered {
+                id: p.id,
+                price: p.price,
+                exec: Some(exec),
+                across_gap,
+            });
+            let _ = self.try_open(
+                lev,
+                p.instrument,
+                p.side,
+                p.qty,
+                exec,
+                p.pd,
+                p.qd,
+                p.sl,
+                p.tp,
+            );
         }
 
         // SL/TP по открытым позициям. Кортеж несёт обе цены: ИСПОЛНЕНИЯ (по ней
@@ -386,7 +512,11 @@ pub struct Broker {
 
 impl Broker {
     pub fn new(start_balance: Cents, leverage: i128) -> Self {
-        Self { start_balance, leverage: leverage.max(1), accounts: HashMap::new() }
+        Self {
+            start_balance,
+            leverage: leverage.max(1),
+            accounts: HashMap::new(),
+        }
     }
 
     fn acct(&mut self, user: UserId) -> &mut Account {
@@ -395,7 +525,10 @@ impl Broker {
             // Заведение счёта — тоже изменение состояния, и стартовый баланс обязан
             // иметь происхождение. Без этой записи первые деньги на счёте взялись бы
             // ниоткуда, и журнал начинался бы с необъяснимой суммы.
-            let mut a = Account { balance: start, ..Default::default() };
+            let mut a = Account {
+                balance: start,
+                ..Default::default()
+            };
             a.log(EventKind::AccountOpened { balance: start });
             a
         })
@@ -406,38 +539,64 @@ impl Broker {
     /// Забирать обязан вызывающий — **и на отказе тоже**: события неудавшейся операции
     /// не должны уехать в журнал вместе со следующей.
     pub fn take_events(&mut self, user: UserId) -> Vec<EventKind> {
-        self.accounts.get_mut(&user).map(|a| std::mem::take(&mut a.outbox)).unwrap_or_default()
+        self.accounts
+            .get_mut(&user)
+            .map(|a| std::mem::take(&mut a.outbox))
+            .unwrap_or_default()
     }
 
     /// Есть ли неразобранные события по счёту (для проверок вызывающего).
     pub fn pending_events(&self, user: UserId) -> usize {
-        self.accounts.get(&user).map(|a| a.outbox.len()).unwrap_or(0)
+        self.accounts
+            .get(&user)
+            .map(|a| a.outbox.len())
+            .unwrap_or(0)
     }
 
     // ---- Чтение -----------------------------------------------------------
 
     pub fn balance(&self, user: UserId) -> Cents {
-        self.accounts.get(&user).map(|a| a.balance).unwrap_or(self.start_balance)
+        self.accounts
+            .get(&user)
+            .map(|a| a.balance)
+            .unwrap_or(self.start_balance)
     }
     pub fn used_margin(&self, user: UserId) -> Cents {
-        self.accounts.get(&user).map(|a| a.used_margin()).unwrap_or(0)
+        self.accounts
+            .get(&user)
+            .map(|a| a.used_margin())
+            .unwrap_or(0)
     }
     pub fn free_margin(&self, user: UserId) -> Cents {
         self.balance(user) - self.used_margin(user)
     }
     pub fn positions(&self, user: UserId) -> Vec<Position> {
-        self.accounts.get(&user).map(|a| a.positions.values().cloned().collect()).unwrap_or_default()
+        self.accounts
+            .get(&user)
+            .map(|a| a.positions.values().cloned().collect())
+            .unwrap_or_default()
     }
     pub fn pendings(&self, user: UserId) -> Vec<PendingOrder> {
-        self.accounts.get(&user).map(|a| a.pendings.values().cloned().collect()).unwrap_or_default()
+        self.accounts
+            .get(&user)
+            .map(|a| a.pendings.values().cloned().collect())
+            .unwrap_or_default()
     }
     pub fn closed_deals(&self, user: UserId) -> Vec<ClosedDeal> {
-        self.accounts.get(&user).map(|a| a.closed.clone()).unwrap_or_default()
+        self.accounts
+            .get(&user)
+            .map(|a| a.closed.clone())
+            .unwrap_or_default()
     }
     pub fn open_pnl(&self, user: UserId, marks: &HashMap<u32, i64>) -> Cents {
         self.accounts
             .get(&user)
-            .map(|a| a.positions.values().map(|p| p.unrealized(*marks.get(&p.instrument).unwrap_or(&p.entry))).sum())
+            .map(|a| {
+                a.positions
+                    .values()
+                    .map(|p| p.unrealized(*marks.get(&p.instrument).unwrap_or(&p.entry)))
+                    .sum()
+            })
             .unwrap_or(0)
     }
     pub fn equity(&self, user: UserId, marks: &HashMap<u32, i64>) -> Cents {
@@ -448,9 +607,21 @@ impl Broker {
 
     /// Открыть позицию по рынку (с опциональными SL/TP).
     #[allow(clippy::too_many_arguments)]
-    pub fn open(&mut self, user: UserId, instrument: u32, side: PosSide, qty: i64, entry: i64, pd: u8, qd: u8, sl: Option<i64>, tp: Option<i64>) -> Result<u64, BrokerError> {
+    pub fn open(
+        &mut self,
+        user: UserId,
+        instrument: u32,
+        side: PosSide,
+        qty: i64,
+        entry: i64,
+        pd: u8,
+        qd: u8,
+        sl: Option<i64>,
+        tp: Option<i64>,
+    ) -> Result<u64, BrokerError> {
         let lev = self.leverage;
-        self.acct(user).try_open(lev, instrument, side, qty, entry, pd, qd, sl, tp)
+        self.acct(user)
+            .try_open(lev, instrument, side, qty, entry, pd, qd, sl, tp)
     }
 
     /// Закрыть позицию по марк-цене. Возвращает реализованный P&L.
@@ -458,7 +629,9 @@ impl Broker {
         // Закрытие по команде исполняется по той же цене, которую видели:
         // расхождения нет, и `level` здесь молчит — не потому что неизвестно,
         // а потому что назвать нечего.
-        self.acct(user).close_pos(id, mark, None, false, CloseCause::Command).ok_or(BrokerError::UnknownPosition)
+        self.acct(user)
+            .close_pos(id, mark, None, false, CloseCause::Command)
+            .ok_or(BrokerError::UnknownPosition)
     }
 
     /// Пополнить счёт (демо: бумажные деньги). Возвращает новый баланс.
@@ -487,12 +660,46 @@ impl Broker {
 
     /// Разместить отложенный (лимитный) ордер. Возвращает его id.
     #[allow(clippy::too_many_arguments)]
-    pub fn place_pending(&mut self, user: UserId, instrument: u32, side: PosSide, qty: i64, price: i64, pd: u8, qd: u8, sl: Option<i64>, tp: Option<i64>) -> u64 {
+    pub fn place_pending(
+        &mut self,
+        user: UserId,
+        instrument: u32,
+        side: PosSide,
+        qty: i64,
+        price: i64,
+        pd: u8,
+        qd: u8,
+        sl: Option<i64>,
+        tp: Option<i64>,
+    ) -> u64 {
         let a = self.acct(user);
         a.next_id += 1;
         let id = a.next_id;
-        a.pendings.insert(id, PendingOrder { id, instrument, side, qty, price, pd, qd, sl, tp });
-        a.log(EventKind::PendingPlaced { id, instrument, side, qty, price, pd, qd, sl, tp });
+        a.pendings.insert(
+            id,
+            PendingOrder {
+                id,
+                instrument,
+                side,
+                qty,
+                price,
+                pd,
+                qd,
+                sl,
+                tp,
+            },
+        );
+        a.log(EventKind::PendingPlaced {
+            id,
+            instrument,
+            side,
+            qty,
+            price,
+            pd,
+            qd,
+            sl,
+            tp,
+        });
         id
     }
 
@@ -542,7 +749,14 @@ impl Broker {
                 closed: a.closed.clone(),
                 model: a.model,
             },
-            None => AccountSnapshot { balance: self.start_balance, next_id: 0, positions: vec![], pendings: vec![], closed: vec![], model: PositionModel::default() },
+            None => AccountSnapshot {
+                balance: self.start_balance,
+                next_id: 0,
+                positions: vec![],
+                pendings: vec![],
+                closed: vec![],
+                model: PositionModel::default(),
+            },
         }
     }
 
@@ -586,7 +800,10 @@ impl Broker {
 
     /// Модель, по которой сейчас работает счёт.
     pub fn model(&self, user: UserId) -> PositionModel {
-        self.accounts.get(&user).map(|a| a.model).unwrap_or_default()
+        self.accounts
+            .get(&user)
+            .map(|a| a.model)
+            .unwrap_or_default()
     }
 
     /// Плечо брокера — нужно тем, кто проверяет инварианты по слепку.
@@ -663,7 +880,13 @@ pub fn check_snapshot(snap: &AccountSnapshot, leverage: i128) -> Vec<Violation> 
     for p in &snap.positions {
         let expected = value_cents(p.entry, p.qty, p.pd, p.qd) / lev;
         if p.margin != expected {
-            v(&mut out, format!("позиция {}: маржа {} != пересчитанной {expected} (плечо {lev})", p.id, p.margin));
+            v(
+                &mut out,
+                format!(
+                    "позиция {}: маржа {} != пересчитанной {expected} (плечо {lev})",
+                    p.id, p.margin
+                ),
+            );
         }
     }
 
@@ -672,34 +895,57 @@ pub fn check_snapshot(snap: &AccountSnapshot, leverage: i128) -> Vec<Violation> 
     //    позиция с нулевой ценой входа — бесконечный процентный результат.
     for p in &snap.positions {
         if p.qty <= 0 {
-            v(&mut out, format!("позиция {}: объём {} не больше нуля", p.id, p.qty));
+            v(
+                &mut out,
+                format!("позиция {}: объём {} не больше нуля", p.id, p.qty),
+            );
         }
         if p.entry <= 0 {
-            v(&mut out, format!("позиция {}: цена входа {} не больше нуля", p.id, p.entry));
+            v(
+                &mut out,
+                format!("позиция {}: цена входа {} не больше нуля", p.id, p.entry),
+            );
         }
         if p.margin < 0 {
-            v(&mut out, format!("позиция {}: отрицательная маржа {}", p.id, p.margin));
+            v(
+                &mut out,
+                format!("позиция {}: отрицательная маржа {}", p.id, p.margin),
+            );
         }
     }
 
     // 3. То же для отложенных ордеров: они станут позициями по этим же числам.
     for o in &snap.pendings {
         if o.qty <= 0 {
-            v(&mut out, format!("ордер {}: объём {} не больше нуля", o.id, o.qty));
+            v(
+                &mut out,
+                format!("ордер {}: объём {} не больше нуля", o.id, o.qty),
+            );
         }
         if o.price <= 0 {
-            v(&mut out, format!("ордер {}: цена {} не больше нуля", o.id, o.price));
+            v(
+                &mut out,
+                format!("ордер {}: цена {} не больше нуля", o.id, o.price),
+            );
         }
     }
 
     // 4. Идентификаторы уникальны и меньше следующего: иначе новая позиция затрёт
     //    существующую, и одна из них исчезнет вместе с её маржой.
-    let mut ids: Vec<u64> = snap.positions.iter().map(|p| p.id).chain(snap.pendings.iter().map(|o| o.id)).collect();
+    let mut ids: Vec<u64> = snap
+        .positions
+        .iter()
+        .map(|p| p.id)
+        .chain(snap.pendings.iter().map(|o| o.id))
+        .collect();
     ids.sort_unstable();
     let total = ids.len();
     ids.dedup();
     if ids.len() != total {
-        v(&mut out, "идентификаторы позиций и ордеров не уникальны".to_string());
+        v(
+            &mut out,
+            "идентификаторы позиций и ордеров не уникальны".to_string(),
+        );
     }
     // ⚠️ `next_id` вопреки имени хранит ПОСЛЕДНИЙ выданный id, а не следующий:
     // выдача идёт как `next_id += 1; let id = next_id`. Инвариант написан по
@@ -708,7 +954,10 @@ pub fn check_snapshot(snap: &AccountSnapshot, leverage: i128) -> Vec<Violation> 
     // в хранилище (ADR-016), поэтому отдельной задачей.
     if let Some(max) = ids.last() {
         if *max > snap.next_id {
-            v(&mut out, format!("выдан id {max}, больший счётчика next_id {}", snap.next_id));
+            v(
+                &mut out,
+                format!("выдан id {max}, больший счётчика next_id {}", snap.next_id),
+            );
         }
     }
 
@@ -725,7 +974,18 @@ mod invariant_tests {
     use super::*;
 
     fn pos(id: u64, qty: i64, entry: i64, margin: Cents) -> Position {
-        Position { id, instrument: 1, side: PosSide::Long, qty, entry, pd: 2, qd: 3, margin, sl: None, tp: None }
+        Position {
+            id,
+            instrument: 1,
+            side: PosSide::Long,
+            qty,
+            entry,
+            pd: 2,
+            qd: 3,
+            margin,
+            sl: None,
+            tp: None,
+        }
     }
 
     /// Маржа в фикстуре — не произвольная: она обязана сходиться с формулой
@@ -762,14 +1022,21 @@ mod invariant_tests {
     fn negative_balance_is_not_a_violation() {
         let mut s = healthy();
         s.balance = -50_000;
-        assert_eq!(check_snapshot(&s, 1), vec![], "отрицательный баланс законен с плечом");
+        assert_eq!(
+            check_snapshot(&s, 1),
+            vec![],
+            "отрицательный баланс законен с плечом"
+        );
     }
 
     #[test]
     fn detects_zero_and_negative_qty() {
         let mut s = healthy();
         s.positions[0].qty = 0;
-        assert!(check_snapshot(&s, 1).iter().any(|v| v.0.contains("объём")), "нулевой объём должен ловиться");
+        assert!(
+            check_snapshot(&s, 1).iter().any(|v| v.0.contains("объём")),
+            "нулевой объём должен ловиться"
+        );
         s.positions[0].qty = -5;
         assert!(check_snapshot(&s, 1).iter().any(|v| v.0.contains("объём")));
     }
@@ -778,7 +1045,9 @@ mod invariant_tests {
     fn detects_zero_entry_price() {
         let mut s = healthy();
         s.positions[1].entry = 0;
-        assert!(check_snapshot(&s, 1).iter().any(|v| v.0.contains("цена входа")));
+        assert!(check_snapshot(&s, 1)
+            .iter()
+            .any(|v| v.0.contains("цена входа")));
     }
 
     /// Маржа, разошедшаяся с пересчитанной, обязана ловиться: это единственный
@@ -788,28 +1057,38 @@ mod invariant_tests {
     fn detects_margin_drift() {
         let mut s = healthy();
         s.positions[0].margin += 1;
-        assert!(check_snapshot(&s, 1).iter().any(|v| v.0.contains("маржа")), "дрейф маржи должен ловиться");
+        assert!(
+            check_snapshot(&s, 1).iter().any(|v| v.0.contains("маржа")),
+            "дрейф маржи должен ловиться"
+        );
     }
 
     /// Та же маржа при другом плече — нарушение: слепок посчитан по чужим правилам.
     #[test]
     fn detects_margin_computed_with_other_leverage() {
         let s = healthy();
-        assert!(!check_snapshot(&s, 10).is_empty(), "маржа под плечо 1 не годится для плеча 10");
+        assert!(
+            !check_snapshot(&s, 10).is_empty(),
+            "маржа под плечо 1 не годится для плеча 10"
+        );
     }
 
     #[test]
     fn detects_negative_margin() {
         let mut s = healthy();
         s.positions[0].margin = -1;
-        assert!(check_snapshot(&s, 1).iter().any(|v| v.0.contains("отрицательная маржа")));
+        assert!(check_snapshot(&s, 1)
+            .iter()
+            .any(|v| v.0.contains("отрицательная маржа")));
     }
 
     #[test]
     fn detects_duplicate_ids() {
         let mut s = healthy();
         s.positions[1].id = s.positions[0].id;
-        assert!(check_snapshot(&s, 1).iter().any(|v| v.0.contains("не уникальны")));
+        assert!(check_snapshot(&s, 1)
+            .iter()
+            .any(|v| v.0.contains("не уникальны")));
     }
 
     /// Счётчик id обязан покрывать выданные: иначе следующая позиция затрёт
@@ -818,14 +1097,26 @@ mod invariant_tests {
     fn detects_id_beyond_counter() {
         let mut s = healthy();
         s.next_id = 1; // а позиция с id=2 уже есть
-        assert!(check_snapshot(&s, 1).iter().any(|v| v.0.contains("next_id")));
+        assert!(check_snapshot(&s, 1)
+            .iter()
+            .any(|v| v.0.contains("next_id")));
     }
 
     #[test]
     fn detects_bad_pending_order() {
         let mut s = healthy();
         s.next_id = 3;
-        s.pendings.push(PendingOrder { id: 3, instrument: 1, side: PosSide::Long, qty: 0, price: 100, pd: 2, qd: 3, sl: None, tp: None });
+        s.pendings.push(PendingOrder {
+            id: 3,
+            instrument: 1,
+            side: PosSide::Long,
+            qty: 0,
+            price: 100,
+            pd: 2,
+            qd: 3,
+            sl: None,
+            tp: None,
+        });
         assert!(check_snapshot(&s, 1).iter().any(|v| v.0.contains("ордер")));
         s.pendings[0].qty = 10;
         s.pendings[0].price = 0;
@@ -848,10 +1139,16 @@ mod invariant_tests {
     fn real_trading_sequence_keeps_invariants() {
         let mut b = Broker::new(10_000_000, 1);
         let u = UserId(1);
-        let id = b.open(u, 1, PosSide::Long, 1000, 50_000, 2, 3, None, None).expect("открытие");
+        let id = b
+            .open(u, 1, PosSide::Long, 1000, 50_000, 2, 3, None, None)
+            .expect("открытие");
         assert_eq!(check_snapshot(&b.snapshot(u), 1), vec![], "после открытия");
         b.place_pending(u, 2, PosSide::Short, 500, 40_000, 2, 3, None, None);
-        assert_eq!(check_snapshot(&b.snapshot(u), 1), vec![], "после лимитного ордера");
+        assert_eq!(
+            check_snapshot(&b.snapshot(u), 1),
+            vec![],
+            "после лимитного ордера"
+        );
         b.close(u, id, 51_000).expect("закрытие");
         assert_eq!(check_snapshot(&b.snapshot(u), 1), vec![], "после закрытия");
     }
@@ -862,11 +1159,17 @@ mod invariant_tests {
     fn used_margin_matches_sum_of_positions() {
         let mut b = Broker::new(10_000_000, 1);
         let u = UserId(1);
-        b.open(u, 1, PosSide::Long, 1000, 50_000, 2, 3, None, None).unwrap();
-        b.open(u, 2, PosSide::Short, 300, 20_000, 2, 3, None, None).unwrap();
+        b.open(u, 1, PosSide::Long, 1000, 50_000, 2, 3, None, None)
+            .unwrap();
+        b.open(u, 2, PosSide::Short, 300, 20_000, 2, 3, None, None)
+            .unwrap();
         let snap = b.snapshot(u);
         let sum: Cents = snap.positions.iter().map(|p| p.margin).sum();
-        assert_eq!(b.used_margin(u), sum, "used_margin разошёлся с суммой маржи позиций");
+        assert_eq!(
+            b.used_margin(u),
+            sum,
+            "used_margin разошёлся с суммой маржи позиций"
+        );
         assert_eq!(check_snapshot(&snap, 1), vec![]);
     }
 }
@@ -887,7 +1190,10 @@ mod netting_tests {
     fn netting_broker() -> (Broker, UserId) {
         let mut b = Broker::new(10_000_000, 1);
         let u = UserId(1);
-        assert!(b.adopt_model(u, PositionModel::Netting), "пустой счёт обязан принять модель");
+        assert!(
+            b.adopt_model(u, PositionModel::Netting),
+            "пустой счёт обязан принять модель"
+        );
         (b, u)
     }
 
@@ -918,10 +1224,19 @@ mod netting_tests {
     fn realized_pnl_uses_partial_qty_not_whole_position() {
         // Лонг, вход 5300, выход 5600, сворачиваем 150 из 400:
         // (5600−5300)·150·100 / 10^5 = 45 центов.
-        assert_eq!(realized_on_close(PosSide::Long, 5300, 5600, 150, PD, QD), 45);
+        assert_eq!(
+            realized_on_close(PosSide::Long, 5300, 5600, 150, PD, QD),
+            45
+        );
         // Шорт зеркально: прибыль при падении.
-        assert_eq!(realized_on_close(PosSide::Short, 5600, 5300, 150, PD, QD), 45);
-        assert_eq!(realized_on_close(PosSide::Short, 5300, 5600, 150, PD, QD), -45);
+        assert_eq!(
+            realized_on_close(PosSide::Short, 5600, 5300, 150, PD, QD),
+            45
+        );
+        assert_eq!(
+            realized_on_close(PosSide::Short, 5300, 5600, 150, PD, QD),
+            -45
+        );
     }
 
     // ---- Доливка -------------------------------------------------------------
@@ -929,14 +1244,23 @@ mod netting_tests {
     #[test]
     fn same_side_averages_entry_and_keeps_one_position() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None).unwrap();
-        b.open(u, 1, PosSide::Long, 300, 5400, PD, QD, None, None).unwrap();
+        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None)
+            .unwrap();
+        b.open(u, 1, PosSide::Long, 300, 5400, PD, QD, None, None)
+            .unwrap();
 
         let ps = b.positions(u);
-        assert_eq!(ps.len(), 1, "неттинг обязан держать одну позицию на инструмент");
+        assert_eq!(
+            ps.len(),
+            1,
+            "неттинг обязан держать одну позицию на инструмент"
+        );
         assert_eq!(ps[0].qty, 400);
         assert_eq!(ps[0].entry, 5300, "вход обязан быть средневзвешенным");
-        assert_eq!(ps[0].margin, 2120, "маржа обязана пересчитаться на весь объём");
+        assert_eq!(
+            ps[0].margin, 2120,
+            "маржа обязана пересчитаться на весь объём"
+        );
         assert_eq!(b.used_margin(u), 2120);
     }
 
@@ -944,8 +1268,20 @@ mod netting_tests {
     #[test]
     fn adding_to_position_keeps_existing_sl_tp_when_not_given() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, Some(4900), Some(5500)).unwrap();
-        b.open(u, 1, PosSide::Long, 100, 5200, PD, QD, None, None).unwrap();
+        b.open(
+            u,
+            1,
+            PosSide::Long,
+            100,
+            5000,
+            PD,
+            QD,
+            Some(4900),
+            Some(5500),
+        )
+        .unwrap();
+        b.open(u, 1, PosSide::Long, 100, 5200, PD, QD, None, None)
+            .unwrap();
         let ps = b.positions(u);
         assert_eq!(ps[0].sl, Some(4900), "SL не должен теряться при доливке");
         assert_eq!(ps[0].tp, Some(5500), "TP не должен теряться при доливке");
@@ -956,21 +1292,41 @@ mod netting_tests {
     #[test]
     fn opposite_smaller_reduces_position_and_realizes_partial_pnl() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 400, 5300, PD, QD, None, None).unwrap();
+        b.open(u, 1, PosSide::Long, 400, 5300, PD, QD, None, None)
+            .unwrap();
         let before = b.balance(u);
 
-        b.open(u, 1, PosSide::Short, 150, 5600, PD, QD, None, None).unwrap();
+        b.open(u, 1, PosSide::Short, 150, 5600, PD, QD, None, None)
+            .unwrap();
 
         let ps = b.positions(u);
         assert_eq!(ps.len(), 1, "позиция обязана остаться, а не удвоиться");
-        assert_eq!(ps[0].side, PosSide::Long, "направление не меняется при частичном сворачивании");
+        assert_eq!(
+            ps[0].side,
+            PosSide::Long,
+            "направление не меняется при частичном сворачивании"
+        );
         assert_eq!(ps[0].qty, 250, "объём обязан уменьшиться на свёрнутое");
-        assert_eq!(ps[0].entry, 5300, "вход не пересчитывается: свёрнута часть, а не заключена новая сделка");
-        assert_eq!(ps[0].margin, 1325, "маржа обязана уменьшиться пропорционально остатку");
-        assert_eq!(b.balance(u) - before, 45, "реализован P&L только свёрнутой части");
+        assert_eq!(
+            ps[0].entry, 5300,
+            "вход не пересчитывается: свёрнута часть, а не заключена новая сделка"
+        );
+        assert_eq!(
+            ps[0].margin, 1325,
+            "маржа обязана уменьшиться пропорционально остатку"
+        );
+        assert_eq!(
+            b.balance(u) - before,
+            45,
+            "реализован P&L только свёрнутой части"
+        );
 
         let closed = b.closed_deals(u);
-        assert_eq!(closed.len(), 1, "в историю попадает свёрнутая часть, одной записью");
+        assert_eq!(
+            closed.len(),
+            1,
+            "в историю попадает свёрнутая часть, одной записью"
+        );
         assert_eq!(closed[0].qty, 150, "в истории — фактически свёрнутый объём");
         assert_eq!(closed[0].exit, 5600);
         assert_eq!(closed[0].pnl, 45);
@@ -979,10 +1335,15 @@ mod netting_tests {
     #[test]
     fn opposite_equal_closes_position_completely() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 200, 5000, PD, QD, None, None).unwrap();
-        b.open(u, 1, PosSide::Short, 200, 5100, PD, QD, None, None).unwrap();
+        b.open(u, 1, PosSide::Long, 200, 5000, PD, QD, None, None)
+            .unwrap();
+        b.open(u, 1, PosSide::Short, 200, 5100, PD, QD, None, None)
+            .unwrap();
 
-        assert!(b.positions(u).is_empty(), "встречный равный объём обязан закрыть позицию");
+        assert!(
+            b.positions(u).is_empty(),
+            "встречный равный объём обязан закрыть позицию"
+        );
         assert_eq!(b.used_margin(u), 0, "маржа обязана освободиться полностью");
         assert_eq!(b.closed_deals(u).len(), 1);
     }
@@ -992,10 +1353,12 @@ mod netting_tests {
     #[test]
     fn opposite_larger_flips_position_and_records_only_the_closed_part() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None).unwrap();
+        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None)
+            .unwrap();
         let before = b.balance(u);
 
-        b.open(u, 1, PosSide::Short, 250, 5200, PD, QD, None, None).unwrap();
+        b.open(u, 1, PosSide::Short, 250, 5200, PD, QD, None, None)
+            .unwrap();
 
         let ps = b.positions(u);
         assert_eq!(ps.len(), 1, "после переворота остаётся одна позиция");
@@ -1003,11 +1366,22 @@ mod netting_tests {
         assert_eq!(ps[0].qty, 150, "остаток = встречный объём минус свёрнутый");
         assert_eq!(ps[0].entry, 5200, "остаток открыт по цене встречной сделки");
         assert_eq!(ps[0].margin, 780);
-        assert_eq!(b.balance(u) - before, 20, "реализован P&L только закрытой части");
+        assert_eq!(
+            b.balance(u) - before,
+            20,
+            "реализован P&L только закрытой части"
+        );
 
         let closed = b.closed_deals(u);
-        assert_eq!(closed.len(), 1, "остаток ещё не закрыт — в историю он не попадает");
-        assert_eq!(closed[0].qty, 100, "в истории — только свёрнутый объём, не весь ордер");
+        assert_eq!(
+            closed.len(),
+            1,
+            "остаток ещё не закрыт — в историю он не попадает"
+        );
+        assert_eq!(
+            closed[0].qty, 100,
+            "в истории — только свёрнутый объём, не весь ордер"
+        );
     }
 
     // ---- Инварианты и модель --------------------------------------------------
@@ -1015,21 +1389,38 @@ mod netting_tests {
     #[test]
     fn netting_keeps_invariants_through_a_sequence() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 400, 5300, PD, QD, None, None).unwrap();
+        b.open(u, 1, PosSide::Long, 400, 5300, PD, QD, None, None)
+            .unwrap();
         assert_eq!(check_snapshot(&b.snapshot(u), 1), vec![], "после открытия");
-        b.open(u, 1, PosSide::Short, 150, 5600, PD, QD, None, None).unwrap();
-        assert_eq!(check_snapshot(&b.snapshot(u), 1), vec![], "после частичного сворачивания");
-        b.open(u, 1, PosSide::Short, 500, 5100, PD, QD, None, None).unwrap();
-        assert_eq!(check_snapshot(&b.snapshot(u), 1), vec![], "после переворота");
+        b.open(u, 1, PosSide::Short, 150, 5600, PD, QD, None, None)
+            .unwrap();
+        assert_eq!(
+            check_snapshot(&b.snapshot(u), 1),
+            vec![],
+            "после частичного сворачивания"
+        );
+        b.open(u, 1, PosSide::Short, 500, 5100, PD, QD, None, None)
+            .unwrap();
+        assert_eq!(
+            check_snapshot(&b.snapshot(u), 1),
+            vec![],
+            "после переворота"
+        );
     }
 
     /// Разные инструменты не сворачиваются друг о друга.
     #[test]
     fn netting_is_per_instrument() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None).unwrap();
-        b.open(u, 2, PosSide::Short, 100, 3000, PD, QD, None, None).unwrap();
-        assert_eq!(b.positions(u).len(), 2, "позиции по разным инструментам независимы");
+        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None)
+            .unwrap();
+        b.open(u, 2, PosSide::Short, 100, 3000, PD, QD, None, None)
+            .unwrap();
+        assert_eq!(
+            b.positions(u).len(),
+            2,
+            "позиции по разным инструментам независимы"
+        );
     }
 
     /// Хеджирование не изменилось: встречная сделка по-прежнему заводит вторую позицию.
@@ -1038,16 +1429,29 @@ mod netting_tests {
     fn hedging_still_opens_a_second_position() {
         let mut b = Broker::new(10_000_000, 1);
         let u = UserId(1);
-        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None).unwrap();
-        b.open(u, 1, PosSide::Short, 100, 5200, PD, QD, None, None).unwrap();
-        assert_eq!(b.positions(u).len(), 2, "хеджирование обязано остаться прежним");
-        assert!(b.closed_deals(u).is_empty(), "в хеджировании встречная сделка ничего не закрывает");
+        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None)
+            .unwrap();
+        b.open(u, 1, PosSide::Short, 100, 5200, PD, QD, None, None)
+            .unwrap();
+        assert_eq!(
+            b.positions(u).len(),
+            2,
+            "хеджирование обязано остаться прежним"
+        );
+        assert!(
+            b.closed_deals(u).is_empty(),
+            "в хеджировании встречная сделка ничего не закрывает"
+        );
     }
 
     #[test]
     fn default_model_is_hedging() {
         let b = Broker::new(10_000_000, 1);
-        assert_eq!(b.model(UserId(1)), PositionModel::Hedging, "счёт без записи — хеджирующий");
+        assert_eq!(
+            b.model(UserId(1)),
+            PositionModel::Hedging,
+            "счёт без записи — хеджирующий"
+        );
     }
 
     /// Вариант A: модель меняется только на «плоском» счёте.
@@ -1055,13 +1459,24 @@ mod netting_tests {
     fn model_changes_only_when_flat() {
         let mut b = Broker::new(10_000_000, 1);
         let u = UserId(1);
-        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None).unwrap();
-        assert!(!b.adopt_model(u, PositionModel::Netting), "с открытой позицией модель менять нельзя");
-        assert_eq!(b.model(u), PositionModel::Hedging, "счёт обязан продолжить работать по прежней");
+        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None)
+            .unwrap();
+        assert!(
+            !b.adopt_model(u, PositionModel::Netting),
+            "с открытой позицией модель менять нельзя"
+        );
+        assert_eq!(
+            b.model(u),
+            PositionModel::Hedging,
+            "счёт обязан продолжить работать по прежней"
+        );
 
         let id = b.positions(u)[0].id;
         b.close(u, id, 5100).unwrap();
-        assert!(b.adopt_model(u, PositionModel::Netting), "на плоском счёте модель принимается");
+        assert!(
+            b.adopt_model(u, PositionModel::Netting),
+            "на плоском счёте модель принимается"
+        );
         assert_eq!(b.model(u), PositionModel::Netting);
     }
 
@@ -1071,7 +1486,10 @@ mod netting_tests {
         let mut b = Broker::new(10_000_000, 1);
         let u = UserId(1);
         b.place_pending(u, 1, PosSide::Long, 100, 4000, PD, QD, None, None);
-        assert!(b.adopt_model(u, PositionModel::Netting), "ордер — не позиция");
+        assert!(
+            b.adopt_model(u, PositionModel::Netting),
+            "ордер — не позиция"
+        );
     }
 
     /// Модель переживает сохранение и восстановление: иначе после рестарта счёт
@@ -1079,15 +1497,25 @@ mod netting_tests {
     #[test]
     fn model_survives_snapshot_roundtrip() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None).unwrap();
+        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None)
+            .unwrap();
         let snap = b.snapshot(u);
         assert_eq!(snap.model, PositionModel::Netting);
 
         let mut restored = Broker::new(10_000_000, 1);
         restored.restore(u, snap);
-        assert_eq!(restored.model(u), PositionModel::Netting, "модель обязана пережить рестарт");
+        assert_eq!(
+            restored.model(u),
+            PositionModel::Netting,
+            "модель обязана пережить рестарт"
+        );
         // И поведение восстановленного счёта — неттинговое, а не только поле.
-        restored.open(u, 1, PosSide::Short, 100, 5100, PD, QD, None, None).unwrap();
-        assert!(restored.positions(u).is_empty(), "восстановленный счёт обязан неттить");
+        restored
+            .open(u, 1, PosSide::Short, 100, 5100, PD, QD, None, None)
+            .unwrap();
+        assert!(
+            restored.positions(u).is_empty(),
+            "восстановленный счёт обязан неттить"
+        );
     }
 }

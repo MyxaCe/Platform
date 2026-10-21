@@ -194,7 +194,10 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
                     js.insert(user, j);
                 }
                 Err(fault) => {
-                    eprintln!("[gateway] ЖУРНАЛ ИСПОРЧЕН, счёт {} в карантине: {fault}", user.0);
+                    eprintln!(
+                        "[gateway] ЖУРНАЛ ИСПОРЧЕН, счёт {} в карантине: {fault}",
+                        user.0
+                    );
                     q.insert(user);
                 }
             }
@@ -214,7 +217,10 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
             if !violations.is_empty() {
                 q.insert(user);
                 for v in &violations {
-                    eprintln!("[gateway] ИНВАРИАНТ НАРУШЕН, счёт {} в карантине: {v}", user.0);
+                    eprintln!(
+                        "[gateway] ИНВАРИАНТ НАРУШЕН, счёт {} в карантине: {v}",
+                        user.0
+                    );
                 }
             }
             // Остаток обязан сходиться с журналом (TRM-13). Счёт, чью историю нечем
@@ -227,7 +233,11 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
             let status = journal::audit(js.get(&user).unwrap_or(&empty), &snap);
             if !status.ok() {
                 q.insert(user);
-                eprintln!("[gateway] ЖУРНАЛ НЕ СХОДИТСЯ [{}], счёт {} в карантине: {status}", status.tag(), user.0);
+                eprintln!(
+                    "[gateway] ЖУРНАЛ НЕ СХОДИТСЯ [{}], счёт {} в карантине: {status}",
+                    status.tag(),
+                    user.0
+                );
             }
         }
         if !q.is_empty() {
@@ -242,7 +252,12 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
 
 /// Лок конкретного счёта (создаётся лениво).
 async fn account_lock(st: &AppState, user: UserId) -> Arc<Mutex<()>> {
-    st.acct_locks.lock().await.entry(user).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+    st.acct_locks
+        .lock()
+        .await
+        .entry(user)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
 }
 
 /// Мутация счёта с сохранением (ADR-016) и записью в журнал (TRM-13).
@@ -295,7 +310,10 @@ async fn with_account<T>(
     if !violations.is_empty() {
         st.broker.lock().await.restore(user, before);
         for v in &violations {
-            eprintln!("[gateway] ИНВАРИАНТ НАРУШЕН операцией, счёт {} откачен: {v}", user.0);
+            eprintln!(
+                "[gateway] ИНВАРИАНТ НАРУШЕН операцией, счёт {} откачен: {v}",
+                user.0
+            );
         }
         return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "invariant_violated"));
     }
@@ -303,7 +321,9 @@ async fn with_account<T>(
     // Журнал (TRM-13). Запечатываем, но ещё не пишем: сначала сверка.
     let sealed = {
         let mut js = st.journals.lock().await;
-        let j = js.entry(user).or_insert_with(|| Journal::new(lev, start_balance));
+        let j = js
+            .entry(user)
+            .or_insert_with(|| Journal::new(lev, start_balance));
         let sealed = j.seal(now_ms(), &origin, &kinds);
         let would_be = j.preview(&sealed);
         let diverged = journal::reconcile(&would_be, &snap);
@@ -311,7 +331,10 @@ async fn with_account<T>(
             drop(js);
             st.broker.lock().await.restore(user, before);
             for d in &diverged {
-                eprintln!("[gateway] ЖУРНАЛ НЕ СХОДИТСЯ, операция по счёту {} откачена: {d}", user.0);
+                eprintln!(
+                    "[gateway] ЖУРНАЛ НЕ СХОДИТСЯ, операция по счёту {} откачена: {d}",
+                    user.0
+                );
             }
             return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "journal_divergence"));
         }
@@ -333,11 +356,19 @@ async fn with_account<T>(
 /// Принять в память уже записанные в хранилище записи.
 async fn commit_journal(st: &AppState, user: UserId, sealed: Vec<broker::journal::AccountEvent>) {
     let mut js = st.journals.lock().await;
-    let lev_start = { let b = st.broker.lock().await; (b.leverage(), b.start_balance()) };
-    let j = js.entry(user).or_insert_with(|| Journal::new(lev_start.0, lev_start.1));
+    let lev_start = {
+        let b = st.broker.lock().await;
+        (b.leverage(), b.start_balance())
+    };
+    let j = js
+        .entry(user)
+        .or_insert_with(|| Journal::new(lev_start.0, lev_start.1));
     for e in sealed {
         if let Err(fault) = j.commit(e) {
-            eprintln!("[gateway] ЖУРНАЛ В ПАМЯТИ РАЗОШЁЛСЯ С ХРАНИЛИЩЕМ, счёт {} в карантине: {fault}", user.0);
+            eprintln!(
+                "[gateway] ЖУРНАЛ В ПАМЯТИ РАЗОШЁЛСЯ С ХРАНИЛИЩЕМ, счёт {} в карантине: {fault}",
+                user.0
+            );
             st.quarantined.lock().await.insert(user);
             return;
         }
@@ -347,7 +378,8 @@ async fn commit_journal(st: &AppState, user: UserId, sealed: Vec<broker::journal
 impl AppState {
     /// Отметить, что от Binance пришло опознанное сообщение (см. `feed_last_msg`).
     pub(crate) fn mark_feed_alive(&self) {
-        self.feed_last_msg.store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+        self.feed_last_msg
+            .store(now_secs(), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Разорван ли ряд цены к этому прогону триггеров (Р-073, TRM-19).
@@ -482,9 +514,15 @@ impl NoList {
     fn api(&self) -> ApiErr {
         match self {
             // 503, а не 403: список не «сказал нет», его просто нет.
-            NoList::Unavailable => err(StatusCode::SERVICE_UNAVAILABLE, "tenant_instruments_unavailable"),
+            NoList::Unavailable => err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "tenant_instruments_unavailable",
+            ),
             // Тоже закрыто, но чинится правкой списка в CMS, а не связью.
-            NoList::Unreadable => err(StatusCode::SERVICE_UNAVAILABLE, "tenant_instruments_unreadable"),
+            NoList::Unreadable => err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "tenant_instruments_unreadable",
+            ),
         }
     }
 }
@@ -499,7 +537,11 @@ enum TenantSource {
     /// Читаем **на каждую проверку границы**, без кеша: торговая граница читает
     /// конфиг живым (Р-030), а бессрочного last-good здесь не будет — список
     /// меняется ровно потому, что меняются разрешения (§4б).
-    Cms { base: String, api_key: String, http: reqwest::Client },
+    Cms {
+        base: String,
+        api_key: String,
+        http: reqwest::Client,
+    },
     /// Статический список из окружения — для разработки и офлайна.
     Static(HashMap<String, TenantAllowList>),
     /// Источника нет. В тенантном режиме это закрытая торговля, а не «всё можно».
@@ -508,7 +550,10 @@ enum TenantSource {
 
 impl TenantSource {
     fn from_env(index: &HashMap<String, u32>) -> Self {
-        let base = std::env::var("CMS_BASE_URL").unwrap_or_default().trim_end_matches('/').to_string();
+        let base = std::env::var("CMS_BASE_URL")
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string();
         let api_key = std::env::var("CMS_API_KEY").unwrap_or_default();
         if !base.is_empty() && !api_key.is_empty() {
             println!("[gateway] allow-list: источник — CMS {base}/cms/sites/{{slug}} (сервер-сервер, X-API-Key)");
@@ -516,14 +561,21 @@ impl TenantSource {
                 .timeout(Duration::from_secs(3))
                 .build()
                 .unwrap_or_default();
-            return TenantSource::Cms { base, api_key, http };
+            return TenantSource::Cms {
+                base,
+                api_key,
+                http,
+            };
         }
         if !base.is_empty() || !api_key.is_empty() {
             eprintln!("[gateway] allow-list: CMS сконфигурирована наполовину (нужны и CMS_BASE_URL, и CMS_API_KEY) — источник CMS не используется");
         }
         match parse_tenant_instruments(std::env::var("TENANT_INSTRUMENTS").ok().as_deref(), index) {
             Some(map) => {
-                println!("[gateway] allow-list: источник — TENANT_INSTRUMENTS, сайтов {}", map.len());
+                println!(
+                    "[gateway] allow-list: источник — TENANT_INSTRUMENTS, сайтов {}",
+                    map.len()
+                );
                 TenantSource::Static(map)
             }
             None => {
@@ -534,10 +586,16 @@ impl TenantSource {
     }
 
     /// Список сайта. Любой отказ закрывает торговлю и называет причину в логе.
-    async fn allow_list(&self, site: &str, index: &HashMap<String, u32>) -> Result<Vec<u32>, NoList> {
+    async fn allow_list(
+        &self,
+        site: &str,
+        index: &HashMap<String, u32>,
+    ) -> Result<Vec<u32>, NoList> {
         let list = match self {
             TenantSource::None => {
-                eprintln!("[gateway] {site}: источник allow-list не сконфигурирован — торговля закрыта");
+                eprintln!(
+                    "[gateway] {site}: источник allow-list не сконфигурирован — торговля закрыта"
+                );
                 return Err(NoList::Unavailable);
             }
             TenantSource::Static(map) => match map.get(site) {
@@ -547,7 +605,11 @@ impl TenantSource {
                     return Err(NoList::Unavailable);
                 }
             },
-            TenantSource::Cms { base, api_key, http } => {
+            TenantSource::Cms {
+                base,
+                api_key,
+                http,
+            } => {
                 let url = format!("{base}/cms/sites/{site}");
                 let resp = http.get(&url).header("X-API-Key", api_key).send().await;
                 let resp = match resp {
@@ -560,13 +622,18 @@ impl TenantSource {
                 if !resp.status().is_success() {
                     // Разные причины, один исход: списка нет. В логе причина видна,
                     // чтобы «ключ не приняли» не чинили как «сайта не существует».
-                    eprintln!("[gateway] {site}: CMS ответила {} — торговля закрыта", resp.status());
+                    eprintln!(
+                        "[gateway] {site}: CMS ответила {} — торговля закрыта",
+                        resp.status()
+                    );
                     return Err(NoList::Unavailable);
                 }
                 let body: SiteConfigDto = match resp.json().await {
                     Ok(b) => b,
                     Err(e) => {
-                        eprintln!("[gateway] {site}: ответ CMS не разобран ({e}) — торговля закрыта");
+                        eprintln!(
+                            "[gateway] {site}: ответ CMS не разобран ({e}) — торговля закрыта"
+                        );
                         return Err(NoList::Unavailable);
                     }
                 };
@@ -609,7 +676,10 @@ struct SiteConfigDto {
 ///
 /// `None` — переменная не задана (источника нет). Пустой список у сайта — валидное
 /// значение и означает «сайту не разрешено ничего», а не «фильтра нет».
-fn parse_tenant_instruments(raw: Option<&str>, index: &HashMap<String, u32>) -> Option<HashMap<String, TenantAllowList>> {
+fn parse_tenant_instruments(
+    raw: Option<&str>,
+    index: &HashMap<String, u32>,
+) -> Option<HashMap<String, TenantAllowList>> {
     let raw = raw?.trim();
     if raw.is_empty() {
         return None;
@@ -623,7 +693,10 @@ fn parse_tenant_instruments(raw: Option<&str>, index: &HashMap<String, u32>) -> 
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect();
-        out.insert(site.trim().to_string(), TenantAllowList::resolve(index, &symbols));
+        out.insert(
+            site.trim().to_string(),
+            TenantAllowList::resolve(index, &symbols),
+        );
     }
     Some(out)
 }
@@ -662,7 +735,12 @@ async fn ensure_can_open(st: &AppState, who: &Principal, instrument: u32) -> Res
 
 /// Текущие марк-цены (инструмент → last) из фида — для P&L/equity брокера.
 async fn marks(st: &AppState) -> HashMap<u32, i64> {
-    st.tickers.lock().await.iter().map(|(id, t)| (*id, t.last)).collect()
+    st.tickers
+        .lock()
+        .await
+        .iter()
+        .map(|(id, t)| (*id, t.last))
+        .collect()
 }
 
 fn feed_by_id(st: &AppState, id: u32) -> Option<feed::FeedInstrument> {
@@ -671,14 +749,21 @@ fn feed_by_id(st: &AppState, id: u32) -> Option<feed::FeedInstrument> {
 
 /// `Authorization: Bearer <token>` → сам токен.
 fn bearer(headers: &HeaderMap) -> Option<&str> {
-    headers.get("authorization")?.to_str().ok()?.strip_prefix("Bearer ")
+    headers
+        .get("authorization")?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
 }
 
 /// Кто выполняет запрос (ADR-023, Т2). SSO включён — из bearer-сессии, иначе `401`;
 /// SSO выключен (dev/standalone) — счёт по умолчанию и никакого сайта.
 async fn require_principal(st: &AppState, headers: &HeaderMap) -> Result<Principal, ApiErr> {
     if !st.sso_enabled {
-        return Ok(Principal { user: DEFAULT_USER, tenant: None });
+        return Ok(Principal {
+            user: DEFAULT_USER,
+            tenant: None,
+        });
     }
     let token = bearer(headers).ok_or_else(|| err(StatusCode::UNAUTHORIZED, "missing session"))?;
     let (user, tenant) = st
@@ -686,7 +771,10 @@ async fn require_principal(st: &AppState, headers: &HeaderMap) -> Result<Princip
         .resolve(token)
         .await
         .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid session"))?;
-    Ok(Principal { user, tenant: Some(tenant) })
+    Ok(Principal {
+        user,
+        tenant: Some(tenant),
+    })
 }
 
 /// То же, когда нужен только счёт: чтение позиций/истории сайтом не ограничивается.
@@ -725,7 +813,12 @@ struct ErrResp {
 }
 type ApiErr = (StatusCode, Json<ErrResp>);
 fn err(code: StatusCode, msg: &str) -> ApiErr {
-    (code, Json(ErrResp { error: msg.to_string() }))
+    (
+        code,
+        Json(ErrResp {
+            error: msg.to_string(),
+        }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -920,17 +1013,26 @@ fn now_ms() -> i64 {
 /// из браузера подставит кто угодно. Отказ отдаётся кодом, а не пустым списком:
 /// пустой список читается как «сайту нечем торговать», что неотличимо от
 /// «конфиг сайта не доехал» (BUG-011).
-async fn list_instruments(State(st): State<AppState>, Query(q): Query<SiteQuery>) -> Result<Json<Vec<InstrumentDto>>, ApiErr> {
+async fn list_instruments(
+    State(st): State<AppState>,
+    Query(q): Query<SiteQuery>,
+) -> Result<Json<Vec<InstrumentDto>>, ApiErr> {
     let allowed: Option<Vec<u32>> = match q.site.as_deref().filter(|s| !s.is_empty()) {
         None => None,
         Some(site) => {
-            let list = st.tenant_instruments.allow_list(site, &st.symbols).await.map_err(|e| e.api())?;
+            let list = st
+                .tenant_instruments
+                .allow_list(site, &st.symbols)
+                .await
+                .map_err(|e| e.api())?;
             if list.is_empty() {
                 // «Пустой список инструментов не отдаётся никогда» (КОНТРАКТЫ §4б).
                 // Сайту действительно ничего не разрешено (Р-025) — но пустой массив
                 // в ответе неотличим от «конфиг не доехал», а исчезновение витрины
                 // без объяснения запрещено. Поэтому окончательное «нет» кодом.
-                eprintln!("[gateway] {site}: allow-list пуст — сайту не разрешён ни один инструмент");
+                eprintln!(
+                    "[gateway] {site}: allow-list пуст — сайту не разрешён ни один инструмент"
+                );
                 return Err(err(StatusCode::FORBIDDEN, "no_instruments_allowed"));
             }
             Some(list)
@@ -944,10 +1046,17 @@ async fn list_instruments(State(st): State<AppState>, Query(q): Query<SiteQuery>
         .map(|f| {
             let t = tickers.get(&f.id);
             InstrumentDto {
-                id: f.id, symbol: f.symbol.clone(), base: f.base, quote: f.quote,
-                price_decimals: f.price_decimals, qty_decimals: f.qty_decimals,
-                last: t.map(|t| t.last), bid: t.map(|t| t.bid), ask: t.map(|t| t.ask),
-                high: t.map(|t| t.high), change: t.map(|t| t.change),
+                id: f.id,
+                symbol: f.symbol.clone(),
+                base: f.base,
+                quote: f.quote,
+                price_decimals: f.price_decimals,
+                qty_decimals: f.qty_decimals,
+                last: t.map(|t| t.last),
+                bid: t.map(|t| t.bid),
+                ask: t.map(|t| t.ask),
+                high: t.map(|t| t.high),
+                change: t.map(|t| t.change),
             }
         })
         .collect();
@@ -958,7 +1067,11 @@ async fn list_instruments(State(st): State<AppState>, Query(q): Query<SiteQuery>
 ///
 /// Отказ отдаётся кодом, а не пустым массивом: `[]` читается как «рынок пуст» и
 /// стирает график, хотя означал «мы не смогли получить данные» (BUG-011).
-async fn get_candles(State(st): State<AppState>, Path(id): Path<u32>, Query(q): Query<CandleQuery>) -> Result<Json<Vec<CandleDto>>, ApiErr> {
+async fn get_candles(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+    Query(q): Query<CandleQuery>,
+) -> Result<Json<Vec<CandleDto>>, ApiErr> {
     let tf = q.tf.unwrap_or(3600);
     let limit = q.limit.unwrap_or(300).min(1000);
     let fi = feed_by_id(&st, id).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
@@ -971,10 +1084,21 @@ async fn get_candles(State(st): State<AppState>, Path(id): Path<u32>, Query(q): 
             }
         }
     }
-    match feed::fetch_klines(&fi.binance, feed::interval(tf), 500, fi.price_decimals, fi.qty_decimals).await {
+    match feed::fetch_klines(
+        &fi.binance,
+        feed::interval(tf),
+        500,
+        fi.price_decimals,
+        fi.qty_decimals,
+    )
+    .await
+    {
         Ok(v) => {
             let out = tail_dto(&v, limit);
-            st.klines_cache.lock().await.insert(key, (Instant::now(), v));
+            st.klines_cache
+                .lock()
+                .await
+                .insert(key, (Instant::now(), v));
             Ok(Json(out))
         }
         Err(e) => {
@@ -986,7 +1110,14 @@ async fn get_candles(State(st): State<AppState>, Path(id): Path<u32>, Query(q): 
 fn tail_dto(v: &[feed::Kline], limit: usize) -> Vec<CandleDto> {
     v[v.len().saturating_sub(limit)..]
         .iter()
-        .map(|k| CandleDto { time: k.time, open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume })
+        .map(|k| CandleDto {
+            time: k.time,
+            open: k.open,
+            high: k.high,
+            low: k.low,
+            close: k.close,
+            volume: k.volume,
+        })
         .collect()
 }
 
@@ -994,7 +1125,11 @@ fn tail_dto(v: &[feed::Kline], limit: usize) -> Vec<CandleDto> {
 ///
 /// Как и свечи: отказ — кодом, а не пустым стаканом. Пустой стакан означает «нет
 /// заявок» — совсем другое утверждение, чем «мы не дошли до биржи» (BUG-011).
-async fn get_depth(State(st): State<AppState>, Path(id): Path<u32>, Query(q): Query<DepthQuery>) -> Result<Json<DepthResp>, ApiErr> {
+async fn get_depth(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+    Query(q): Query<DepthQuery>,
+) -> Result<Json<DepthResp>, ApiErr> {
     let fi = feed_by_id(&st, id).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
     // Клиент просит глубину под свой шаг группировки; Binance принимает фиксированный набор.
     let limit = match q.limit.unwrap_or(20) {
@@ -1008,14 +1143,27 @@ async fn get_depth(State(st): State<AppState>, Path(id): Path<u32>, Query(q): Qu
         let cache = st.depth_cache.lock().await;
         if let Some((t, d)) = cache.get(&(id, limit)) {
             if t.elapsed() < Duration::from_millis(400) {
-                return Ok(Json(DepthResp { price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals, bids: d.bids.clone(), asks: d.asks.clone() }));
+                return Ok(Json(DepthResp {
+                    price_decimals: fi.price_decimals,
+                    qty_decimals: fi.qty_decimals,
+                    bids: d.bids.clone(),
+                    asks: d.asks.clone(),
+                }));
             }
         }
     }
     match feed::fetch_depth(&fi.binance, limit, fi.price_decimals, fi.qty_decimals).await {
         Ok(d) => {
-            let resp = DepthResp { price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals, bids: d.bids.clone(), asks: d.asks.clone() };
-            st.depth_cache.lock().await.insert((id, limit), (Instant::now(), d));
+            let resp = DepthResp {
+                price_decimals: fi.price_decimals,
+                qty_decimals: fi.qty_decimals,
+                bids: d.bids.clone(),
+                asks: d.asks.clone(),
+            };
+            st.depth_cache
+                .lock()
+                .await
+                .insert((id, limit), (Instant::now(), d));
             Ok(Json(resp))
         }
         Err(e) => {
@@ -1029,7 +1177,10 @@ async fn get_depth(State(st): State<AppState>, Path(id): Path<u32>, Query(q): Qu
 ///
 /// `change: null` — посчитать не удалось. Раньше отказ превращался в `0.0`, то есть
 /// в утверждение «рынок стоял» (BUG-011); отличать это обязан клиент, а не сервер.
-async fn get_stats(State(st): State<AppState>, Path(id): Path<u32>) -> Result<Json<Vec<StatDto>>, ApiErr> {
+async fn get_stats(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+) -> Result<Json<Vec<StatDto>>, ApiErr> {
     let fi = feed_by_id(&st, id).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
     {
         let cache = st.stats_cache.lock().await;
@@ -1044,7 +1195,10 @@ async fn get_stats(State(st): State<AppState>, Path(id): Path<u32>) -> Result<Js
         let label = fi.symbol.clone();
         async move {
             match feed::fetch_change(&sym, feed::interval(tf)).await {
-                Ok(change) => StatDto { tf, change: Some(change) },
+                Ok(change) => StatDto {
+                    tf,
+                    change: Some(change),
+                },
                 Err(e) => {
                     eprintln!("[gateway] статистика {label} tf={tf} недоступна: {e}");
                     StatDto { tf, change: None }
@@ -1053,12 +1207,19 @@ async fn get_stats(State(st): State<AppState>, Path(id): Path<u32>) -> Result<Js
         }
     });
     let out: Vec<StatDto> = futures_util::future::join_all(futs).await;
-    st.stats_cache.lock().await.insert(id, (Instant::now(), out.clone()));
+    st.stats_cache
+        .lock()
+        .await
+        .insert(id, (Instant::now(), out.clone()));
     Ok(Json(out))
 }
 
 /// Открыть сделку по текущей рыночной цене (buy=ask, sell=bid).
-async fn open_deal(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<DealReq>) -> Result<Json<DealDto>, ApiErr> {
+async fn open_deal(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<DealReq>,
+) -> Result<Json<DealDto>, ApiErr> {
     let who = require_principal(&st, &headers).await?;
     ensure_can_open(&st, &who, req.instrument).await?;
     let user = who.user;
@@ -1070,25 +1231,59 @@ async fn open_deal(State(st): State<AppState>, headers: HeaderMap, Json(req): Js
     if req.qty <= 0 {
         return Err(err(StatusCode::BAD_REQUEST, "qty must be > 0"));
     }
-    let fi = feed_by_id(&st, req.instrument).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
+    let fi = feed_by_id(&st, req.instrument)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
     let (entry, mark) = {
         let tickers = st.tickers.lock().await;
-        let t = tickers.get(&req.instrument).ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "no price yet"))?;
-        (if matches!(side, PosSide::Long) { t.ask } else { t.bid }, t.last)
+        let t = tickers
+            .get(&req.instrument)
+            .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "no price yet"))?;
+        (
+            if matches!(side, PosSide::Long) {
+                t.ask
+            } else {
+                t.bid
+            },
+            t.last,
+        )
     };
     let id = with_account(&st, user, Origin::Client, |b| {
-        b.open(user, req.instrument, side, req.qty, entry, fi.price_decimals, fi.qty_decimals, req.sl, req.tp)
-            .map_err(|_| err(StatusCode::PAYMENT_REQUIRED, "insufficient_margin"))
+        b.open(
+            user,
+            req.instrument,
+            side,
+            req.qty,
+            entry,
+            fi.price_decimals,
+            fi.qty_decimals,
+            req.sl,
+            req.tp,
+        )
+        .map_err(|_| err(StatusCode::PAYMENT_REQUIRED, "insufficient_margin"))
     })
     .await?;
     Ok(Json(DealDto {
-        id, instrument: req.instrument, symbol: fi.symbol, side: req.side, qty: req.qty, entry, mark, pnl: 0,
-        sl: req.sl, tp: req.tp, price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals,
+        id,
+        instrument: req.instrument,
+        symbol: fi.symbol,
+        side: req.side,
+        qty: req.qty,
+        entry,
+        mark,
+        pnl: 0,
+        sl: req.sl,
+        tp: req.tp,
+        price_decimals: fi.price_decimals,
+        qty_decimals: fi.qty_decimals,
     }))
 }
 
 /// Разместить лимитный (отложенный) ордер.
-async fn place_pending(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<PendingReq>) -> Result<Json<PendingDto>, ApiErr> {
+async fn place_pending(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<PendingReq>,
+) -> Result<Json<PendingDto>, ApiErr> {
     // Лимитный ордер — такой же путь открытия позиции, только отложенный во времени.
     // Проверять только рыночный вход значило бы оставить дверь рядом с турникетом.
     let who = require_principal(&st, &headers).await?;
@@ -1102,42 +1297,86 @@ async fn place_pending(State(st): State<AppState>, headers: HeaderMap, Json(req)
     if req.qty <= 0 || req.price <= 0 {
         return Err(err(StatusCode::BAD_REQUEST, "qty and price must be > 0"));
     }
-    let fi = feed_by_id(&st, req.instrument).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
+    let fi = feed_by_id(&st, req.instrument)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
     let id = with_account(&st, user, Origin::Client, |b| {
-        Ok(b.place_pending(user, req.instrument, side, req.qty, req.price, fi.price_decimals, fi.qty_decimals, req.sl, req.tp))
+        Ok(b.place_pending(
+            user,
+            req.instrument,
+            side,
+            req.qty,
+            req.price,
+            fi.price_decimals,
+            fi.qty_decimals,
+            req.sl,
+            req.tp,
+        ))
     })
     .await?;
     Ok(Json(PendingDto {
-        id, instrument: req.instrument, symbol: fi.symbol, side: req.side, qty: req.qty, price: req.price,
-        sl: req.sl, tp: req.tp, price_decimals: fi.price_decimals, qty_decimals: fi.qty_decimals,
+        id,
+        instrument: req.instrument,
+        symbol: fi.symbol,
+        side: req.side,
+        qty: req.qty,
+        price: req.price,
+        sl: req.sl,
+        tp: req.tp,
+        price_decimals: fi.price_decimals,
+        qty_decimals: fi.qty_decimals,
     }))
 }
 
-async fn list_pending(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<PendingDto>>, ApiErr> {
+async fn list_pending(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<PendingDto>>, ApiErr> {
     let user = require_user(&st, &headers).await?;
     let b = st.broker.lock().await;
     let out = b
         .pendings(user)
         .into_iter()
         .map(|p| PendingDto {
-            id: p.id, instrument: p.instrument, symbol: feed_by_id(&st, p.instrument).map(|f| f.symbol).unwrap_or_default(),
-            side: if matches!(p.side, PosSide::Long) { "buy" } else { "sell" }.to_string(),
-            qty: p.qty, price: p.price, sl: p.sl, tp: p.tp, price_decimals: p.pd, qty_decimals: p.qd,
+            id: p.id,
+            instrument: p.instrument,
+            symbol: feed_by_id(&st, p.instrument)
+                .map(|f| f.symbol)
+                .unwrap_or_default(),
+            side: if matches!(p.side, PosSide::Long) {
+                "buy"
+            } else {
+                "sell"
+            }
+            .to_string(),
+            qty: p.qty,
+            price: p.price,
+            sl: p.sl,
+            tp: p.tp,
+            price_decimals: p.pd,
+            qty_decimals: p.qd,
         })
         .collect();
     Ok(Json(out))
 }
 
-async fn cancel_pending(State(st): State<AppState>, headers: HeaderMap, Path(id): Path<u64>) -> Result<StatusCode, ApiErr> {
+async fn cancel_pending(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<u64>,
+) -> Result<StatusCode, ApiErr> {
     let user = require_user(&st, &headers).await?;
     with_account(&st, user, Origin::Client, |b| {
-        b.cancel_pending(user, id).map_err(|_| err(StatusCode::NOT_FOUND, "unknown pending"))
+        b.cancel_pending(user, id)
+            .map_err(|_| err(StatusCode::NOT_FOUND, "unknown pending"))
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list_closed(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<ClosedDto>>, ApiErr> {
+async fn list_closed(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ClosedDto>>, ApiErr> {
     let user = require_user(&st, &headers).await?;
     let b = st.broker.lock().await;
     let out = b
@@ -1145,16 +1384,32 @@ async fn list_closed(State(st): State<AppState>, headers: HeaderMap) -> Result<J
         .into_iter()
         .rev()
         .map(|d| ClosedDto {
-            instrument: d.instrument, symbol: feed_by_id(&st, d.instrument).map(|f| f.symbol).unwrap_or_default(),
-            side: if matches!(d.side, PosSide::Long) { "buy" } else { "sell" }.to_string(),
-            qty: d.qty, entry: d.entry, exit: d.exit, pnl: d.pnl, price_decimals: d.pd, qty_decimals: d.qd,
+            instrument: d.instrument,
+            symbol: feed_by_id(&st, d.instrument)
+                .map(|f| f.symbol)
+                .unwrap_or_default(),
+            side: if matches!(d.side, PosSide::Long) {
+                "buy"
+            } else {
+                "sell"
+            }
+            .to_string(),
+            qty: d.qty,
+            entry: d.entry,
+            exit: d.exit,
+            pnl: d.pnl,
+            price_decimals: d.pd,
+            qty_decimals: d.qd,
         })
         .collect();
     Ok(Json(out))
 }
 
 /// Список открытых позиций с live P&L.
-async fn list_deals(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<DealDto>>, ApiErr> {
+async fn list_deals(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<DealDto>>, ApiErr> {
     let user = require_user(&st, &headers).await?;
     let m = marks(&st).await;
     let b = st.broker.lock().await;
@@ -1163,12 +1418,27 @@ async fn list_deals(State(st): State<AppState>, headers: HeaderMap) -> Result<Js
         .into_iter()
         .map(|p| {
             let mark = *m.get(&p.instrument).unwrap_or(&p.entry);
-            let symbol = feed_by_id(&st, p.instrument).map(|f| f.symbol).unwrap_or_default();
+            let symbol = feed_by_id(&st, p.instrument)
+                .map(|f| f.symbol)
+                .unwrap_or_default();
             DealDto {
-                id: p.id, instrument: p.instrument, symbol,
-                side: if matches!(p.side, PosSide::Long) { "buy" } else { "sell" }.to_string(),
-                qty: p.qty, entry: p.entry, mark, pnl: p.unrealized(mark),
-                sl: p.sl, tp: p.tp, price_decimals: p.pd, qty_decimals: p.qd,
+                id: p.id,
+                instrument: p.instrument,
+                symbol,
+                side: if matches!(p.side, PosSide::Long) {
+                    "buy"
+                } else {
+                    "sell"
+                }
+                .to_string(),
+                qty: p.qty,
+                entry: p.entry,
+                mark,
+                pnl: p.unrealized(mark),
+                sl: p.sl,
+                tp: p.tp,
+                price_decimals: p.pd,
+                qty_decimals: p.qd,
             }
         })
         .collect();
@@ -1181,7 +1451,11 @@ async fn list_deals(State(st): State<AppState>, headers: HeaderMap) -> Result<Js
 /// разрешённого, а закрытие позицию сокращает. Если инструмент запретили, пока
 /// позиция открыта, запереть человека в ней было бы хуже запрета — он не смог бы
 /// выйти из того, что ему больше не разрешено держать. То же для отмены ордера.
-async fn close_deal(State(st): State<AppState>, headers: HeaderMap, Path(id): Path<u64>) -> Result<Json<serde_json::Value>, ApiErr> {
+async fn close_deal(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<u64>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
     let user = require_user(&st, &headers).await?;
     let m = marks(&st).await;
     let (pnl, mark) = with_account(&st, user, Origin::Client, |b| {
@@ -1192,7 +1466,9 @@ async fn close_deal(State(st): State<AppState>, headers: HeaderMap, Path(id): Pa
             .map(|p| p.instrument)
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown position"))?;
         let mark = *m.get(&inst).unwrap_or(&0);
-        let pnl = b.close(user, id, mark).map_err(|_| err(StatusCode::NOT_FOUND, "unknown position"))?;
+        let pnl = b
+            .close(user, id, mark)
+            .map_err(|_| err(StatusCode::NOT_FOUND, "unknown position"))?;
         Ok((pnl, mark))
     })
     .await?;
@@ -1200,7 +1476,10 @@ async fn close_deal(State(st): State<AppState>, headers: HeaderMap, Path(id): Pa
 }
 
 /// Сводка счёта: баланс/equity/маржа/free/open P&L (в центах).
-async fn account(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<AccountDto>, ApiErr> {
+async fn account(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AccountDto>, ApiErr> {
     let user = require_user(&st, &headers).await?;
     let m = marks(&st).await;
     let b = st.broker.lock().await;
@@ -1212,7 +1491,14 @@ async fn account(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<
         broker::PositionModel::Netting => "netting",
         broker::PositionModel::Hedging => "hedging",
     };
-    Ok(Json(AccountDto { model, balance, equity, used_margin: used, free_margin: equity - used, open_pnl }))
+    Ok(Json(AccountDto {
+        model,
+        balance,
+        equity,
+        used_margin: used,
+        free_margin: equity - used,
+        open_pnl,
+    }))
 }
 
 /// Журнал счёта и итог сверки со слепком (TRM-13).
@@ -1252,7 +1538,10 @@ struct JournalDto {
     entries: Vec<JournalEntryDto>,
 }
 
-async fn account_journal(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<JournalDto>, ApiErr> {
+async fn account_journal(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<JournalDto>, ApiErr> {
     let user = require_user(&st, &headers).await?;
     let (snap, lev, start_balance) = {
         let b = st.broker.lock().await;
@@ -1279,7 +1568,11 @@ async fn account_journal(State(st): State<AppState>, headers: HeaderMap) -> Resu
         .collect();
     Ok(Json(JournalDto {
         status: status.tag(),
-        detail: if status.ok() { None } else { Some(status.to_string()) },
+        detail: if status.ok() {
+            None
+        } else {
+            Some(status.to_string())
+        },
         replayed_balance: j.replay().balance,
         balance: snap.balance,
         entries,
@@ -1302,15 +1595,33 @@ struct SessionResp {
 }
 
 /// Обменять валидный handoff-JWT на сессию терминала. Счёт — по `(tenant, sub)`.
-async fn session_create(State(st): State<AppState>, Json(req): Json<SessionReq>) -> Result<Json<SessionResp>, ApiErr> {
-    let claims = st.sso.validate(&req.token, &req.site).await.map_err(sso_err)?;
+async fn session_create(
+    State(st): State<AppState>,
+    Json(req): Json<SessionReq>,
+) -> Result<Json<SessionResp>, ApiErr> {
+    let claims = st
+        .sso
+        .validate(&req.token, &req.site)
+        .await
+        .map_err(sso_err)?;
     let user = st
         .store
         .resolve_identity(&claims.tenant, &claims.sub)
         .await
-        .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "identity store unavailable"))?;
-    let expires_in = st.sso.mint(claims.jti.clone(), user, claims.tenant.clone()).await;
-    Ok(Json(SessionResp { token: claims.jti, expires_in }))
+        .map_err(|_| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity store unavailable",
+            )
+        })?;
+    let expires_in = st
+        .sso
+        .mint(claims.jti.clone(), user, claims.tenant.clone())
+        .await;
+    Ok(Json(SessionResp {
+        token: claims.jti,
+        expires_in,
+    }))
 }
 
 /// Погасить сессию терминала (логаут из кабинета).
@@ -1348,57 +1659,70 @@ pub fn spawn_monitor(st: AppState) {
 /// которым он работает в бою, а не ожиданием таймера. Сработавший стоп меняет счёт так
 /// же, как ручная операция, и обязан оставлять такую же запись — спорят как раз о нём.
 pub async fn monitor_tick(st: &AppState) {
-            let m = marks(st).await;
-            if m.is_empty() {
-                return;
+    let m = marks(st).await;
+    if m.is_empty() {
+        return;
+    }
+    // Разрыв ряда определяет тот, кто принимает цены (Р-073, TRM-19).
+    // Молчание дольше порога взводит признак; первый же прогон по
+    // свежим ценам его СНИМАЕТ и помечает свои записи — дальше ряд
+    // снова непрерывен. Порог тот же, что у `/health`: два разных
+    // числа для одного вопроса однажды разойдутся.
+    let across_gap = st.note_feed_gap();
+    let changed = { st.broker.lock().await.check(&m, across_gap) };
+    for user in changed {
+        let lock = account_lock(st, user).await;
+        let _guard = lock.lock().await;
+        let (snap, kinds, lev, start_balance) = {
+            let mut b = st.broker.lock().await;
+            (
+                b.snapshot(user),
+                b.take_events(user),
+                b.leverage(),
+                b.start_balance(),
+            )
+        };
+        // Триггеры SL/TP и лимитных ордеров меняют счёт так же, как ручные
+        // операции, поэтому и проверяются так же, и в журнал идут так же.
+        // Иначе защита стояла бы только на том пути, о котором мы помним, а
+        // сработавший стоп не оставлял бы следа — при том что спорят именно о нём.
+        let violations = broker::check_snapshot(&snap, lev);
+        if !violations.is_empty() {
+            st.quarantined.lock().await.insert(user);
+            for v in &violations {
+                eprintln!(
+                    "[monitor] ИНВАРИАНТ НАРУШЕН триггером, счёт {} в карантине: {v}",
+                    user.0
+                );
             }
-            // Разрыв ряда определяет тот, кто принимает цены (Р-073, TRM-19).
-            // Молчание дольше порога взводит признак; первый же прогон по
-            // свежим ценам его СНИМАЕТ и помечает свои записи — дальше ряд
-            // снова непрерывен. Порог тот же, что у `/health`: два разных
-            // числа для одного вопроса однажды разойдутся.
-            let across_gap = st.note_feed_gap();
-            let changed = { st.broker.lock().await.check(&m, across_gap) };
-            for user in changed {
-                let lock = account_lock(st, user).await;
-                let _guard = lock.lock().await;
-                let (snap, kinds, lev, start_balance) = {
-                    let mut b = st.broker.lock().await;
-                    (b.snapshot(user), b.take_events(user), b.leverage(), b.start_balance())
-                };
-                // Триггеры SL/TP и лимитных ордеров меняют счёт так же, как ручные
-                // операции, поэтому и проверяются так же, и в журнал идут так же.
-                // Иначе защита стояла бы только на том пути, о котором мы помним, а
-                // сработавший стоп не оставлял бы следа — при том что спорят именно о нём.
-                let violations = broker::check_snapshot(&snap, lev);
-                if !violations.is_empty() {
-                    st.quarantined.lock().await.insert(user);
-                    for v in &violations {
-                        eprintln!("[monitor] ИНВАРИАНТ НАРУШЕН триггером, счёт {} в карантине: {v}", user.0);
-                    }
-                    continue; // испорченное не записываем и не чиним
+            continue; // испорченное не записываем и не чиним
+        }
+        let sealed = {
+            let mut js = st.journals.lock().await;
+            let j = js
+                .entry(user)
+                .or_insert_with(|| Journal::new(lev, start_balance));
+            let sealed = j.seal(now_ms(), &Origin::System, &kinds);
+            let diverged = journal::reconcile(&j.preview(&sealed), &snap);
+            if !diverged.is_empty() {
+                drop(js);
+                st.quarantined.lock().await.insert(user);
+                for d in &diverged {
+                    eprintln!(
+                        "[monitor] ЖУРНАЛ НЕ СХОДИТСЯ после триггера, счёт {} в карантине: {d}",
+                        user.0
+                    );
                 }
-                let sealed = {
-                    let mut js = st.journals.lock().await;
-                    let j = js.entry(user).or_insert_with(|| Journal::new(lev, start_balance));
-                    let sealed = j.seal(now_ms(), &Origin::System, &kinds);
-                    let diverged = journal::reconcile(&j.preview(&sealed), &snap);
-                    if !diverged.is_empty() {
-                        drop(js);
-                        st.quarantined.lock().await.insert(user);
-                        for d in &diverged {
-                            eprintln!("[monitor] ЖУРНАЛ НЕ СХОДИТСЯ после триггера, счёт {} в карантине: {d}", user.0);
-                        }
-                        continue; // цену уже не отыграть назад, но и чинить молча нельзя
-                    }
-                    sealed
-                };
-                if let Err(e) = st.store.save_account(user, &snap, &sealed).await {
-                    eprintln!("[monitor] не удалось сохранить счёт {}: {e}", user.0);
-                    continue; // в память журнал не принимаем: в хранилище его нет
-                }
-                commit_journal(st, user, sealed).await;
+                continue; // цену уже не отыграть назад, но и чинить молча нельзя
             }
+            sealed
+        };
+        if let Err(e) = st.store.save_account(user, &snap, &sealed).await {
+            eprintln!("[monitor] не удалось сохранить счёт {}: {e}", user.0);
+            continue; // в память журнал не принимаем: в хранилище его нет
+        }
+        commit_journal(st, user, sealed).await;
+    }
 }
 
 async fn ws_stream(State(st): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -1443,7 +1767,9 @@ mod allow_list_tests {
         st.sso_enabled = true;
         st.tenant_instruments = Arc::new(source);
         let token = "session-token".to_string();
-        st.sso.mint(token.clone(), DEFAULT_USER, SITE.to_string()).await;
+        st.sso
+            .mint(token.clone(), DEFAULT_USER, SITE.to_string())
+            .await;
         (router(st), token)
     }
 
@@ -1451,18 +1777,31 @@ mod allow_list_tests {
     /// какой их присылает CMS. Перевод в id идёт через ту же границу, что в бою.
     fn allow(site: &str, symbols: &[&str]) -> TenantSource {
         let index = symbol_index(&feed::instruments());
-        let list = TenantAllowList::resolve(&index, &symbols.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let list = TenantAllowList::resolve(
+            &index,
+            &symbols.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        );
         let mut m = HashMap::new();
         m.insert(site.to_string(), list);
         TenantSource::Static(m)
     }
 
-    async fn post(app: &Router, uri: &str, token: Option<&str>, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
-        let mut b = Request::builder().method("POST").uri(uri).header("content-type", "application/json");
+    async fn post(
+        app: &Router,
+        uri: &str,
+        token: Option<&str>,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
         if let Some(t) = token {
             b = b.header("authorization", format!("Bearer {t}"));
         }
-        let req = b.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+        let req = b
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         read(app.clone().oneshot(req).await.unwrap()).await
     }
 
@@ -1471,13 +1810,23 @@ mod allow_list_tests {
         if let Some(t) = token {
             b = b.header("authorization", format!("Bearer {t}"));
         }
-        read(app.clone().oneshot(b.body(Body::empty()).unwrap()).await.unwrap()).await
+        read(
+            app.clone()
+                .oneshot(b.body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await
     }
 
     async fn read(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let v = if bytes.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null) };
+        let v = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+        };
         (status, v)
     }
 
@@ -1496,9 +1845,13 @@ mod allow_list_tests {
 
     #[test]
     fn parses_source() {
-        let m = parse_tenant_instruments(Some("apex-ru:BTCUSD,ETHUSD,BNBUSD;other:XRPUSD"), &index())
-            .expect("источник задан");
-        assert_eq!(m.get("apex-ru"), Some(&TenantAllowList::Resolved(vec![1, 2, 3])));
+        let m =
+            parse_tenant_instruments(Some("apex-ru:BTCUSD,ETHUSD,BNBUSD;other:XRPUSD"), &index())
+                .expect("источник задан");
+        assert_eq!(
+            m.get("apex-ru"),
+            Some(&TenantAllowList::Resolved(vec![1, 2, 3]))
+        );
         assert_eq!(m.get("other"), Some(&TenantAllowList::Resolved(vec![5])));
     }
 
@@ -1525,7 +1878,11 @@ mod allow_list_tests {
     fn symbol_maps_to_internal_id() {
         let idx = index();
         for s in ["BTCUSD", "BTCUSDT", "BTC-USDT", "btcusd", "btc-usdt"] {
-            assert_eq!(idx.get(&normalize_symbol(s)), Some(&1), "символ {s} обязан указывать на инструмент 1");
+            assert_eq!(
+                idx.get(&normalize_symbol(s)),
+                Some(&1),
+                "символ {s} обязан указывать на инструмент 1"
+            );
         }
         assert_eq!(idx.get(&normalize_symbol("MANAUSD")), Some(&30));
     }
@@ -1539,7 +1896,11 @@ mod allow_list_tests {
         let idx = symbol_index(&instruments);
         // У каждого инструмента ровно два различимых написания: XXXUSDT и XXXUSD
         // (`XXX-USDT` после нормализации совпадает с первым).
-        assert_eq!(idx.len(), instruments.len() * 2, "каждый символ обязан указывать ровно на один инструмент");
+        assert_eq!(
+            idx.len(),
+            instruments.len() * 2,
+            "каждый символ обязан указывать ровно на один инструмент"
+        );
         for f in &instruments {
             assert_eq!(idx.get(&normalize_symbol(&f.binance)), Some(&f.id));
             assert_eq!(idx.get(&normalize_symbol(&f.symbol)), Some(&f.id));
@@ -1554,11 +1915,16 @@ mod allow_list_tests {
     /// список, который прислал источник.
     #[test]
     fn unknown_symbol_rejects_the_whole_list() {
-        let list = TenantAllowList::resolve(&index(), &["BTCUSD".into(), "XAUUSD".into(), "ETHUSD".into()]);
+        let list = TenantAllowList::resolve(
+            &index(),
+            &["BTCUSD".into(), "XAUUSD".into(), "ETHUSD".into()],
+        );
         match list {
             TenantAllowList::Unknown(unknown) => assert_eq!(unknown, vec!["XAUUSD".to_string()]),
             TenantAllowList::Resolved(ids) => {
-                panic!("неизвестный символ не должен молча исчезать, а список — сужаться до {ids:?}")
+                panic!(
+                    "неизвестный символ не должен молча исчезать, а список — сужаться до {ids:?}"
+                )
             }
         }
     }
@@ -1569,8 +1935,15 @@ mod allow_list_tests {
     async fn unknown_symbol_closes_trading_with_its_own_reason() {
         let (app, tok) = tenant_app(allow(SITE, &["BTCUSD", "XAUUSD"])).await;
         let (status, b) = post(&app, "/deals", Some(&tok), deal(1)).await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "список с неизвестным символом не принимается целиком");
-        assert_eq!(b["error"], "tenant_instruments_unreadable", "причина обязана отличаться от «источника нет»");
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "список с неизвестным символом не принимается целиком"
+        );
+        assert_eq!(
+            b["error"], "tenant_instruments_unreadable",
+            "причина обязана отличаться от «источника нет»"
+        );
     }
 
     // ---- Граница: открытие позиции -----------------------------------------
@@ -1580,7 +1953,11 @@ mod allow_list_tests {
     async fn open_deal_rejects_instrument_outside_allow_list() {
         let (app, tok) = tenant_app(allow(SITE, &["BTCUSD"])).await;
         let (status, body) = post(&app, "/deals", Some(&tok), deal(2)).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "инструмент вне allow-list не должен торговаться");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "инструмент вне allow-list не должен торговаться"
+        );
         assert_eq!(body["error"], "instrument_not_allowed");
     }
 
@@ -1589,7 +1966,11 @@ mod allow_list_tests {
     async fn pending_rejects_instrument_outside_allow_list() {
         let (app, tok) = tenant_app(allow(SITE, &["BTCUSD"])).await;
         let (status, body) = post(&app, "/pending", Some(&tok), pending(2)).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "отложенный ордер обязан проверяться так же, как рыночный");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "отложенный ордер обязан проверяться так же, как рыночный"
+        );
         assert_eq!(body["error"], "instrument_not_allowed");
     }
 
@@ -1598,7 +1979,11 @@ mod allow_list_tests {
     async fn allowed_instrument_passes() {
         let (app, tok) = tenant_app(allow(SITE, &["BTCUSD"])).await;
         let (status, _) = post(&app, "/pending", Some(&tok), pending(1)).await;
-        assert_eq!(status, StatusCode::OK, "разрешённый инструмент обязан торговаться");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "разрешённый инструмент обязан торговаться"
+        );
     }
 
     /// Пустой список запрещает всё — включая инструмент №1.
@@ -1618,8 +2003,15 @@ mod allow_list_tests {
         let (app, tok) = tenant_app(TenantSource::None).await;
         for (uri, body) in [("/deals", deal(1)), ("/pending", pending(1))] {
             let (status, b) = post(&app, uri, Some(&tok), body).await;
-            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}: без конфига торговли быть не должно");
-            assert_eq!(b["error"], "tenant_instruments_unavailable", "{uri}: причина обязана отличаться от «не разрешено»");
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{uri}: без конфига торговли быть не должно"
+            );
+            assert_eq!(
+                b["error"], "tenant_instruments_unavailable",
+                "{uri}: причина обязана отличаться от «не разрешено»"
+            );
         }
     }
 
@@ -1642,7 +2034,11 @@ mod allow_list_tests {
     async fn closing_is_never_blocked_by_allow_list() {
         let (app, tok) = tenant_app(allow(SITE, &[])).await;
         let (status, _) = post(&app, "/deals/1/close", Some(&tok), serde_json::Value::Null).await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "закрытие не должно упираться в allow-list");
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "закрытие не должно упираться в allow-list"
+        );
     }
 
     /// Отмена отложенного ордера — тоже сокращение риска, тоже не ограничивается.
@@ -1658,7 +2054,11 @@ mod allow_list_tests {
             .body(Body::empty())
             .unwrap();
         let (status, _) = read(app.oneshot(req).await.unwrap()).await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "отмена ордера не должна упираться в allow-list");
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "отмена ордера не должна упираться в allow-list"
+        );
     }
 
     /// SL/TP — атрибуты позиции (`Position { sl, tp }`), а не отдельные ордера:
@@ -1690,8 +2090,17 @@ mod allow_list_tests {
         let (app, _) = tenant_app(allow(SITE, &["ETHUSD", "BNBUSD"])).await;
         let (status, body) = get(&app, "/instruments?site=apex-ru", None).await;
         assert_eq!(status, StatusCode::OK);
-        let ids: Vec<u64> = body.as_array().unwrap().iter().map(|i| i["id"].as_u64().unwrap()).collect();
-        assert_eq!(ids, vec![2, 3], "витрина обязана показывать только разрешённое");
+        let ids: Vec<u64> = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![2, 3],
+            "витрина обязана показывать только разрешённое"
+        );
     }
 
     /// Без конфига витрина отказывает кодом, а не отдаёт пустой список: пустой
@@ -1711,7 +2120,11 @@ mod allow_list_tests {
     async fn empty_allow_list_is_said_out_loud_not_rendered_as_empty() {
         let (app, _) = tenant_app(allow(SITE, &[])).await;
         let (status, b) = get(&app, "/instruments?site=apex-ru", None).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "пустой список инструментов не отдаётся никогда");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "пустой список инструментов не отдаётся никогда"
+        );
         assert_eq!(b["error"], "no_instruments_allowed");
     }
 
@@ -1774,8 +2187,16 @@ mod invariant_wiring_tests {
             balance: 1_000_000,
             next_id: 1,
             positions: vec![broker::Position {
-                id: 1, instrument: 1, side: PosSide::Long,
-                qty: 0, entry: 5000, pd: 2, qd: 3, margin: 5_000, sl: None, tp: None,
+                id: 1,
+                instrument: 1,
+                side: PosSide::Long,
+                qty: 0,
+                entry: 5000,
+                pd: 2,
+                qd: 3,
+                margin: 5_000,
+                sl: None,
+                tp: None,
             }],
             pendings: vec![],
             closed: vec![],
@@ -1791,23 +2212,43 @@ mod invariant_wiring_tests {
             Ok(())
         }
         async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
-            Ok(persistence::LoadedState { accounts: vec![(DEFAULT_USER, corrupt_snapshot())], journals: vec![] })
+            Ok(persistence::LoadedState {
+                accounts: vec![(DEFAULT_USER, corrupt_snapshot())],
+                journals: vec![],
+            })
         }
-        async fn save_account(&self, _u: UserId, _s: &broker::AccountSnapshot, _e: &[journal::AccountEvent]) -> Result<(), persistence::StoreError> {
+        async fn save_account(
+            &self,
+            _u: UserId,
+            _s: &broker::AccountSnapshot,
+            _e: &[journal::AccountEvent],
+        ) -> Result<(), persistence::StoreError> {
             Ok(())
         }
     }
 
-    async fn send(app: &Router, method: &str, uri: &str, body: Option<serde_json::Value>) -> (StatusCode, serde_json::Value) {
+    async fn send(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
         let b = Request::builder().method(method).uri(uri);
         let req = match body {
-            Some(v) => b.header("content-type", "application/json").body(Body::from(serde_json::to_vec(&v).unwrap())).unwrap(),
+            Some(v) => b
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&v).unwrap()))
+                .unwrap(),
             None => b.body(Body::empty()).unwrap(),
         };
         let resp = app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let v = if bytes.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null) };
+        let v = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+        };
         (status, v)
     }
 
@@ -1823,16 +2264,30 @@ mod invariant_wiring_tests {
     #[tokio::test]
     async fn mutation_over_broken_state_is_rejected_before_write() {
         let st = build_state();
-        st.broker.lock().await.restore(DEFAULT_USER, corrupt_snapshot());
+        st.broker
+            .lock()
+            .await
+            .restore(DEFAULT_USER, corrupt_snapshot());
         let app = router(st.clone());
 
         let (status, body) = send(&app, "POST", "/pending", Some(pending_body())).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "операция, оставляющая счёт неверным, обязана быть отклонена");
-        assert_eq!(body["error"], "invariant_violated", "отказ обязан отличаться от делового");
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "операция, оставляющая счёт неверным, обязана быть отклонена"
+        );
+        assert_eq!(
+            body["error"], "invariant_violated",
+            "отказ обязан отличаться от делового"
+        );
 
         // Изменение не зафиксировано: ордер не добавился.
         let (_, list) = send(&app, "GET", "/pending", None).await;
-        assert_eq!(list.as_array().map(|a| a.len()), Some(0), "изменение не должно фиксироваться");
+        assert_eq!(
+            list.as_array().map(|a| a.len()),
+            Some(0),
+            "изменение не должно фиксироваться"
+        );
     }
 
     /// Отказ по инварианту отличим от делового отказа. Их нельзя путать: первый
@@ -1840,7 +2295,10 @@ mod invariant_wiring_tests {
     #[tokio::test]
     async fn invariant_rejection_differs_from_business_rejection() {
         let st = build_state();
-        st.broker.lock().await.restore(DEFAULT_USER, corrupt_snapshot());
+        st.broker
+            .lock()
+            .await
+            .restore(DEFAULT_USER, corrupt_snapshot());
         let app = router(st);
         let (status, body) = send(&app, "POST", "/pending", Some(pending_body())).await;
         assert_ne!(status, StatusCode::PAYMENT_REQUIRED);
@@ -1854,8 +2312,13 @@ mod invariant_wiring_tests {
     #[tokio::test]
     async fn broken_state_quarantines_account_but_service_starts() {
         let st = build_state_with(Arc::new(CorruptStore));
-        restore_state(&st).await.expect("сервис обязан стартовать, а не падать");
-        assert!(st.quarantined.lock().await.contains(&DEFAULT_USER), "счёт обязан уйти в карантин");
+        restore_state(&st)
+            .await
+            .expect("сервис обязан стартовать, а не падать");
+        assert!(
+            st.quarantined.lock().await.contains(&DEFAULT_USER),
+            "счёт обязан уйти в карантин"
+        );
     }
 
     /// В карантине: чтение разрешено, мутации отклоняются.
@@ -1866,10 +2329,18 @@ mod invariant_wiring_tests {
         let app = router(st);
 
         let (read_status, _) = send(&app, "GET", "/account", None).await;
-        assert_eq!(read_status, StatusCode::OK, "чтение в карантине обязано работать");
+        assert_eq!(
+            read_status,
+            StatusCode::OK,
+            "чтение в карантине обязано работать"
+        );
 
         let (write_status, body) = send(&app, "POST", "/pending", Some(pending_body())).await;
-        assert_eq!(write_status, StatusCode::LOCKED, "мутации в карантине обязаны отклоняться");
+        assert_eq!(
+            write_status,
+            StatusCode::LOCKED,
+            "мутации в карантине обязаны отклоняться"
+        );
         assert_eq!(body["error"], "account_quarantined");
     }
 
@@ -1881,8 +2352,14 @@ mod invariant_wiring_tests {
         restore_state(&st).await.unwrap();
         let snap = st.broker.lock().await.snapshot(DEFAULT_USER);
         assert_eq!(snap.positions.len(), 1, "позиция не должна исчезнуть");
-        assert_eq!(snap.positions[0].qty, 0, "нулевой объём обязан сохраниться как улика");
-        assert!(!broker::check_snapshot(&snap, 1).is_empty(), "состояние обязано остаться помеченным как неверное");
+        assert_eq!(
+            snap.positions[0].qty, 0,
+            "нулевой объём обязан сохраниться как улика"
+        );
+        assert!(
+            !broker::check_snapshot(&snap, 1).is_empty(),
+            "состояние обязано остаться помеченным как неверное"
+        );
     }
 
     /// Здоровое состояние в карантин не уходит — проверка не срабатывает вхолостую.
@@ -1893,7 +2370,11 @@ mod invariant_wiring_tests {
         assert!(st.quarantined.lock().await.is_empty());
         let app = router(st);
         let (status, _) = send(&app, "POST", "/pending", Some(pending_body())).await;
-        assert_eq!(status, StatusCode::OK, "нормальная торговля не должна страдать от проверок");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "нормальная торговля не должна страдать от проверок"
+        );
     }
 }
 
@@ -1911,22 +2392,43 @@ mod journal_wiring_tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn send(app: &Router, method: &str, uri: &str, body: Option<serde_json::Value>) -> (StatusCode, serde_json::Value) {
+    async fn send(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
         let b = Request::builder().method(method).uri(uri);
         let req = match body {
-            Some(v) => b.header("content-type", "application/json").body(Body::from(serde_json::to_vec(&v).unwrap())).unwrap(),
+            Some(v) => b
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&v).unwrap()))
+                .unwrap(),
             None => b.body(Body::empty()).unwrap(),
         };
         let resp = app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let v = if bytes.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null) };
+        let v = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+        };
         (status, v)
     }
 
     /// Цена нужна торговым ручкам: без тикера открытие отвечает «нет цены».
     async fn with_price(st: &AppState, instrument: u32, px: i64) {
-        st.tickers.lock().await.insert(instrument, feed::Ticker { last: px, change: 0.0, high: px, bid: px, ask: px });
+        st.tickers.lock().await.insert(
+            instrument,
+            feed::Ticker {
+                last: px,
+                change: 0.0,
+                high: px,
+                bid: px,
+                ask: px,
+            },
+        );
     }
 
     fn deal_body() -> serde_json::Value {
@@ -1955,15 +2457,30 @@ mod journal_wiring_tests {
         assert_eq!(status, StatusCode::OK);
 
         let kinds = events_of(&st).await;
-        assert!(kinds.iter().any(|k| k.starts_with("account_opened")), "заведение счёта обязано быть записано: {kinds:?}");
-        assert!(kinds.iter().any(|k| k.starts_with("position_opened")), "сделка обязана быть записана: {kinds:?}");
+        assert!(
+            kinds.iter().any(|k| k.starts_with("account_opened")),
+            "заведение счёта обязано быть записано: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(|k| k.starts_with("position_opened")),
+            "сделка обязана быть записана: {kinds:?}"
+        );
 
         let (status, body) = send(&app, "GET", "/account/journal", None).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["status"], "reconciled", "журнал обязан сходиться со слепком: {body}");
-        assert_eq!(body["replayed_balance"], body["balance"], "остаток обязан выводиться из журнала");
+        assert_eq!(
+            body["status"], "reconciled",
+            "журнал обязан сходиться со слепком: {body}"
+        );
+        assert_eq!(
+            body["replayed_balance"], body["balance"],
+            "остаток обязан выводиться из журнала"
+        );
         assert_eq!(body["entries"].as_array().unwrap().len(), 2);
-        assert_eq!(body["entries"][1]["source"], "client", "сделку сделал человек, и это видно");
+        assert_eq!(
+            body["entries"][1]["source"], "client",
+            "сделку сделал человек, и это видно"
+        );
     }
 
     /// Закрытие записывается с причиной «по команде» — иначе срабатывание стопа и
@@ -1980,7 +2497,12 @@ mod journal_wiring_tests {
         assert_eq!(status, StatusCode::OK);
 
         let kinds = events_of(&st).await;
-        assert!(kinds.iter().any(|k| k.contains("position_closed") && k.contains("cause=command")), "{kinds:?}");
+        assert!(
+            kinds
+                .iter()
+                .any(|k| k.contains("position_closed") && k.contains("cause=command")),
+            "{kinds:?}"
+        );
         let (_, body) = send(&app, "GET", "/account/journal", None).await;
         assert_eq!(body["status"], "reconciled");
     }
@@ -1996,8 +2518,14 @@ mod journal_wiring_tests {
         send(&app, "DELETE", &format!("/pending/{id}"), None).await;
 
         let kinds = events_of(&st).await;
-        assert!(kinds.iter().any(|k| k.starts_with("pending_placed")), "{kinds:?}");
-        assert!(kinds.iter().any(|k| k.starts_with("pending_cancelled")), "{kinds:?}");
+        assert!(
+            kinds.iter().any(|k| k.starts_with("pending_placed")),
+            "{kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(|k| k.starts_with("pending_cancelled")),
+            "{kinds:?}"
+        );
     }
 
     /// Сработавший стоп проходит через монитор, а не через запрос — и обязан
@@ -2017,15 +2545,36 @@ mod journal_wiring_tests {
 
         let kinds = events_of(&st).await;
         assert!(
-            kinds.iter().any(|k| k.contains("position_closed") && k.contains("cause=stop_loss")),
+            kinds
+                .iter()
+                .any(|k| k.contains("position_closed") && k.contains("cause=stop_loss")),
             "срабатывание стопа обязано попасть в журнал: {kinds:?}"
         );
-        let last = st.journals.lock().await.get(&DEFAULT_USER).unwrap().events().last().unwrap().clone();
-        assert_eq!(last.origin(), &Origin::System, "у триггера нет человека-автора");
+        let last = st
+            .journals
+            .lock()
+            .await
+            .get(&DEFAULT_USER)
+            .unwrap()
+            .events()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            last.origin(),
+            &Origin::System,
+            "у триггера нет человека-автора"
+        );
 
         let (_, jb) = send(&app, "GET", "/account/journal", None).await;
-        assert_eq!(jb["status"], "reconciled", "после срабатывания стопа остаток обязан сходиться: {jb}");
-        assert!(st.quarantined.lock().await.is_empty(), "нормальное срабатывание — не повод для карантина");
+        assert_eq!(
+            jb["status"], "reconciled",
+            "после срабатывания стопа остаток обязан сходиться: {jb}"
+        );
+        assert!(
+            st.quarantined.lock().await.is_empty(),
+            "нормальное срабатывание — не повод для карантина"
+        );
     }
 
     // ---- Хранилище: журнал переживает перезапуск ----------------------------
@@ -2041,7 +2590,15 @@ mod journal_wiring_tests {
             with_price(&st, 1, 50_000).await;
             let app = router(st.clone());
             send(&app, "POST", "/deals", Some(deal_body())).await;
-            send(&app, "POST", "/pending", Some(serde_json::json!({"instrument": 2, "side": "sell", "qty": 10, "price": 9_000}))).await;
+            send(
+                &app,
+                "POST",
+                "/pending",
+                Some(
+                    serde_json::json!({"instrument": 2, "side": "sell", "qty": 10, "price": 9_000}),
+                ),
+            )
+            .await;
             let (_, acct) = send(&app, "GET", "/account", None).await;
             acct["balance"].clone()
         };
@@ -2051,12 +2608,24 @@ mod journal_wiring_tests {
         restore_state(&st2).await.expect("подъём обязан пройти");
         let app2 = router(st2.clone());
 
-        assert!(st2.quarantined.lock().await.is_empty(), "сошедшийся счёт в карантин не уходит");
+        assert!(
+            st2.quarantined.lock().await.is_empty(),
+            "сошедшийся счёт в карантин не уходит"
+        );
         let (_, jb) = send(&app2, "GET", "/account/journal", None).await;
-        assert_eq!(jb["status"], "reconciled", "после рестарта журнал обязан сходиться: {jb}");
+        assert_eq!(
+            jb["status"], "reconciled",
+            "после рестарта журнал обязан сходиться: {jb}"
+        );
         assert_eq!(jb["balance"], before, "остаток обязан пережить рестарт");
-        assert_eq!(jb["replayed_balance"], before, "и обязан выводиться из журнала");
-        assert!(jb["entries"].as_array().unwrap().len() >= 3, "лента обязана подняться целиком: {jb}");
+        assert_eq!(
+            jb["replayed_balance"], before,
+            "и обязан выводиться из журнала"
+        );
+        assert!(
+            jb["entries"].as_array().unwrap().len() >= 3,
+            "лента обязана подняться целиком: {jb}"
+        );
     }
 
     // ---- Отказы: разные беды — разные ответы --------------------------------
@@ -2068,7 +2637,13 @@ mod journal_wiring_tests {
         let st = build_state();
         let app = router(st.clone());
         // Сначала нормальная операция: журнал заводится и сходится.
-        send(&app, "POST", "/pending", Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 1, "price": 10}))).await;
+        send(
+            &app,
+            "POST",
+            "/pending",
+            Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 1, "price": 10})),
+        )
+        .await;
         let before = st.broker.lock().await.balance(DEFAULT_USER);
 
         // А теперь операция, которая меняет счёт в обход журнала — ровно то, что
@@ -2100,21 +2675,41 @@ mod journal_wiring_tests {
             }
             async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
                 // Инварианты в порядке: расходится именно история, а не состояние.
-                let snap = broker::AccountSnapshot { balance: 42_000_000, next_id: 0, ..Default::default() };
-                Ok(persistence::LoadedState { accounts: vec![(DEFAULT_USER, snap)], journals: vec![] })
+                let snap = broker::AccountSnapshot {
+                    balance: 42_000_000,
+                    next_id: 0,
+                    ..Default::default()
+                };
+                Ok(persistence::LoadedState {
+                    accounts: vec![(DEFAULT_USER, snap)],
+                    journals: vec![],
+                })
             }
-            async fn save_account(&self, _u: UserId, _s: &broker::AccountSnapshot, _e: &[journal::AccountEvent]) -> Result<(), persistence::StoreError> {
+            async fn save_account(
+                &self,
+                _u: UserId,
+                _s: &broker::AccountSnapshot,
+                _e: &[journal::AccountEvent],
+            ) -> Result<(), persistence::StoreError> {
                 Ok(())
             }
         }
         let st = build_state_with(Arc::new(SnapshotOnlyStore));
-        restore_state(&st).await.expect("сервис обязан стартовать: стоп сервиса не применяется нигде");
-        assert!(st.quarantined.lock().await.contains(&DEFAULT_USER), "счёт без истории обязан уйти в карантин");
+        restore_state(&st)
+            .await
+            .expect("сервис обязан стартовать: стоп сервиса не применяется нигде");
+        assert!(
+            st.quarantined.lock().await.contains(&DEFAULT_USER),
+            "счёт без истории обязан уйти в карантин"
+        );
 
         let app = router(st);
         let (status, body) = send(&app, "GET", "/account/journal", None).await;
         assert_eq!(status, StatusCode::OK, "читать можно и в карантине");
-        assert_eq!(body["status"], "no_entries", "диагноз обязан называть беду своим именем: {body}");
+        assert_eq!(
+            body["status"], "no_entries",
+            "диагноз обязан называть беду своим именем: {body}"
+        );
     }
 
     /// «Журнал недоступен» — **не** «записей нет». В первом случае мы не знаем истории
@@ -2131,14 +2726,22 @@ mod journal_wiring_tests {
             async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
                 Err(persistence::StoreError("журнал недоступен".into()))
             }
-            async fn save_account(&self, _u: UserId, _s: &broker::AccountSnapshot, _e: &[journal::AccountEvent]) -> Result<(), persistence::StoreError> {
+            async fn save_account(
+                &self,
+                _u: UserId,
+                _s: &broker::AccountSnapshot,
+                _e: &[journal::AccountEvent],
+            ) -> Result<(), persistence::StoreError> {
                 Ok(())
             }
         }
         let st = build_state_with(Arc::new(UnreadableStore));
         let out = restore_state(&st).await;
         assert!(out.is_err(), "на недоступном журнале сервис не стартует");
-        assert!(st.quarantined.lock().await.is_empty(), "карантин тут ни при чём: мы вообще ничего не прочитали");
+        assert!(
+            st.quarantined.lock().await.is_empty(),
+            "карантин тут ни при чём: мы вообще ничего не прочитали"
+        );
     }
 
     /// Испорченная цепочка в хранилище ловится при подъёме: счёт в карантин, сервис
@@ -2149,7 +2752,13 @@ mod journal_wiring_tests {
         {
             let st = build_state_with(store.clone());
             let app = router(st.clone());
-            send(&app, "POST", "/pending", Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 5, "price": 100}))).await;
+            send(
+                &app,
+                "POST",
+                "/pending",
+                Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 5, "price": 100})),
+            )
+            .await;
         }
         // Правим ленту так, как её правил бы человек с доступом к базе: меняем
         // содержимое записи, оставив отпечаток прежним.
@@ -2167,26 +2776,50 @@ mod journal_wiring_tests {
                         v.seq(),
                         v.at_ms(),
                         v.origin().clone(),
-                        journal::EventKind::AccountOpened { balance: 99_000_000 },
+                        journal::EventKind::AccountOpened {
+                            balance: 99_000_000,
+                        },
                         v.prev(),
                         v.hash(),
                     );
                 }
                 Ok(loaded)
             }
-            async fn save_account(&self, u: UserId, s: &broker::AccountSnapshot, e: &[journal::AccountEvent]) -> Result<(), persistence::StoreError> {
+            async fn save_account(
+                &self,
+                u: UserId,
+                s: &broker::AccountSnapshot,
+                e: &[journal::AccountEvent],
+            ) -> Result<(), persistence::StoreError> {
                 self.0.save_account(u, s, e).await
             }
         }
         let st2 = build_state_with(Arc::new(Tampered(store.clone())));
         restore_state(&st2).await.expect("сервис обязан стартовать");
-        assert!(st2.quarantined.lock().await.contains(&DEFAULT_USER), "подделанная лента — карантин");
+        assert!(
+            st2.quarantined.lock().await.contains(&DEFAULT_USER),
+            "подделанная лента — карантин"
+        );
 
         let app2 = router(st2.clone());
-        let (status, _) = send(&app2, "POST", "/pending", Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 1, "price": 1}))).await;
-        assert_eq!(status, StatusCode::LOCKED, "мутации по счёту с испорченной историей не проходят");
+        let (status, _) = send(
+            &app2,
+            "POST",
+            "/pending",
+            Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 1, "price": 1})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::LOCKED,
+            "мутации по счёту с испорченной историей не проходят"
+        );
         let snap = st2.broker.lock().await.snapshot(DEFAULT_USER);
-        assert_eq!(snap.pendings.len(), 1, "состояние не чинится и не затирается: улика остаётся");
+        assert_eq!(
+            snap.pendings.len(),
+            1,
+            "состояние не чинится и не затирается: улика остаётся"
+        );
     }
 
     /// Отказ хранилища не оставляет записи в журнале: иначе в памяти была бы история,
@@ -2202,14 +2835,28 @@ mod journal_wiring_tests {
             async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
                 Ok(persistence::LoadedState::default())
             }
-            async fn save_account(&self, _u: UserId, _s: &broker::AccountSnapshot, _e: &[journal::AccountEvent]) -> Result<(), persistence::StoreError> {
+            async fn save_account(
+                &self,
+                _u: UserId,
+                _s: &broker::AccountSnapshot,
+                _e: &[journal::AccountEvent],
+            ) -> Result<(), persistence::StoreError> {
                 Err(persistence::StoreError("диск горит".into()))
             }
         }
         let st = build_state_with(Arc::new(FailingStore));
         let app = router(st.clone());
-        let (status, _) = send(&app, "POST", "/pending", Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 1, "price": 10}))).await;
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/pending",
+            Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 1, "price": 10})),
+        )
+        .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(events_of(&st).await.is_empty(), "незаписанного в хранилище в журнале быть не должно");
+        assert!(
+            events_of(&st).await.is_empty(),
+            "незаписанного в хранилище в журнале быть не должно"
+        );
     }
 }

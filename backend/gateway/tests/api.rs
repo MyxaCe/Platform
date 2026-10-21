@@ -19,13 +19,20 @@ fn app() -> Router {
 async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
     let b = Request::builder().method(method).uri(uri);
     let req = match body {
-        Some(v) => b.header("content-type", "application/json").body(Body::from(serde_json::to_vec(&v).unwrap())).unwrap(),
+        Some(v) => b
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&v).unwrap()))
+            .unwrap(),
         None => b.body(Body::empty()).unwrap(),
     };
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let val = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(Value::Null) };
+    let val = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
     (status, val)
 }
 
@@ -89,7 +96,9 @@ impl gateway::persistence::Persistence for FailingStore {
     async fn init(&self) -> Result<(), gateway::persistence::StoreError> {
         Ok(())
     }
-    async fn load_all(&self) -> Result<gateway::persistence::LoadedState, gateway::persistence::StoreError> {
+    async fn load_all(
+        &self,
+    ) -> Result<gateway::persistence::LoadedState, gateway::persistence::StoreError> {
         Ok(gateway::persistence::LoadedState::default())
     }
     async fn save_account(
@@ -111,9 +120,17 @@ async fn storage_failure_rolls_back_and_returns_503() {
 
     let body = json!({ "instrument": 1, "side": "buy", "qty": 1000, "price": 5_000_000 });
     let (status, _) = send(&app, "POST", "/pending", Some(body)).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "запись не прошла → 503");
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "запись не прошла → 503"
+    );
 
     let (status, list) = send(&app, "GET", "/pending", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(list.as_array().unwrap().len(), 0, "ордер откачен, в памяти его нет");
+    assert_eq!(
+        list.as_array().unwrap().len(),
+        0,
+        "ордер откачен, в памяти его нет"
+    );
 }

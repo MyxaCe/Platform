@@ -15,7 +15,8 @@ fn marks(inst: u32, price: i64) -> HashMap<u32, i64> {
     HashMap::from([(inst, price)])
 }
 fn open(b: &mut Broker, side: PosSide, price: i64) -> u64 {
-    b.open(ALICE, 1, side, 1000, price, PD, QD, None, None).unwrap()
+    b.open(ALICE, 1, side, 1000, price, PD, QD, None, None)
+        .unwrap()
 }
 
 // ---- Базовое ---------------------------------------------------------------
@@ -32,7 +33,10 @@ fn open_locks_margin() {
 #[test]
 fn insufficient_margin_is_rejected() {
     let mut b = Broker::new(50_000, 1);
-    assert_eq!(b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, None), Err(BrokerError::InsufficientMargin));
+    assert_eq!(
+        b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, None),
+        Err(BrokerError::InsufficientMargin)
+    );
 }
 
 #[test]
@@ -41,7 +45,18 @@ fn long_pnl_and_short_pnl() {
     open(&mut b, PosSide::Long, 6_000_000);
     assert_eq!(b.open_pnl(ALICE, &marks(1, 6_100_000)), 1000); // +$10
     let mut b2 = Broker::new(1_000_000, 1);
-    b2.open(ALICE, 1, PosSide::Short, 1000, 6_000_000, PD, QD, None, None).unwrap();
+    b2.open(
+        ALICE,
+        1,
+        PosSide::Short,
+        1000,
+        6_000_000,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
     assert_eq!(b2.open_pnl(ALICE, &marks(1, 5_900_000)), 1000); // short в плюсе на падении
 }
 
@@ -88,7 +103,10 @@ fn cancel_pending() {
     let pid = b.place_pending(ALICE, 1, PosSide::Long, 1000, 5_900_000, PD, QD, None, None);
     assert_eq!(b.cancel_pending(ALICE, pid), Ok(()));
     assert!(b.pendings(ALICE).is_empty());
-    assert_eq!(b.cancel_pending(ALICE, 999), Err(BrokerError::UnknownPending));
+    assert_eq!(
+        b.cancel_pending(ALICE, 999),
+        Err(BrokerError::UnknownPending)
+    );
 }
 
 // ---- SL/TP -----------------------------------------------------------------
@@ -96,7 +114,18 @@ fn cancel_pending() {
 #[test]
 fn stop_loss_closes_position() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, Some(5_950_000), Some(6_100_000)).unwrap();
+    b.open(
+        ALICE,
+        1,
+        PosSide::Long,
+        1000,
+        6_000_000,
+        PD,
+        QD,
+        Some(5_950_000),
+        Some(6_100_000),
+    )
+    .unwrap();
     b.check(&marks(1, 5_990_000), false); // между SL и TP — не трогаем
     assert_eq!(b.positions(ALICE).len(), 1);
     b.check(&marks(1, 5_950_000), false); // достигли SL — закрыли
@@ -110,7 +139,18 @@ fn stop_loss_closes_position() {
 #[test]
 fn take_profit_closes_position() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, Some(5_950_000), Some(6_100_000)).unwrap();
+    b.open(
+        ALICE,
+        1,
+        PosSide::Long,
+        1000,
+        6_000_000,
+        PD,
+        QD,
+        Some(5_950_000),
+        Some(6_100_000),
+    )
+    .unwrap();
     b.check(&marks(1, 6_100_000), false); // достигли TP
     assert!(b.positions(ALICE).is_empty());
     assert_eq!(b.closed_deals(ALICE)[0].pnl, 1000);
@@ -121,7 +161,18 @@ fn take_profit_closes_position() {
 #[test]
 fn check_reports_only_changed_accounts() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, Some(5_950_000), None).unwrap();
+    b.open(
+        ALICE,
+        1,
+        PosSide::Long,
+        1000,
+        6_000_000,
+        PD,
+        QD,
+        Some(5_950_000),
+        None,
+    )
+    .unwrap();
 
     // Цена движется, но ничего не сработало — сохранять нечего.
     assert!(b.check(&marks(1, 5_990_000), false).is_empty());
@@ -145,7 +196,18 @@ fn check_reports_account_on_pending_fill() {
 #[test]
 fn snapshot_restore_roundtrip() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, Some(5_950_000), None).unwrap();
+    b.open(
+        ALICE,
+        1,
+        PosSide::Long,
+        1000,
+        6_000_000,
+        PD,
+        QD,
+        Some(5_950_000),
+        None,
+    )
+    .unwrap();
     b.place_pending(ALICE, 2, PosSide::Short, 500, 7_000_000, PD, QD, None, None);
     b.check(&marks(1, 5_950_000), false); // закрыли по SL → появилась история
     let snap = b.snapshot(ALICE);
@@ -194,19 +256,30 @@ fn withdraw_decreases_balance() {
 #[test]
 fn cannot_withdraw_more_than_free() {
     let mut b = Broker::new(1_000_000, 1);
-    assert_eq!(b.withdraw(ALICE, 1_000_001), Err(BrokerError::InsufficientFunds));
-    assert_eq!(b.balance(ALICE), 1_000_000, "неудачный вывод не меняет баланс");
+    assert_eq!(
+        b.withdraw(ALICE, 1_000_001),
+        Err(BrokerError::InsufficientFunds)
+    );
+    assert_eq!(
+        b.balance(ALICE),
+        1_000_000,
+        "неудачный вывод не меняет баланс"
+    );
 }
 
 #[test]
 fn margin_locks_funds_from_withdrawal() {
     let mut b = Broker::new(1_000_000, 1);
     // Открываем позицию: нотионал = маржа при leverage=1 → часть баланса занята.
-    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, None).unwrap();
+    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, None)
+        .unwrap();
     let free = b.free_margin(ALICE);
     assert!(free < 1_000_000, "часть средств ушла под маржу");
     // Больше свободного вывести нельзя.
-    assert_eq!(b.withdraw(ALICE, free + 1), Err(BrokerError::InsufficientFunds));
+    assert_eq!(
+        b.withdraw(ALICE, free + 1),
+        Err(BrokerError::InsufficientFunds)
+    );
     // Ровно свободное — можно.
     assert!(b.withdraw(ALICE, free).is_ok());
 }
@@ -219,15 +292,43 @@ fn margin_locks_funds_from_withdrawal() {
 #[test]
 fn gap_close_executes_at_the_observed_price_and_records_the_level() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, Some(5_950_000), None).unwrap();
+    b.open(
+        ALICE,
+        1,
+        PosSide::Long,
+        1000,
+        6_000_000,
+        PD,
+        QD,
+        Some(5_950_000),
+        None,
+    )
+    .unwrap();
 
-    assert_eq!(b.check(&marks(1, 5_400_000), true), vec![ALICE], "стоп обязан сработать и на разрыве");
+    assert_eq!(
+        b.check(&marks(1, 5_400_000), true),
+        vec![ALICE],
+        "стоп обязан сработать и на разрыве"
+    );
 
     let closed = b.closed_deals(ALICE);
-    assert_eq!(closed[0].exit, 5_400_000, "исполнено по рынку, а не по уровню");
+    assert_eq!(
+        closed[0].exit, 5_400_000,
+        "исполнено по рынку, а не по уровню"
+    );
 
-    match b.take_events(ALICE).last().expect("закрытие обязано быть в событиях") {
-        EventKind::PositionClosed { exit, level, across_gap, cause, .. } => {
+    match b
+        .take_events(ALICE)
+        .last()
+        .expect("закрытие обязано быть в событиях")
+    {
+        EventKind::PositionClosed {
+            exit,
+            level,
+            across_gap,
+            cause,
+            ..
+        } => {
             assert_eq!(*exit, 5_400_000, "в журнале цена исполнения");
             assert_eq!(*level, Some(5_950_000), "и уровень, который ставил человек");
             assert!(*across_gap, "факт разрыва обязан быть виден");
@@ -244,13 +345,27 @@ fn gap_close_executes_at_the_observed_price_and_records_the_level() {
 fn bigger_gap_costs_the_client_more() {
     let loss_at = |mark: i64| {
         let mut b = Broker::new(1_000_000, 1);
-        b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, Some(5_950_000), None).unwrap();
+        b.open(
+            ALICE,
+            1,
+            PosSide::Long,
+            1000,
+            6_000_000,
+            PD,
+            QD,
+            Some(5_950_000),
+            None,
+        )
+        .unwrap();
         b.check(&marks(1, mark), true);
         b.closed_deals(ALICE)[0].pnl
     };
     let small = loss_at(5_940_000);
     let big = loss_at(5_400_000);
-    assert!(big < small, "чем дальше рынок перепрыгнул стоп, тем больше потерял клиент: {big} против {small}");
+    assert!(
+        big < small,
+        "чем дальше рынок перепрыгнул стоп, тем больше потерял клиент: {big} против {small}"
+    );
 }
 
 /// Когда рынок дошёл ровно до уровня, проскальзывания нет и разрыв не
@@ -258,12 +373,32 @@ fn bigger_gap_costs_the_client_more() {
 #[test]
 fn quiet_close_has_no_slippage_and_is_not_marked_as_a_gap() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, Some(5_950_000), None).unwrap();
+    b.open(
+        ALICE,
+        1,
+        PosSide::Long,
+        1000,
+        6_000_000,
+        PD,
+        QD,
+        Some(5_950_000),
+        None,
+    )
+    .unwrap();
     b.check(&marks(1, 5_950_000), false);
 
     match b.take_events(ALICE).last().expect("закрытие") {
-        EventKind::PositionClosed { exit, level, across_gap, .. } => {
-            assert_eq!(*level, Some(*exit), "исполнилось ровно по поставленному — проскальзывания нет");
+        EventKind::PositionClosed {
+            exit,
+            level,
+            across_gap,
+            ..
+        } => {
+            assert_eq!(
+                *level,
+                Some(*exit),
+                "исполнилось ровно по поставленному — проскальзывания нет"
+            );
             assert!(!*across_gap, "спокойное закрытие разрывом не зовётся");
         }
         other => panic!("ожидалось закрытие позиции, а не {other:?}"),
@@ -279,7 +414,18 @@ fn take_profit_slips_in_the_clients_favour() {
     // сегодняшняя шкала, а утверждение здесь про направление выгоды.
     let pnl_at = |mark: i64| {
         let mut b = Broker::new(1_000_000, 1);
-        b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, Some(6_100_000)).unwrap();
+        b.open(
+            ALICE,
+            1,
+            PosSide::Long,
+            1000,
+            6_000_000,
+            PD,
+            QD,
+            None,
+            Some(6_100_000),
+        )
+        .unwrap();
         b.check(&marks(1, mark), true);
         let closed = b.closed_deals(ALICE);
         (closed[0].exit, closed[0].pnl)
@@ -288,8 +434,14 @@ fn take_profit_slips_in_the_clients_favour() {
     let (exit_at_level, pnl_at_level) = pnl_at(6_100_000);
     let (exit_gapped, pnl_gapped) = pnl_at(6_300_000);
 
-    assert_eq!(exit_at_level, 6_100_000, "рынок дошёл ровно до тейка — исполнение совпало с уровнем");
-    assert_eq!(exit_gapped, 6_300_000, "рынок перепрыгнул тейк — исполнено по рынку, а не по уровню");
+    assert_eq!(
+        exit_at_level, 6_100_000,
+        "рынок дошёл ровно до тейка — исполнение совпало с уровнем"
+    );
+    assert_eq!(
+        exit_gapped, 6_300_000,
+        "рынок перепрыгнул тейк — исполнено по рынку, а не по уровню"
+    );
     assert!(
         pnl_gapped > pnl_at_level,
         "на разрыве вверх клиент обязан получить БОЛЬШЕ, чем по уровню: {pnl_gapped} против {pnl_at_level}"
@@ -301,12 +453,18 @@ fn take_profit_slips_in_the_clients_favour() {
 #[test]
 fn manual_close_names_no_level() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, None).unwrap();
+    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, None)
+        .unwrap();
     let id = b.positions(ALICE)[0].id;
     b.close(ALICE, id, 6_010_000).unwrap();
 
     match b.take_events(ALICE).last().expect("закрытие") {
-        EventKind::PositionClosed { level, across_gap, cause, .. } => {
+        EventKind::PositionClosed {
+            level,
+            across_gap,
+            cause,
+            ..
+        } => {
             assert_eq!(*level, None);
             assert!(!*across_gap);
             assert_eq!(*cause, CloseCause::Command);
@@ -326,7 +484,10 @@ fn pending_fill_on_a_gap_opens_at_the_market_not_at_the_level() {
 
     let pos = b.positions(ALICE);
     assert_eq!(pos.len(), 1, "ордер обязан был открыть позицию");
-    assert_eq!(pos[0].entry, 5_300_000, "вход по рынку: клиент купил дешевле, чем просил");
+    assert_eq!(
+        pos[0].entry, 5_300_000,
+        "вход по рынку: клиент купил дешевле, чем просил"
+    );
 
     let ev = b.take_events(ALICE);
     let fill = ev
@@ -334,7 +495,12 @@ fn pending_fill_on_a_gap_opens_at_the_market_not_at_the_level() {
         .find(|k| matches!(k, EventKind::PendingTriggered { .. }))
         .expect("сработавший ордер обязан быть в событиях");
     match fill {
-        EventKind::PendingTriggered { price, exec, across_gap, .. } => {
+        EventKind::PendingTriggered {
+            price,
+            exec,
+            across_gap,
+            ..
+        } => {
             assert_eq!(*price, 5_900_000, "уровень ордера");
             assert_eq!(*exec, Some(5_300_000), "и цена, по которой он исполнен");
             assert!(*across_gap);

@@ -43,8 +43,8 @@
 use std::fmt::Write as _;
 
 use crate::{
-    margin_for, merged_entry, realized_on_close, AccountSnapshot, Cents, ClosedDeal, PendingOrder, PosSide, Position,
-    PositionModel,
+    margin_for, merged_entry, realized_on_close, AccountSnapshot, Cents, ClosedDeal, PendingOrder,
+    PosSide, Position, PositionModel,
 };
 
 // ============================== Кто и почему ================================
@@ -82,7 +82,11 @@ impl Operator {
         if incident.trim().is_empty() {
             return Err(BadOperator("ручная проводка без ссылки на инцидент"));
         }
-        Ok(Self { who: who.trim().to_string(), reason: reason.trim().to_string(), incident: incident.trim().to_string() })
+        Ok(Self {
+            who: who.trim().to_string(),
+            reason: reason.trim().to_string(),
+            incident: incident.trim().to_string(),
+        })
     }
 
     pub fn who(&self) -> &str {
@@ -169,7 +173,13 @@ pub enum EventKind {
         tp: Option<i64>,
     },
     /// Доливка: к позиции добавлен объём по своей цене (неттинг).
-    PositionIncreased { id: u64, add_qty: i64, add_entry: i64, sl: Option<i64>, tp: Option<i64> },
+    PositionIncreased {
+        id: u64,
+        add_qty: i64,
+        add_entry: i64,
+        sl: Option<i64>,
+        tp: Option<i64>,
+    },
     /// Частичное сворачивание: закрыта часть объёма по цене `exit`.
     PositionReduced { id: u64, qty: i64, exit: i64 },
     /// Позиция закрыта целиком.
@@ -190,7 +200,13 @@ pub enum EventKind {
     ///
     /// `across_gap` — закрытие случилось на первом тике после молчания фида,
     /// то есть ряд цены был разорван (Р-073).
-    PositionClosed { id: u64, exit: i64, cause: CloseCause, level: Option<i64>, across_gap: bool },
+    PositionClosed {
+        id: u64,
+        exit: i64,
+        cause: CloseCause,
+        level: Option<i64>,
+        across_gap: bool,
+    },
     /// Размещён отложенный ордер.
     PendingPlaced {
         id: u64,
@@ -214,7 +230,12 @@ pub enum EventKind {
     /// покупка срабатывает, когда рынок опустился до уровня или ниже, продажа
     /// — когда поднялся до уровня или выше. Разрыв здесь играет за клиента, и
     /// это то же правило, а не исключение из него.
-    PendingTriggered { id: u64, price: i64, exec: Option<i64>, across_gap: bool },
+    PendingTriggered {
+        id: u64,
+        price: i64,
+        exec: Option<i64>,
+        across_gap: bool,
+    },
 }
 
 // ------------------------- Каноническая запись -------------------------------
@@ -248,22 +269,33 @@ fn side_tag(s: PosSide) -> &'static str {
 /// Разобрать запись вида `ключ=значение` в пары. Порядок не важен, лишние поля — отказ.
 fn fields(rest: &str) -> Result<Vec<(&str, &str)>, BadRecord> {
     rest.split_whitespace()
-        .map(|kv| kv.split_once('=').ok_or(BadRecord("поле записи без знака равенства")))
+        .map(|kv| {
+            kv.split_once('=')
+                .ok_or(BadRecord("поле записи без знака равенства"))
+        })
         .collect()
 }
 
 fn pick<'a>(fs: &[(&'a str, &'a str)], key: &str) -> Result<&'a str, BadRecord> {
-    fs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v).ok_or(BadRecord("в записи нет обязательного поля"))
+    fs.iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| *v)
+        .ok_or(BadRecord("в записи нет обязательного поля"))
 }
 
 fn num<T: std::str::FromStr>(fs: &[(&str, &str)], key: &str) -> Result<T, BadRecord> {
-    pick(fs, key)?.parse().map_err(|_| BadRecord("поле записи не число"))
+    pick(fs, key)?
+        .parse()
+        .map_err(|_| BadRecord("поле записи не число"))
 }
 
 fn num_opt(fs: &[(&str, &str)], key: &str) -> Result<Option<i64>, BadRecord> {
     match pick(fs, key)? {
         "-" => Ok(None),
-        v => v.parse().map(Some).map_err(|_| BadRecord("поле записи не число")),
+        v => v
+            .parse()
+            .map(Some)
+            .map_err(|_| BadRecord("поле записи не число")),
     }
 }
 
@@ -278,7 +310,10 @@ fn num_opt_added_later(fs: &[(&str, &str)], key: &str) -> Result<Option<i64>, Ba
     match fs.iter().find(|(k, _)| *k == key) {
         None => Ok(None),
         Some((_, "-")) => Ok(None),
-        Some((_, v)) => v.parse().map(Some).map_err(|_| BadRecord("поле записи не число")),
+        Some((_, v)) => v
+            .parse()
+            .map(Some)
+            .map_err(|_| BadRecord("поле записи не число")),
     }
 }
 
@@ -365,7 +400,9 @@ impl EventKind {
         let (tag, rest) = s.split_once(' ').unwrap_or((s, ""));
         let f = fields(rest)?;
         Ok(match tag {
-            "account_opened" => EventKind::AccountOpened { balance: num(&f, "balance")? },
+            "account_opened" => EventKind::AccountOpened {
+                balance: num(&f, "balance")?,
+            },
             "model_adopted" => EventKind::ModelAdopted {
                 model: match pick(&f, "model")? {
                     "hedging" => PositionModel::Hedging,
@@ -373,8 +410,12 @@ impl EventKind {
                     _ => return Err(BadRecord("неизвестная модель позиций")),
                 },
             },
-            "deposited" => EventKind::Deposited { amount: num(&f, "amount")? },
-            "withdrawn" => EventKind::Withdrawn { amount: num(&f, "amount")? },
+            "deposited" => EventKind::Deposited {
+                amount: num(&f, "amount")?,
+            },
+            "withdrawn" => EventKind::Withdrawn {
+                amount: num(&f, "amount")?,
+            },
             "position_opened" => EventKind::PositionOpened {
                 id: num(&f, "id")?,
                 instrument: num(&f, "instrument")?,
@@ -393,9 +434,11 @@ impl EventKind {
                 sl: num_opt(&f, "sl")?,
                 tp: num_opt(&f, "tp")?,
             },
-            "position_reduced" => {
-                EventKind::PositionReduced { id: num(&f, "id")?, qty: num(&f, "qty")?, exit: num(&f, "exit")? }
-            }
+            "position_reduced" => EventKind::PositionReduced {
+                id: num(&f, "id")?,
+                qty: num(&f, "qty")?,
+                exit: num(&f, "exit")?,
+            },
             "position_closed" => EventKind::PositionClosed {
                 id: num(&f, "id")?,
                 exit: num(&f, "exit")?,
@@ -455,7 +498,11 @@ fn origin_canon(o: &Origin) -> String {
         Origin::Client => "client".to_string(),
         Origin::Operator(op) => {
             let mut s = String::from("operator");
-            for (k, v) in [("who", op.who()), ("reason", op.reason()), ("incident", op.incident())] {
+            for (k, v) in [
+                ("who", op.who()),
+                ("reason", op.reason()),
+                ("incident", op.incident()),
+            ] {
                 let _ = write!(s, "|{k}:{}:{v}", v.len());
             }
             s
@@ -501,8 +548,14 @@ impl AccountEvent {
 
     /// Пересчитать собственный отпечаток из содержимого.
     fn digest(&self) -> u128 {
-        let text =
-            format!("{}|{}|{}|{}|{:032x}", self.seq, self.at_ms, origin_canon(&self.origin), self.kind.encode(), self.prev);
+        let text = format!(
+            "{}|{}|{}|{}|{:032x}",
+            self.seq,
+            self.at_ms,
+            origin_canon(&self.origin),
+            self.kind.encode(),
+            self.prev
+        );
         fingerprint(text.as_bytes())
     }
 
@@ -511,8 +564,22 @@ impl AccountEvent {
     /// Отпечаток сознательно не пересчитывается: иначе правка строки в базе молча
     /// получила бы свежий, сходящийся отпечаток, и цепочка перестала бы что-либо
     /// значить. Расхождение ловит [`Journal::verify`] при подъёме.
-    pub fn from_storage(seq: u64, at_ms: i64, origin: Origin, kind: EventKind, prev: u128, hash: u128) -> Self {
-        Self { seq, at_ms, origin, kind, prev, hash }
+    pub fn from_storage(
+        seq: u64,
+        at_ms: i64,
+        origin: Origin,
+        kind: EventKind,
+        prev: u128,
+        hash: u128,
+    ) -> Self {
+        Self {
+            seq,
+            at_ms,
+            origin,
+            kind,
+            prev,
+            hash,
+        }
     }
 }
 
@@ -567,7 +634,17 @@ impl ReplayState {
             EventKind::ModelAdopted { model } => self.model = *model,
             EventKind::Deposited { amount } => self.balance += *amount,
             EventKind::Withdrawn { amount } => self.balance -= *amount,
-            EventKind::PositionOpened { id, instrument, side, qty, entry, pd, qd, sl, tp } => {
+            EventKind::PositionOpened {
+                id,
+                instrument,
+                side,
+                qty,
+                entry,
+                pd,
+                qd,
+                sl,
+                tp,
+            } => {
                 self.next_id = self.next_id.max(*id);
                 self.positions.push(Position {
                     id: *id,
@@ -582,7 +659,13 @@ impl ReplayState {
                     tp: *tp,
                 });
             }
-            EventKind::PositionIncreased { id, add_qty, add_entry, sl, tp } => {
+            EventKind::PositionIncreased {
+                id,
+                add_qty,
+                add_entry,
+                sl,
+                tp,
+            } => {
                 let Some(p) = self.pos_mut(*id) else {
                     self.orphans.push(*id);
                     return;
@@ -626,7 +709,13 @@ impl ReplayState {
             // исполнения не изменили, баланс обязан получаться тот же, что и
             // до появления этих полей, иначе расширение журнала молча
             // переписало бы историю счетов.
-            EventKind::PositionClosed { id, exit, cause: _, level: _, across_gap: _ } => {
+            EventKind::PositionClosed {
+                id,
+                exit,
+                cause: _,
+                level: _,
+                across_gap: _,
+            } => {
                 let Some(i) = self.positions.iter().position(|p| p.id == *id) else {
                     self.orphans.push(*id);
                     return;
@@ -645,7 +734,17 @@ impl ReplayState {
                     qd: p.qd,
                 });
             }
-            EventKind::PendingPlaced { id, instrument, side, qty, price, pd, qd, sl, tp } => {
+            EventKind::PendingPlaced {
+                id,
+                instrument,
+                side,
+                qty,
+                price,
+                pd,
+                qd,
+                sl,
+                tp,
+            } => {
                 self.next_id = self.next_id.max(*id);
                 self.pendings.push(PendingOrder {
                     id: *id,
@@ -691,7 +790,9 @@ impl std::fmt::Display for JournalFault {
                 write!(f, "журнал: ожидалась запись №{expected}, пришла №{got} — запись вставлена или потеряна")
             }
             JournalFault::Chain { seq } => write!(f, "журнал: запись №{seq} не продолжает цепочку"),
-            JournalFault::Tampered { seq } => write!(f, "журнал: запись №{seq} изменена после записи"),
+            JournalFault::Tampered { seq } => {
+                write!(f, "журнал: запись №{seq} изменена после записи")
+            }
         }
     }
 }
@@ -712,7 +813,12 @@ pub struct Journal {
 impl Journal {
     pub fn new(leverage: i128, start_balance: Cents) -> Self {
         let lev = leverage.max(1);
-        Self { events: Vec::new(), state: ReplayState::new(start_balance), lev, start_balance }
+        Self {
+            events: Vec::new(),
+            state: ReplayState::new(start_balance),
+            lev,
+            start_balance,
+        }
     }
 
     /// Поднять журнал из хранилища: проверить цепочку целиком и свернуть.
@@ -722,7 +828,11 @@ impl Journal {
     /// по одной через [`Journal::commit`]. Разница не стилистическая: при поштучной
     /// проверке `verify` не вызывался бы ниоткуда, и снятие его мутацией не красило
     /// бы ни одного теста — проверка существовала бы на бумаге. Так и нашлось.
-    pub fn load(leverage: i128, start_balance: Cents, events: Vec<AccountEvent>) -> Result<Self, JournalFault> {
+    pub fn load(
+        leverage: i128,
+        start_balance: Cents,
+        events: Vec<AccountEvent>,
+    ) -> Result<Self, JournalFault> {
         let mut j = Journal::new(leverage, start_balance);
         j.events = events;
         j.verify()?;
@@ -752,7 +862,14 @@ impl Journal {
         let mut prev = self.events.last().map(|e| e.hash).unwrap_or(0);
         for (i, k) in kinds.iter().enumerate() {
             let seq = last_seq + i as u64 + 1;
-            let mut e = AccountEvent { seq, at_ms, origin: origin.clone(), kind: k.clone(), prev, hash: 0 };
+            let mut e = AccountEvent {
+                seq,
+                at_ms,
+                origin: origin.clone(),
+                kind: k.clone(),
+                prev,
+                hash: 0,
+            };
             e.hash = e.digest();
             prev = e.hash;
             out.push(e);
@@ -774,7 +891,10 @@ impl Journal {
     pub fn commit(&mut self, e: AccountEvent) -> Result<(), JournalFault> {
         let expected_seq = self.events.last().map(|x| x.seq).unwrap_or(0) + 1;
         if e.seq != expected_seq {
-            return Err(JournalFault::Sequence { expected: expected_seq, got: e.seq });
+            return Err(JournalFault::Sequence {
+                expected: expected_seq,
+                got: e.seq,
+            });
         }
         let expected_prev = self.events.last().map(|x| x.hash).unwrap_or(0);
         if e.prev != expected_prev {
@@ -796,7 +916,10 @@ impl Journal {
         for (i, e) in self.events.iter().enumerate() {
             let expected_seq = i as u64 + 1;
             if e.seq != expected_seq {
-                return Err(JournalFault::Sequence { expected: expected_seq, got: e.seq });
+                return Err(JournalFault::Sequence {
+                    expected: expected_seq,
+                    got: e.seq,
+                });
             }
             if e.prev != prev {
                 return Err(JournalFault::Chain { seq: e.seq });
@@ -890,21 +1013,34 @@ pub fn reconcile(state: &ReplayState, snap: &AccountSnapshot) -> Vec<Divergence>
     let mut d = |msg: String| out.push(Divergence(msg));
 
     if state.balance != snap.balance {
-        d(format!("баланс: по журналу {}, в слепке {}", state.balance, snap.balance));
+        d(format!(
+            "баланс: по журналу {}, в слепке {}",
+            state.balance, snap.balance
+        ));
     }
     let used_journal = state.used_margin();
     let used_snap: Cents = snap.positions.iter().map(|p| p.margin).sum();
     if used_journal != used_snap {
-        d(format!("занятая маржа: по журналу {used_journal}, в слепке {used_snap}"));
+        d(format!(
+            "занятая маржа: по журналу {used_journal}, в слепке {used_snap}"
+        ));
     }
     if state.next_id != snap.next_id {
-        d(format!("счётчик id: по журналу {}, в слепке {}", state.next_id, snap.next_id));
+        d(format!(
+            "счётчик id: по журналу {}, в слепке {}",
+            state.next_id, snap.next_id
+        ));
     }
     if state.model != snap.model {
-        d(format!("модель позиций: по журналу {:?}, в слепке {:?}", state.model, snap.model));
+        d(format!(
+            "модель позиций: по журналу {:?}, в слепке {:?}",
+            state.model, snap.model
+        ));
     }
     for id in &state.orphans {
-        d(format!("событие журнала ссылается на неизвестную позицию или ордер {id}"));
+        d(format!(
+            "событие журнала ссылается на неизвестную позицию или ордер {id}"
+        ));
     }
 
     // Позиции — по id, а не по порядку: в слепке они приходят из HashMap.
@@ -915,20 +1051,32 @@ pub fn reconcile(state: &ReplayState, snap: &AccountSnapshot) -> Vec<Divergence>
     let jids: Vec<u64> = jp.iter().map(|p| p.id).collect();
     let sids: Vec<u64> = sp.iter().map(|p| p.id).collect();
     if jids != sids {
-        d(format!("открытые позиции: по журналу {jids:?}, в слепке {sids:?}"));
+        d(format!(
+            "открытые позиции: по журналу {jids:?}, в слепке {sids:?}"
+        ));
     } else {
         for (a, b) in jp.iter().zip(sp.iter()) {
-            if a.instrument != b.instrument || a.side != b.side || a.qty != b.qty || a.entry != b.entry {
+            if a.instrument != b.instrument
+                || a.side != b.side
+                || a.qty != b.qty
+                || a.entry != b.entry
+            {
                 d(format!(
                     "позиция {}: по журналу {:?} {} @ {} (инструмент {}), в слепке {:?} {} @ {} (инструмент {})",
                     a.id, a.side, a.qty, a.entry, a.instrument, b.side, b.qty, b.entry, b.instrument
                 ));
             }
             if a.margin != b.margin {
-                d(format!("позиция {}: маржа по журналу {}, в слепке {}", a.id, a.margin, b.margin));
+                d(format!(
+                    "позиция {}: маржа по журналу {}, в слепке {}",
+                    a.id, a.margin, b.margin
+                ));
             }
             if a.sl != b.sl || a.tp != b.tp {
-                d(format!("позиция {}: SL/TP по журналу {:?}/{:?}, в слепке {:?}/{:?}", a.id, a.sl, a.tp, b.sl, b.tp));
+                d(format!(
+                    "позиция {}: SL/TP по журналу {:?}/{:?}, в слепке {:?}/{:?}",
+                    a.id, a.sl, a.tp, b.sl, b.tp
+                ));
             }
         }
     }
@@ -938,14 +1086,25 @@ pub fn reconcile(state: &ReplayState, snap: &AccountSnapshot) -> Vec<Divergence>
     jo.sort_unstable();
     so.sort_unstable();
     if jo != so {
-        d(format!("отложенные ордера: по журналу {jo:?}, в слепке {so:?}"));
+        d(format!(
+            "отложенные ордера: по журналу {jo:?}, в слепке {so:?}"
+        ));
     }
 
     if state.closed.len() != snap.closed.len() {
-        d(format!("история сделок: по журналу {} записей, в слепке {}", state.closed.len(), snap.closed.len()));
+        d(format!(
+            "история сделок: по журналу {} записей, в слепке {}",
+            state.closed.len(),
+            snap.closed.len()
+        ));
     } else {
         for (i, (a, b)) in state.closed.iter().zip(snap.closed.iter()).enumerate() {
-            if a.qty != b.qty || a.entry != b.entry || a.exit != b.exit || a.pnl != b.pnl || a.side != b.side {
+            if a.qty != b.qty
+                || a.entry != b.entry
+                || a.exit != b.exit
+                || a.pnl != b.pnl
+                || a.side != b.side
+            {
                 d(format!(
                     "сделка {i}: по журналу {} @ {}→{} P&L {}, в слепке {} @ {}→{} P&L {}",
                     a.qty, a.entry, a.exit, a.pnl, b.qty, b.entry, b.exit, b.pnl
@@ -974,7 +1133,11 @@ pub fn audit(journal: &Journal, snap: &AccountSnapshot) -> JournalStatus {
             && snap.pendings.is_empty()
             && snap.closed.is_empty()
             && snap.next_id == 0;
-        return if fresh { JournalStatus::Reconciled } else { JournalStatus::NoEntries };
+        return if fresh {
+            JournalStatus::Reconciled
+        } else {
+            JournalStatus::NoEntries
+        };
     }
     let ds = reconcile(&replayed, snap);
     if ds.is_empty() {
@@ -995,8 +1158,12 @@ mod tests {
 
     fn ops() -> Vec<EventKind> {
         vec![
-            EventKind::AccountOpened { balance: 10_000_000 },
-            EventKind::ModelAdopted { model: PositionModel::Netting },
+            EventKind::AccountOpened {
+                balance: 10_000_000,
+            },
+            EventKind::ModelAdopted {
+                model: PositionModel::Netting,
+            },
             EventKind::Deposited { amount: 50_000 },
             EventKind::Withdrawn { amount: 1 },
             EventKind::PositionOpened {
@@ -1010,9 +1177,25 @@ mod tests {
                 sl: Some(4900),
                 tp: None,
             },
-            EventKind::PositionIncreased { id: 1, add_qty: 300, add_entry: 5400, sl: None, tp: Some(5500) },
-            EventKind::PositionReduced { id: 1, qty: 150, exit: 5600 },
-            EventKind::PositionClosed { id: 1, exit: 5100, cause: CloseCause::StopLoss, level: Some(5050), across_gap: true },
+            EventKind::PositionIncreased {
+                id: 1,
+                add_qty: 300,
+                add_entry: 5400,
+                sl: None,
+                tp: Some(5500),
+            },
+            EventKind::PositionReduced {
+                id: 1,
+                qty: 150,
+                exit: 5600,
+            },
+            EventKind::PositionClosed {
+                id: 1,
+                exit: 5100,
+                cause: CloseCause::StopLoss,
+                level: Some(5050),
+                across_gap: true,
+            },
             EventKind::PendingPlaced {
                 id: 2,
                 instrument: 3,
@@ -1025,7 +1208,12 @@ mod tests {
                 tp: None,
             },
             EventKind::PendingCancelled { id: 2 },
-            EventKind::PendingTriggered { id: 2, price: 4000, exec: Some(3990), across_gap: false },
+            EventKind::PendingTriggered {
+                id: 2,
+                price: 4000,
+                exec: Some(3990),
+                across_gap: false,
+            },
         ]
     }
 
@@ -1037,7 +1225,11 @@ mod tests {
     fn every_event_survives_the_round_trip() {
         for k in ops() {
             let text = k.encode();
-            assert_eq!(EventKind::decode(&text), Ok(k.clone()), "не пережило round-trip: {text}");
+            assert_eq!(
+                EventKind::decode(&text),
+                Ok(k.clone()),
+                "не пережило round-trip: {text}"
+            );
         }
     }
 
@@ -1045,14 +1237,40 @@ mod tests {
     /// это разные ответы на претензию, и склеивать их нельзя.
     #[test]
     fn close_causes_are_distinguishable() {
-        let causes = [CloseCause::Command, CloseCause::StopLoss, CloseCause::TakeProfit, CloseCause::Netting];
-        let mut texts: Vec<String> =
-            causes.iter().map(|c| EventKind::PositionClosed { id: 1, exit: 1, cause: *c, level: None, across_gap: false }.encode()).collect();
+        let causes = [
+            CloseCause::Command,
+            CloseCause::StopLoss,
+            CloseCause::TakeProfit,
+            CloseCause::Netting,
+        ];
+        let mut texts: Vec<String> = causes
+            .iter()
+            .map(|c| {
+                EventKind::PositionClosed {
+                    id: 1,
+                    exit: 1,
+                    cause: *c,
+                    level: None,
+                    across_gap: false,
+                }
+                .encode()
+            })
+            .collect();
         texts.sort();
         texts.dedup();
-        assert_eq!(texts.len(), causes.len(), "причины закрытия обязаны различаться в записи");
+        assert_eq!(
+            texts.len(),
+            causes.len(),
+            "причины закрытия обязаны различаться в записи"
+        );
         for c in causes {
-            let k = EventKind::PositionClosed { id: 1, exit: 1, cause: c, level: None, across_gap: false };
+            let k = EventKind::PositionClosed {
+                id: 1,
+                exit: 1,
+                cause: c,
+                level: None,
+                across_gap: false,
+            };
             assert_eq!(EventKind::decode(&k.encode()), Ok(k));
         }
     }
@@ -1082,16 +1300,24 @@ mod tests {
         let old_fill = "pending_triggered id=9 price=4000";
         assert_eq!(
             EventKind::decode(old_fill),
-            Ok(EventKind::PendingTriggered { id: 9, price: 4000, exec: None, across_gap: false })
+            Ok(EventKind::PendingTriggered {
+                id: 9,
+                price: 4000,
+                exec: None,
+                across_gap: false
+            })
         );
     }
 
     /// Терпимость к ОТСУТСТВИЮ поля — не терпимость к мусору в нём.
     #[test]
     fn present_but_unreadable_new_field_is_still_corruption() {
-        assert!(EventKind::decode("position_closed id=7 exit=5100 cause=stop_loss level=кот").is_err());
         assert!(
-            EventKind::decode("position_closed id=7 exit=5100 cause=stop_loss gap=может_быть").is_err(),
+            EventKind::decode("position_closed id=7 exit=5100 cause=stop_loss level=кот").is_err()
+        );
+        assert!(
+            EventKind::decode("position_closed id=7 exit=5100 cause=stop_loss gap=может_быть")
+                .is_err(),
             "признак разрыва принимает только 0 и 1: «может быть» в журнале не бывает"
         );
     }
@@ -1126,7 +1352,10 @@ mod tests {
     #[test]
     fn unknown_record_is_refused_not_guessed() {
         assert!(EventKind::decode("teleported amount=1").is_err());
-        assert!(EventKind::decode("deposited").is_err(), "нет обязательного поля — отказ");
+        assert!(
+            EventKind::decode("deposited").is_err(),
+            "нет обязательного поля — отказ"
+        );
         assert!(EventKind::decode("deposited amount=много").is_err());
     }
 
@@ -1137,9 +1366,18 @@ mod tests {
     /// журнал и все уже посчитанные отпечатки.
     #[test]
     fn manual_entry_without_who_reason_or_incident_is_refused() {
-        assert!(Operator::new("", "сбой PSP", "INC-42").is_err(), "без исполнителя");
-        assert!(Operator::new("ops@x", "   ", "INC-42").is_err(), "без основания");
-        assert!(Operator::new("ops@x", "сбой PSP", "").is_err(), "без инцидента");
+        assert!(
+            Operator::new("", "сбой PSP", "INC-42").is_err(),
+            "без исполнителя"
+        );
+        assert!(
+            Operator::new("ops@x", "   ", "INC-42").is_err(),
+            "без основания"
+        );
+        assert!(
+            Operator::new("ops@x", "сбой PSP", "").is_err(),
+            "без инцидента"
+        );
         assert!(Operator::new("ops@x", "сбой PSP", "INC-42").is_ok());
     }
 
@@ -1149,21 +1387,44 @@ mod tests {
     #[test]
     fn manual_posting_is_recorded_and_moves_the_replayed_balance() {
         let mut j = Journal::new(1, 10_000_000);
-        let op = Origin::Operator(Operator::new("ops@platform", "платёж прошёл у провайдера", "INC-42").unwrap());
-        for e in j.seal(1_700_000_000_000, &Origin::Client, &[EventKind::AccountOpened { balance: 10_000_000 }]) {
+        let op = Origin::Operator(
+            Operator::new("ops@platform", "платёж прошёл у провайдера", "INC-42").unwrap(),
+        );
+        for e in j.seal(
+            1_700_000_000_000,
+            &Origin::Client,
+            &[EventKind::AccountOpened {
+                balance: 10_000_000,
+            }],
+        ) {
             j.commit(e).unwrap();
         }
-        for e in j.seal(1_700_000_001_000, &op, &[EventKind::Deposited { amount: 250_000 }]) {
+        for e in j.seal(
+            1_700_000_001_000,
+            &op,
+            &[EventKind::Deposited { amount: 250_000 }],
+        ) {
             j.commit(e).unwrap();
         }
 
         let last = j.events().last().unwrap();
-        let who = last.origin().operator().expect("проводка обязана остаться ручной");
+        let who = last
+            .origin()
+            .operator()
+            .expect("проводка обязана остаться ручной");
         assert_eq!(who.who(), "ops@platform");
         assert_eq!(who.reason(), "платёж прошёл у провайдера");
         assert_eq!(who.incident(), "INC-42");
-        assert_eq!(last.at_ms(), 1_700_000_001_000, "когда — часть записи, а не догадка по порядку");
-        assert_eq!(j.replay().balance, 10_250_000, "остаток выводится из проводки, а не правится");
+        assert_eq!(
+            last.at_ms(),
+            1_700_000_001_000,
+            "когда — часть записи, а не догадка по порядку"
+        );
+        assert_eq!(
+            j.replay().balance,
+            10_250_000,
+            "остаток выводится из проводки, а не правится"
+        );
     }
 
     /// Источник входит в отпечаток: подменить «система» на «клиент» задним числом
@@ -1175,7 +1436,11 @@ mod tests {
         let k = [EventKind::Deposited { amount: 1 }];
         let a = j.seal(1, &Origin::System, &k);
         let b = j.seal(1, &Origin::Client, &k);
-        assert_ne!(a[0].hash(), b[0].hash(), "источник обязан влиять на отпечаток");
+        assert_ne!(
+            a[0].hash(),
+            b[0].hash(),
+            "источник обязан влиять на отпечаток"
+        );
     }
 
     // ---- Неизменяемость ------------------------------------------------------
@@ -1183,7 +1448,9 @@ mod tests {
     fn filled() -> Journal {
         let mut j = Journal::new(1, 10_000_000);
         let kinds = [
-            EventKind::AccountOpened { balance: 10_000_000 },
+            EventKind::AccountOpened {
+                balance: 10_000_000,
+            },
             EventKind::Deposited { amount: 500 },
             EventKind::PositionOpened {
                 id: 1,
@@ -1240,10 +1507,20 @@ mod tests {
             0,
         );
         let h = probe.digest();
-        rows[1] =
-            AccountEvent::from_storage(probe.seq(), probe.at_ms(), probe.origin().clone(), probe.kind().clone(), probe.prev(), h);
+        rows[1] = AccountEvent::from_storage(
+            probe.seq(),
+            probe.at_ms(),
+            probe.origin().clone(),
+            probe.kind().clone(),
+            probe.prev(),
+            h,
+        );
         let faulted = Journal::load(1, 10_000_000, rows).expect_err("подделка обязана ловиться");
-        assert_eq!(faulted, JournalFault::Chain { seq: 3 }, "следующая запись ссылается на прежний отпечаток");
+        assert_eq!(
+            faulted,
+            JournalFault::Chain { seq: 3 },
+            "следующая запись ссылается на прежний отпечаток"
+        );
     }
 
     /// Изъятая запись ловится нумерацией. «Потерялось» и «не было» — разные истории.
@@ -1253,7 +1530,13 @@ mod tests {
         let mut rows: Vec<AccountEvent> = j.events().to_vec();
         rows.remove(1);
         let faulted = Journal::load(1, 10_000_000, rows).expect_err("пропажа обязана ловиться");
-        assert_eq!(faulted, JournalFault::Sequence { expected: 2, got: 3 });
+        assert_eq!(
+            faulted,
+            JournalFault::Sequence {
+                expected: 2,
+                got: 3
+            }
+        );
     }
 
     /// Запечатывание ленту не меняет: пока запись не сохранена, её в журнале нет.
@@ -1263,11 +1546,23 @@ mod tests {
         let j = filled();
         let before_len = j.len();
         let before_balance = j.state().balance;
-        let sealed = j.seal(9_999, &Origin::Client, &[EventKind::Deposited { amount: 777 }]);
+        let sealed = j.seal(
+            9_999,
+            &Origin::Client,
+            &[EventKind::Deposited { amount: 777 }],
+        );
         let preview = j.preview(&sealed);
         assert_eq!(j.len(), before_len, "лента не должна пополниться до записи");
-        assert_eq!(j.state().balance, before_balance, "состояние журнала не должно измениться");
-        assert_eq!(preview.balance, before_balance + 777, "а предпросмотр обязан показать будущее");
+        assert_eq!(
+            j.state().balance,
+            before_balance,
+            "состояние журнала не должно измениться"
+        );
+        assert_eq!(
+            preview.balance,
+            before_balance + 777,
+            "а предпросмотр обязан показать будущее"
+        );
     }
 
     /// Продолжение ленты проверяется и в бою, а не только при подъёме: запись,
@@ -1275,11 +1570,29 @@ mod tests {
     #[test]
     fn commit_refuses_a_record_that_does_not_continue_the_lane() {
         let mut j = filled();
-        let mut two = j.seal(5_000, &Origin::Client, &[EventKind::Deposited { amount: 1 }, EventKind::Deposited { amount: 2 }]);
+        let mut two = j.seal(
+            5_000,
+            &Origin::Client,
+            &[
+                EventKind::Deposited { amount: 1 },
+                EventKind::Deposited { amount: 2 },
+            ],
+        );
         let second = two.remove(1);
         let len_before = j.len();
-        assert_eq!(j.commit(second), Err(JournalFault::Sequence { expected: 4, got: 5 }), "дыра в ленте — отказ");
-        assert_eq!(j.len(), len_before, "отказавшая запись не должна попадать в ленту");
+        assert_eq!(
+            j.commit(second),
+            Err(JournalFault::Sequence {
+                expected: 4,
+                got: 5
+            }),
+            "дыра в ленте — отказ"
+        );
+        assert_eq!(
+            j.len(),
+            len_before,
+            "отказавшая запись не должна попадать в ленту"
+        );
     }
 
     /// Поддерживаемая свёртка обязана совпадать с полным пересчётом. Сравнение
@@ -1319,7 +1632,10 @@ mod tests {
         let mut s = snap_of(&j);
         s.balance += 1;
         let ds = reconcile(&j.replay(), &s);
-        assert!(ds.iter().any(|d| d.0.contains("баланс")), "расхождение остатка обязано ловиться: {ds:?}");
+        assert!(
+            ds.iter().any(|d| d.0.contains("баланс")),
+            "расхождение остатка обязано ловиться: {ds:?}"
+        );
     }
 
     #[test]
@@ -1327,12 +1643,17 @@ mod tests {
         let j = filled();
         let mut s = snap_of(&j);
         s.positions.clear();
-        assert!(reconcile(&j.replay(), &s).iter().any(|d| d.0.contains("позиции")));
+        assert!(reconcile(&j.replay(), &s)
+            .iter()
+            .any(|d| d.0.contains("позиции")));
 
         let mut s2 = snap_of(&j);
         s2.positions[0].margin += 7;
         let ds = reconcile(&j.replay(), &s2);
-        assert!(ds.iter().any(|d| d.0.contains("маржа")), "дрейф маржи обязан ловиться: {ds:?}");
+        assert!(
+            ds.iter().any(|d| d.0.contains("маржа")),
+            "дрейф маржи обязан ловиться: {ds:?}"
+        );
     }
 
     /// Событие, которое не дошло до журнала, — самый вероятный дефект: кто-то добавит
@@ -1343,7 +1664,10 @@ mod tests {
         let mut s = snap_of(&j);
         s.balance += 100_000; // деньги пришли, записи о них нет
         let status = audit(&j, &s);
-        assert!(matches!(status, JournalStatus::Diverged(_)), "непрописанное пополнение обязано ловиться: {status}");
+        assert!(
+            matches!(status, JournalStatus::Diverged(_)),
+            "непрописанное пополнение обязано ловиться: {status}"
+        );
     }
 
     /// «Записей нет» — отдельный диагноз, не «расхождение» и не «всё хорошо».
@@ -1363,7 +1687,10 @@ mod tests {
         assert_eq!(audit(&j, &live).tag(), "no_entries");
 
         // А пустой журнал над нетронутым счётом — это норма, а не беда.
-        let fresh = AccountSnapshot { balance: 10_000_000, ..Default::default() };
+        let fresh = AccountSnapshot {
+            balance: 10_000_000,
+            ..Default::default()
+        };
         assert_eq!(audit(&j, &fresh), JournalStatus::Reconciled);
     }
 
@@ -1378,7 +1705,11 @@ mod tests {
         ];
         tags.sort_unstable();
         tags.dedup();
-        assert_eq!(tags.len(), 4, "диагнозы обязаны различаться кодом, а не только текстом");
+        assert_eq!(
+            tags.len(),
+            4,
+            "диагнозы обязаны различаться кодом, а не только текстом"
+        );
     }
 
     /// Событие о позиции, которой нет, не пропускается молча: свёртка, тихо
@@ -1386,11 +1717,22 @@ mod tests {
     #[test]
     fn event_about_an_unknown_position_is_not_swallowed() {
         let mut j = Journal::new(1, 0);
-        for e in j.seal(1, &Origin::System, &[EventKind::PositionReduced { id: 42, qty: 1, exit: 1 }]) {
+        for e in j.seal(
+            1,
+            &Origin::System,
+            &[EventKind::PositionReduced {
+                id: 42,
+                qty: 1,
+                exit: 1,
+            }],
+        ) {
             j.commit(e).unwrap();
         }
         assert_eq!(j.state().orphans, vec![42]);
         let ds = reconcile(&j.replay(), &AccountSnapshot::default());
-        assert!(ds.iter().any(|d| d.0.contains("неизвестную позицию")), "{ds:?}");
+        assert!(
+            ds.iter().any(|d| d.0.contains("неизвестную позицию")),
+            "{ds:?}"
+        );
     }
 }

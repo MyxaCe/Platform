@@ -24,8 +24,8 @@ async fn main() {
     if let Err(e) = gateway::restore_state(&state).await {
         panic!("[gateway] не удалось поднять состояние: {e}");
     }
-    gateway::feed::spawn(state.clone());    // реальные данные с Binance (ADR-013)
-    gateway::spawn_monitor(state.clone());  // триггеры лимитных ордеров и SL/TP (ADR-014)
+    gateway::feed::spawn(state.clone()); // реальные данные с Binance (ADR-013)
+    gateway::spawn_monitor(state.clone()); // триггеры лимитных ордеров и SL/TP (ADR-014)
 
     let app = gateway::router(state);
     let addr = "0.0.0.0:8080";

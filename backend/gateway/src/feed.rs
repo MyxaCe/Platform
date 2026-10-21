@@ -20,8 +20,8 @@ const WS: &str = "wss://stream.binance.com:9443";
 #[derive(Clone)]
 pub struct FeedInstrument {
     pub id: u32,
-    pub symbol: String,   // отображаемый, "ETH-USDT"
-    pub binance: String,  // "ETHUSDT"
+    pub symbol: String,  // отображаемый, "ETH-USDT"
+    pub binance: String, // "ETHUSDT"
     pub base: u32,
     pub quote: u32,
     pub price_decimals: u8,
@@ -51,14 +51,36 @@ pub struct Kline {
 
 /// Топ-30 крипто-пар: (Binance-символ, price_decimals, qty_decimals).
 const DEFS: &[(&str, u8, u8)] = &[
-    ("BTCUSDT", 2, 5), ("ETHUSDT", 2, 4), ("BNBUSDT", 2, 3), ("SOLUSDT", 2, 3),
-    ("XRPUSDT", 4, 1), ("DOGEUSDT", 5, 0), ("ADAUSDT", 4, 1), ("TRXUSDT", 5, 0),
-    ("AVAXUSDT", 2, 2), ("LINKUSDT", 3, 2), ("DOTUSDT", 3, 2), ("LTCUSDT", 2, 3),
-    ("BCHUSDT", 2, 3), ("UNIUSDT", 3, 2), ("ATOMUSDT", 3, 2), ("XLMUSDT", 5, 0),
-    ("ETCUSDT", 3, 2), ("NEARUSDT", 3, 1), ("FILUSDT", 3, 2), ("APTUSDT", 3, 2),
-    ("ARBUSDT", 4, 1), ("OPUSDT", 4, 1), ("INJUSDT", 3, 2), ("AAVEUSDT", 2, 3),
-    ("HBARUSDT", 5, 0), ("VETUSDT", 5, 0), ("ICPUSDT", 3, 2), ("SHIBUSDT", 8, 0),
-    ("SANDUSDT", 4, 0), ("MANAUSDT", 4, 0),
+    ("BTCUSDT", 2, 5),
+    ("ETHUSDT", 2, 4),
+    ("BNBUSDT", 2, 3),
+    ("SOLUSDT", 2, 3),
+    ("XRPUSDT", 4, 1),
+    ("DOGEUSDT", 5, 0),
+    ("ADAUSDT", 4, 1),
+    ("TRXUSDT", 5, 0),
+    ("AVAXUSDT", 2, 2),
+    ("LINKUSDT", 3, 2),
+    ("DOTUSDT", 3, 2),
+    ("LTCUSDT", 2, 3),
+    ("BCHUSDT", 2, 3),
+    ("UNIUSDT", 3, 2),
+    ("ATOMUSDT", 3, 2),
+    ("XLMUSDT", 5, 0),
+    ("ETCUSDT", 3, 2),
+    ("NEARUSDT", 3, 1),
+    ("FILUSDT", 3, 2),
+    ("APTUSDT", 3, 2),
+    ("ARBUSDT", 4, 1),
+    ("OPUSDT", 4, 1),
+    ("INJUSDT", 3, 2),
+    ("AAVEUSDT", 2, 3),
+    ("HBARUSDT", 5, 0),
+    ("VETUSDT", 5, 0),
+    ("ICPUSDT", 3, 2),
+    ("SHIBUSDT", 8, 0),
+    ("SANDUSDT", 4, 0),
+    ("MANAUSDT", 4, 0),
 ];
 
 /// Список инструментов фида (id = индекс+1, base-актив = id, quote = 100/USDT).
@@ -123,7 +145,9 @@ pub async fn fetch_depth(binance: &str, limit: usize, pd: u8, qd: u8) -> Result<
     let v: Value = resp.json().await.map_err(|e| e.to_string())?;
     let (depth, skipped) = depth_from_json(&v, pd, qd);
     if skipped > 0 {
-        eprintln!("[feed] {binance}: пропущено уровней стакана с неразобранными числами: {skipped}");
+        eprintln!(
+            "[feed] {binance}: пропущено уровней стакана с неразобранными числами: {skipped}"
+        );
     }
     Ok(depth)
 }
@@ -153,7 +177,10 @@ fn depth_from_json(v: &Value, pd: u8, qd: u8) -> (Depth, usize) {
             })
             .unwrap_or_default()
     };
-    let depth = Depth { bids: parse(&v["bids"]), asks: parse(&v["asks"]) };
+    let depth = Depth {
+        bids: parse(&v["bids"]),
+        asks: parse(&v["asks"]),
+    };
     (depth, skipped)
 }
 
@@ -188,7 +215,13 @@ fn change_from_row(row: &[Value]) -> Result<f64, String> {
 }
 
 /// Запросить исторические свечи с Binance REST.
-pub async fn fetch_klines(binance: &str, interval: &str, limit: usize, pd: u8, qd: u8) -> Result<Vec<Kline>, String> {
+pub async fn fetch_klines(
+    binance: &str,
+    interval: &str,
+    limit: usize,
+    pd: u8,
+    qd: u8,
+) -> Result<Vec<Kline>, String> {
     let url = format!("{REST}/api/v3/klines?symbol={binance}&interval={interval}&limit={limit}");
     let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
@@ -204,13 +237,20 @@ pub async fn fetch_klines(binance: &str, interval: &str, limit: usize, pd: u8, q
 /// становилось нулём, и по графику с нулевым low принимали решение (BUG-011).
 fn klines_from_rows(rows: &[Vec<Value>], pd: u8, qd: u8) -> Result<Vec<Kline>, String> {
     let raw_at = |r: &[Value], i: usize, dec: u8| -> Result<i64, String> {
-        let s = r.get(i).and_then(|v| v.as_str()).ok_or_else(|| format!("нет поля {i}"))?;
+        let s = r
+            .get(i)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("нет поля {i}"))?;
         to_raw(s, dec).ok_or_else(|| format!("поле {i}: не число ({s})"))
     };
     rows.iter()
         .map(|r| {
             Ok(Kline {
-                time: r.first().and_then(|v| v.as_i64()).ok_or("нет времени свечи")? / 1000,
+                time: r
+                    .first()
+                    .and_then(|v| v.as_i64())
+                    .ok_or("нет времени свечи")?
+                    / 1000,
                 open: raw_at(r, 1, pd)?,
                 high: raw_at(r, 2, pd)?,
                 low: raw_at(r, 3, pd)?,
@@ -244,7 +284,10 @@ pub fn spawn(state: AppState) {
         loop {
             match connect_async(&url).await {
                 Ok((mut ws, _)) => {
-                    println!("[feed] Binance подключён ({} пар)", state.feed_instruments.len());
+                    println!(
+                        "[feed] Binance подключён ({} пар)",
+                        state.feed_instruments.len()
+                    );
                     while let Some(msg) = ws.next().await {
                         match msg {
                             Ok(Message::Text(t)) => handle_msg(&state, &index, &t).await,
@@ -308,7 +351,11 @@ fn trade_from_data(data: &Value, pd: u8, qd: u8) -> Option<(i64, i64, &'static s
     let price = data["p"].as_str().and_then(|s| to_raw(s, pd))?;
     let qty = data["q"].as_str().and_then(|s| to_raw(s, qd))?;
     // m = isBuyerMaker: покупатель — мейкер, значит агрессор — продавец.
-    let side = if data["m"].as_bool().unwrap_or(false) { "sell" } else { "buy" };
+    let side = if data["m"].as_bool().unwrap_or(false) {
+        "sell"
+    } else {
+        "buy"
+    };
     Some((price, qty, side))
 }
 
@@ -321,7 +368,9 @@ async fn handle_msg(state: &AppState, index: &HashMap<String, (u32, u8, u8)>, te
         }
     };
     let sym = data["s"].as_str().unwrap_or("");
-    let Some(&(id, pd, qd)) = index.get(sym) else { return };
+    let Some(&(id, pd, qd)) = index.get(sym) else {
+        return;
+    };
 
     // Отметка живости ставится здесь — на **принятом и опознанном** сообщении, а не
     // при открытии сокета: живость фида доказывают данные, а не факт подключения.
@@ -374,7 +423,11 @@ mod tests {
     #[test]
     fn to_raw_rejects_garbage_instead_of_zero() {
         for bad in ["", "abc", "1.2.3", "--5", "1,5", " "] {
-            assert_eq!(to_raw(bad, 2), None, "строка {bad:?} не должна становиться числом");
+            assert_eq!(
+                to_raw(bad, 2),
+                None,
+                "строка {bad:?} не должна становиться числом"
+            );
         }
     }
 
@@ -390,10 +443,17 @@ mod tests {
     // ---- Свечи: битое поле роняет ответ, а не рисует нулевой low -----------
 
     fn kline_row() -> Vec<Value> {
-        json!([1_700_000_000_000i64, "100.00", "110.00", "90.00", "105.00", "12.5"])
-            .as_array()
-            .unwrap()
-            .clone()
+        json!([
+            1_700_000_000_000i64,
+            "100.00",
+            "110.00",
+            "90.00",
+            "105.00",
+            "12.5"
+        ])
+        .as_array()
+        .unwrap()
+        .clone()
     }
 
     #[test]
@@ -401,7 +461,10 @@ mod tests {
         let out = klines_from_rows(&[kline_row()], 2, 2).expect("здоровая строка разбирается");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].time, 1_700_000_000);
-        assert_eq!((out[0].open, out[0].high, out[0].low, out[0].close), (10000, 11000, 9000, 10500));
+        assert_eq!(
+            (out[0].open, out[0].high, out[0].low, out[0].close),
+            (10000, 11000, 9000, 10500)
+        );
     }
 
     #[test]
@@ -409,7 +472,10 @@ mod tests {
         let mut row = kline_row();
         row[3] = json!("не число"); // low
         let err = klines_from_rows(&[row], 2, 2).expect_err("битое поле обязано ронять ответ");
-        assert!(err.contains("поле 3"), "ошибка должна называть поле, а не молчать: {err}");
+        assert!(
+            err.contains("поле 3"),
+            "ошибка должна называть поле, а не молчать: {err}"
+        );
     }
 
     /// Поле не того типа (число вместо строки Binance) — тоже отказ.
@@ -453,7 +519,10 @@ mod tests {
         let (d, skipped) = depth_from_json(&v, 2, 3);
         assert_eq!(d.bids, vec![(10000, 1000), (9900, 2000)]);
         assert_eq!(d.asks, vec![(10100, 1000)]);
-        assert_eq!(skipped, 2, "пропуски обязаны быть посчитаны, иначе они молчаливые");
+        assert_eq!(
+            skipped, 2,
+            "пропуски обязаны быть посчитаны, иначе они молчаливые"
+        );
     }
 
     #[test]
@@ -490,7 +559,10 @@ mod tests {
     fn change_rejects_zero_open() {
         let mut row = kline_row();
         row[1] = json!("0");
-        assert!(change_from_row(&row).is_err(), "деление на ноль не должно давать 0%");
+        assert!(
+            change_from_row(&row).is_err(),
+            "деление на ноль не должно давать 0%"
+        );
     }
 
     // ---- Котировка: пропускается целиком, а не собирается наполовину -------
@@ -513,15 +585,24 @@ mod tests {
         for key in ["c", "P", "h", "b", "a"] {
             let mut d = ticker_data();
             d[key] = json!("не число");
-            assert!(ticker_from_data(&d, 2).is_none(), "поле {key}: котировка обязана быть пропущена целиком");
+            assert!(
+                ticker_from_data(&d, 2).is_none(),
+                "поле {key}: котировка обязана быть пропущена целиком"
+            );
 
             let mut d = ticker_data();
             d[key] = Value::Null;
-            assert!(ticker_from_data(&d, 2).is_none(), "поле {key} = null: котировка обязана быть пропущена");
+            assert!(
+                ticker_from_data(&d, 2).is_none(),
+                "поле {key} = null: котировка обязана быть пропущена"
+            );
 
             let mut d = ticker_data();
             d.as_object_mut().unwrap().remove(key);
-            assert!(ticker_from_data(&d, 2).is_none(), "поле {key} отсутствует: котировка обязана быть пропущена");
+            assert!(
+                ticker_from_data(&d, 2).is_none(),
+                "поле {key} отсутствует: котировка обязана быть пропущена"
+            );
         }
     }
 
@@ -555,8 +636,9 @@ mod tests {
 
     #[test]
     fn envelope_parses_valid() {
-        let (stream, data) = parse_envelope(r#"{"stream":"btcusdt@ticker","data":{"s":"BTCUSDT"}}"#)
-            .expect("здоровый конверт разбирается");
+        let (stream, data) =
+            parse_envelope(r#"{"stream":"btcusdt@ticker","data":{"s":"BTCUSDT"}}"#)
+                .expect("здоровый конверт разбирается");
         assert_eq!(stream, "btcusdt@ticker");
         assert_eq!(data["s"], json!("BTCUSDT"));
     }

@@ -36,7 +36,15 @@ mod tests {
 
     #[test]
     fn roundtrip_keeps_value() {
-        for v in [0i128, 1, -1, 12_345_678, -9_876_543_210, i128::MAX, i128::MIN] {
+        for v in [
+            0i128,
+            1,
+            -1,
+            12_345_678,
+            -9_876_543_210,
+            i128::MAX,
+            i128::MIN,
+        ] {
             assert_eq!(from_numeric(&to_numeric(v)).unwrap(), v, "round-trip {v}");
         }
     }

@@ -92,7 +92,12 @@ pub trait Persistence: Send + Sync {
     ///
     /// `events` уже запечатаны вызывающим (номер, время, источник, отпечаток): здесь
     /// их содержимое не меняется и не досочиняется.
-    async fn save_account(&self, user: UserId, snap: &AccountSnapshot, events: &[AccountEvent]) -> Result<(), StoreError>;
+    async fn save_account(
+        &self,
+        user: UserId,
+        snap: &AccountSnapshot,
+        events: &[AccountEvent],
+    ) -> Result<(), StoreError>;
 
     /// Найти или создать внутренний `UserId` по внешней личности `(tenant, sub)` из
     /// провалидированного SSO-токена (ADR-023, фаза Т2). Маппинг стабилен между
@@ -150,25 +155,51 @@ impl Persistence for MemoryStore {
     }
 
     async fn load_all(&self) -> Result<LoadedState, StoreError> {
-        let accounts = self.accounts.lock().map_err(|_| StoreError("память счетов испорчена".into()))?;
-        let journals = self.journals.lock().map_err(|_| StoreError("память журналов испорчена".into()))?;
-        let mut acc: Vec<(UserId, AccountSnapshot)> = accounts.iter().map(|(u, s)| (*u, s.clone())).collect();
+        let accounts = self
+            .accounts
+            .lock()
+            .map_err(|_| StoreError("память счетов испорчена".into()))?;
+        let journals = self
+            .journals
+            .lock()
+            .map_err(|_| StoreError("память журналов испорчена".into()))?;
+        let mut acc: Vec<(UserId, AccountSnapshot)> =
+            accounts.iter().map(|(u, s)| (*u, s.clone())).collect();
         acc.sort_by_key(|(u, _)| u.0);
-        let mut jr: Vec<(UserId, Vec<AccountEvent>)> = journals.iter().map(|(u, e)| (*u, e.clone())).collect();
+        let mut jr: Vec<(UserId, Vec<AccountEvent>)> =
+            journals.iter().map(|(u, e)| (*u, e.clone())).collect();
         jr.sort_by_key(|(u, _)| u.0);
-        Ok(LoadedState { accounts: acc, journals: jr })
+        Ok(LoadedState {
+            accounts: acc,
+            journals: jr,
+        })
     }
 
-    async fn save_account(&self, user: UserId, snap: &AccountSnapshot, events: &[AccountEvent]) -> Result<(), StoreError> {
-        let mut accounts = self.accounts.lock().map_err(|_| StoreError("память счетов испорчена".into()))?;
-        let mut journals = self.journals.lock().map_err(|_| StoreError("память журналов испорчена".into()))?;
+    async fn save_account(
+        &self,
+        user: UserId,
+        snap: &AccountSnapshot,
+        events: &[AccountEvent],
+    ) -> Result<(), StoreError> {
+        let mut accounts = self
+            .accounts
+            .lock()
+            .map_err(|_| StoreError("память счетов испорчена".into()))?;
+        let mut journals = self
+            .journals
+            .lock()
+            .map_err(|_| StoreError("память журналов испорчена".into()))?;
         let lane = journals.entry(user).or_default();
         // Только добавление, и только в хвост. Повтор номера — отказ, как и уникальный
         // ключ в БД: журнал, в который можно записать «поверх», журналом не является.
         for e in events {
             let expected = lane.last().map(|x: &AccountEvent| x.seq()).unwrap_or(0) + 1;
             if e.seq() != expected {
-                return Err(StoreError(format!("журнал счёта {}: ожидалась запись №{expected}, пришла №{}", user.0, e.seq())));
+                return Err(StoreError(format!(
+                    "журнал счёта {}: ожидалась запись №{expected}, пришла №{}",
+                    user.0,
+                    e.seq()
+                )));
             }
             lane.push(e.clone());
         }

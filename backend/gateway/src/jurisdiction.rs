@@ -102,11 +102,19 @@ pub struct Verdict {
 
 impl Verdict {
     fn shown() -> Self {
-        Self { visible: true, reason: None, explanation: None }
+        Self {
+            visible: true,
+            reason: None,
+            explanation: None,
+        }
     }
 
     fn hidden(reason: RefusalCode, explanation: String) -> Self {
-        Self { visible: false, reason: Some(reason), explanation: Some(explanation) }
+        Self {
+            visible: false,
+            reason: Some(reason),
+            explanation: Some(explanation),
+        }
     }
 }
 
@@ -196,7 +204,10 @@ pub fn visibility_in(restrictions: &Value, jurisdiction: Option<&str>) -> Verdic
 
     Verdict::hidden(
         RefusalCode::JurisdictionNotListed,
-        format!("Ограничено юрисдикциями ({}) — в «{visitor}» не показывается.", list.join(", ")),
+        format!(
+            "Ограничено юрисдикциями ({}) — в «{visitor}» не показывается.",
+            list.join(", ")
+        ),
     )
 }
 
@@ -227,7 +238,10 @@ pub struct NavFilterResult {
 pub fn filter_nav_by_jurisdiction(items: &Value, jurisdiction: Option<&str>) -> NavFilterResult {
     let Some(items) = items.as_array() else {
         // Поле приходит из JSON: «не список» — это пустое меню, а не паника.
-        return NavFilterResult { items: Vec::new(), hidden: 0 };
+        return NavFilterResult {
+            items: Vec::new(),
+            hidden: 0,
+        };
     };
 
     let mut kept = Vec::new();
@@ -245,7 +259,10 @@ pub fn filter_nav_by_jurisdiction(items: &Value, jurisdiction: Option<&str>) -> 
             continue;
         }
 
-        let children = map.get("children").cloned().unwrap_or(Value::Array(Vec::new()));
+        let children = map
+            .get("children")
+            .cloned()
+            .unwrap_or(Value::Array(Vec::new()));
         let below = filter_nav_by_jurisdiction(&children, jurisdiction);
         hidden += below.hidden;
 
@@ -254,7 +271,10 @@ pub fn filter_nav_by_jurisdiction(items: &Value, jurisdiction: Option<&str>) -> 
         kept.push(Value::Object(next));
     }
 
-    NavFilterResult { items: kept, hidden }
+    NavFilterResult {
+        items: kept,
+        hidden,
+    }
 }
 
 // ======================= Прогон эталонной таблицы ==========================
@@ -353,8 +373,14 @@ mod cases_tests {
         let items = t["items"].as_array().expect("items — список").len();
         let trees = t["trees"].as_array().expect("trees — список").len();
 
-        assert!(items >= 19, "случаев на пункт осмотрено {items}, в v2 их было 19");
-        assert!(trees >= 6, "случаев на дерево осмотрено {trees}, в v2 их было 6");
+        assert!(
+            items >= 19,
+            "случаев на пункт осмотрено {items}, в v2 их было 19"
+        );
+        assert!(
+            trees >= 6,
+            "случаев на дерево осмотрено {trees}, в v2 их было 6"
+        );
     }
 
     /// Все случаи на одиночное ограничение — вместе с машинным кодом отказа.
@@ -428,7 +454,10 @@ mod cases_tests {
             let result = filter_nav_by_jurisdiction(&case["tree"], jurisdiction);
 
             assert_eq!(shape(&result.items), case["visibleTree"], "дерево «{name}»");
-            assert_eq!(result.hidden, expected_hidden, "дерево «{name}»: число скрытого");
+            assert_eq!(
+                result.hidden, expected_hidden,
+                "дерево «{name}»: число скрытого"
+            );
         }
     }
 

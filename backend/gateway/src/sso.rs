@@ -37,11 +37,11 @@ pub struct Claims {
 /// Ошибка входа. Наверх маппится в HTTP-код (см. `code()`).
 #[derive(Debug)]
 pub enum SsoError {
-    BadToken,     // 401: подпись/срок/claims/формат
+    BadToken,       // 401: подпись/срок/claims/формат
     TenantMismatch, // 403: tenant токена != ?site=
-    Replay,       // 401: jti уже использован
-    NoKeys,       // 503: JWKS недоступен
-    Disabled,     // 501: SSO выключен, а сессия запрошена
+    Replay,         // 401: jti уже использован
+    NoKeys,         // 503: JWKS недоступен
+    Disabled,       // 501: SSO выключен, а сессия запрошена
 }
 impl SsoError {
     pub fn as_str(&self) -> &'static str {
@@ -138,12 +138,17 @@ impl Sso {
         // Кэша нет / протух / неизвестный kid (возможна ротация) — тянем заново.
         let fresh = self.fetch_jwks().await?;
         let key = fresh.get(kid).cloned();
-        *self.jwks.lock().await = Some(JwksCache { keys: fresh, fetched: Instant::now() });
+        *self.jwks.lock().await = Some(JwksCache {
+            keys: fresh,
+            fetched: Instant::now(),
+        });
         key.ok_or(SsoError::BadToken)
     }
 
     async fn fetch_jwks(&self) -> Result<HashMap<String, DecodingKey>, SsoError> {
-        let resp = reqwest::get(&self.jwks_url).await.map_err(|_| SsoError::NoKeys)?;
+        let resp = reqwest::get(&self.jwks_url)
+            .await
+            .map_err(|_| SsoError::NoKeys)?;
         if !resp.status().is_success() {
             return Err(SsoError::NoKeys);
         }
@@ -218,7 +223,14 @@ impl Sso {
         let mut s = self.sessions.lock().await;
         let now = Instant::now();
         s.retain(|_, sess| sess.expires > now);
-        s.insert(session_token, Session { user, tenant, expires: now + SESSION_TTL });
+        s.insert(
+            session_token,
+            Session {
+                user,
+                tenant,
+                expires: now + SESSION_TTL,
+            },
+        );
         SESSION_TTL.as_secs()
     }
 
@@ -257,7 +269,10 @@ impl Sso {
     /// по-настоящему, реальным ключом: ослаблен ровно один пункт чеклиста, и он
     /// закрыт отдельным тестом `validate_rejects_expired`.
     fn new_ignoring_exp(jwks_url: String) -> Self {
-        Self { check_exp: false, ..Self::new(jwks_url) }
+        Self {
+            check_exp: false,
+            ..Self::new(jwks_url)
+        }
     }
 
     /// Тестовый шов: посадить ключ в кэш JWKS, чтобы `validate` не ходил в сеть.
@@ -265,7 +280,10 @@ impl Sso {
         let key = DecodingKey::from_rsa_components(n, e).unwrap();
         let mut keys = HashMap::new();
         keys.insert(kid.to_string(), key);
-        *self.jwks.lock().await = Some(JwksCache { keys, fetched: Instant::now() });
+        *self.jwks.lock().await = Some(JwksCache {
+            keys,
+            fetched: Instant::now(),
+        });
     }
 }
 
@@ -288,7 +306,8 @@ mod tests {
         v.validate_exp = false;
         v.set_issuer(&["platform-auth"]);
         v.set_audience(&["terminal"]);
-        let data = decode::<Claims>(TOKEN, &key, &v).expect("подпись должна сойтись реальным ключом");
+        let data =
+            decode::<Claims>(TOKEN, &key, &v).expect("подпись должна сойтись реальным ключом");
         assert_eq!(data.claims.tenant, "apex-ru");
         assert_eq!(data.claims.sub, "0cd1b383-c9bd-4066-9902-2d454af711ee");
         assert_eq!(data.claims.jti, "d99e727d-2d3b-4efa-b7cb-28200fb617eb");
@@ -299,7 +318,10 @@ mod tests {
     async fn validate_rejects_expired() {
         let sso = Sso::new("http://x/jwks".into());
         sso.seed_key(KID, N, E).await;
-        assert!(matches!(sso.validate(TOKEN, "apex-ru").await, Err(SsoError::BadToken)));
+        assert!(matches!(
+            sso.validate(TOKEN, "apex-ru").await,
+            Err(SsoError::BadToken)
+        ));
     }
 
     /// Мусор вместо JWT → отказ, не паника.
@@ -307,7 +329,10 @@ mod tests {
     async fn validate_rejects_garbage() {
         let sso = Sso::new("http://x/jwks".into());
         sso.seed_key(KID, N, E).await;
-        assert!(matches!(sso.validate("not-a-jwt", "apex-ru").await, Err(SsoError::BadToken)));
+        assert!(matches!(
+            sso.validate("not-a-jwt", "apex-ru").await,
+            Err(SsoError::BadToken)
+        ));
     }
 
     /// Без URL JWKS SSO выключен — запрос сессии отклоняется как Disabled.
@@ -315,7 +340,10 @@ mod tests {
     async fn disabled_without_url() {
         let sso = Sso::new(String::new());
         assert!(!sso.enabled());
-        assert!(matches!(sso.validate(TOKEN, "apex-ru").await, Err(SsoError::Disabled)));
+        assert!(matches!(
+            sso.validate(TOKEN, "apex-ru").await,
+            Err(SsoError::Disabled)
+        ));
     }
 
     // ==================== Чеклист sso-pack: сценарии ОТКАЗА ====================
@@ -341,8 +369,14 @@ mod tests {
         let sso = Sso::new_ignoring_exp("http://x/jwks".into());
         sso.seed_key(KID, N, E).await;
         let parts: Vec<&str> = TOKEN.split('.').collect();
-        let forged = format!("eyJhbGciOiJIUzI1NiIsImtpZCI6InBsYXRmb3JtLXNzby0xIiwidHlwIjoiSldUIn0.{}.{}", parts[1], parts[2]);
-        assert!(matches!(sso.validate(&forged, "apex-ru").await, Err(SsoError::BadToken)));
+        let forged = format!(
+            "eyJhbGciOiJIUzI1NiIsImtpZCI6InBsYXRmb3JtLXNzby0xIiwidHlwIjoiSldUIn0.{}.{}",
+            parts[1], parts[2]
+        );
+        assert!(matches!(
+            sso.validate(&forged, "apex-ru").await,
+            Err(SsoError::BadToken)
+        ));
     }
 
     /// Пункт 1: `alg: none` — токен «без подписи».
@@ -351,8 +385,14 @@ mod tests {
         let sso = Sso::new_ignoring_exp("http://x/jwks".into());
         sso.seed_key(KID, N, E).await;
         let parts: Vec<&str> = TOKEN.split('.').collect();
-        let forged = format!("eyJhbGciOiJub25lIiwia2lkIjoicGxhdGZvcm0tc3NvLTEiLCJ0eXAiOiJKV1QifQ.{}.", parts[1]);
-        assert!(matches!(sso.validate(&forged, "apex-ru").await, Err(SsoError::BadToken)));
+        let forged = format!(
+            "eyJhbGciOiJub25lIiwia2lkIjoicGxhdGZvcm0tc3NvLTEiLCJ0eXAiOiJKV1QifQ.{}.",
+            parts[1]
+        );
+        assert!(matches!(
+            sso.validate(&forged, "apex-ru").await,
+            Err(SsoError::BadToken)
+        ));
     }
 
     /// Пункт 1: другой RSA-алгоритм (RS512) тоже не принимаем — принимаем ТОЛЬКО RS256.
@@ -361,8 +401,14 @@ mod tests {
         let sso = Sso::new_ignoring_exp("http://x/jwks".into());
         sso.seed_key(KID, N, E).await;
         let parts: Vec<&str> = TOKEN.split('.').collect();
-        let forged = format!("eyJhbGciOiJSUzUxMiIsImtpZCI6InBsYXRmb3JtLXNzby0xIiwidHlwIjoiSldUIn0.{}.{}", parts[1], parts[2]);
-        assert!(matches!(sso.validate(&forged, "apex-ru").await, Err(SsoError::BadToken)));
+        let forged = format!(
+            "eyJhbGciOiJSUzUxMiIsImtpZCI6InBsYXRmb3JtLXNzby0xIiwidHlwIjoiSldUIn0.{}.{}",
+            parts[1], parts[2]
+        );
+        assert!(matches!(
+            sso.validate(&forged, "apex-ru").await,
+            Err(SsoError::BadToken)
+        ));
     }
 
     /// Пункт 1, отдельно: явная проверка `alg` обязана срабатывать **до** обращения к
@@ -375,7 +421,10 @@ mod tests {
     async fn rejects_alg_before_touching_keys() {
         let sso = Sso::new_ignoring_exp("http://127.0.0.1:9/jwks".into()); // порт-заглушка
         let parts: Vec<&str> = TOKEN.split('.').collect();
-        let forged = format!("eyJhbGciOiJIUzI1NiIsImtpZCI6InBsYXRmb3JtLXNzby0xIiwidHlwIjoiSldUIn0.{}.{}", parts[1], parts[2]);
+        let forged = format!(
+            "eyJhbGciOiJIUzI1NiIsImtpZCI6InBsYXRmb3JtLXNzby0xIiwidHlwIjoiSldUIn0.{}.{}",
+            parts[1], parts[2]
+        );
         // Разбираем вручную, а не через expect_err: тот требует Debug на Claims, а
         // печатать содержимое токена (sub/tenant/jti) в панике мы не хотим.
         match sso.validate(&forged, "apex-ru").await {
@@ -391,7 +440,10 @@ mod tests {
     async fn rejects_tenant_mismatch() {
         let sso = Sso::new_ignoring_exp("http://x/jwks".into());
         sso.seed_key(KID, N, E).await;
-        assert!(matches!(sso.validate(TOKEN, "other-site").await, Err(SsoError::TenantMismatch)));
+        assert!(matches!(
+            sso.validate(TOKEN, "other-site").await,
+            Err(SsoError::TenantMismatch)
+        ));
     }
 
     /// Пункт 4: повторно предъявленный `jti` — one-shot. Первый раз проходит, второй нет.
@@ -399,8 +451,14 @@ mod tests {
     async fn rejects_replayed_jti() {
         let sso = Sso::new_ignoring_exp("http://x/jwks".into());
         sso.seed_key(KID, N, E).await;
-        assert!(sso.validate(TOKEN, "apex-ru").await.is_ok(), "первое предъявление должно проходить");
-        assert!(matches!(sso.validate(TOKEN, "apex-ru").await, Err(SsoError::Replay)));
+        assert!(
+            sso.validate(TOKEN, "apex-ru").await.is_ok(),
+            "первое предъявление должно проходить"
+        );
+        assert!(matches!(
+            sso.validate(TOKEN, "apex-ru").await,
+            Err(SsoError::Replay)
+        ));
     }
 
     /// Пункт 4, тонкое место: `jti` гасится ТОЛЬКО при полном успехе. Иначе чужой
@@ -410,16 +468,26 @@ mod tests {
     async fn failed_validation_does_not_consume_jti() {
         let sso = Sso::new_ignoring_exp("http://x/jwks".into());
         sso.seed_key(KID, N, E).await;
-        assert!(matches!(sso.validate(TOKEN, "other-site").await, Err(SsoError::TenantMismatch)));
-        assert!(sso.validate(TOKEN, "apex-ru").await.is_ok(), "неудачная попытка не должна гасить jti");
+        assert!(matches!(
+            sso.validate(TOKEN, "other-site").await,
+            Err(SsoError::TenantMismatch)
+        ));
+        assert!(
+            sso.validate(TOKEN, "apex-ru").await.is_ok(),
+            "неудачная попытка не должна гасить jti"
+        );
     }
 
     /// Сессия: выпуск → разрешение → логаут.
     #[tokio::test]
     async fn session_lifecycle() {
         let sso = Sso::new("http://x/jwks".into());
-        sso.mint("tok-123".into(), UserId(42), "apex-ru".into()).await;
-        assert_eq!(sso.resolve("tok-123").await, Some((UserId(42), "apex-ru".to_string())));
+        sso.mint("tok-123".into(), UserId(42), "apex-ru".into())
+            .await;
+        assert_eq!(
+            sso.resolve("tok-123").await,
+            Some((UserId(42), "apex-ru".to_string()))
+        );
         sso.logout("tok-123").await;
         assert_eq!(sso.resolve("tok-123").await, None);
     }
@@ -431,7 +499,13 @@ mod tests {
         let sso = Sso::new("http://x/jwks".into());
         sso.mint("a".into(), UserId(1), "apex-ru".into()).await;
         sso.mint("b".into(), UserId(2), "other-site".into()).await;
-        assert_eq!(sso.resolve("a").await.map(|(_, t)| t), Some("apex-ru".to_string()));
-        assert_eq!(sso.resolve("b").await.map(|(_, t)| t), Some("other-site".to_string()));
+        assert_eq!(
+            sso.resolve("a").await.map(|(_, t)| t),
+            Some("apex-ru".to_string())
+        );
+        assert_eq!(
+            sso.resolve("b").await.map(|(_, t)| t),
+            Some("other-site".to_string())
+        );
     }
 }

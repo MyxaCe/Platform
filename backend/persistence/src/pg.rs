@@ -186,7 +186,8 @@ fn hash_to_db(h: u128) -> String {
     format!("{h:032x}")
 }
 fn hash_from_db(s: &str) -> Result<u128, StoreError> {
-    u128::from_str_radix(s, 16).map_err(|_| StoreError(format!("журнал: отпечаток «{s}» не читается")))
+    u128::from_str_radix(s, 16)
+        .map_err(|_| StoreError(format!("журнал: отпечаток «{s}» не читается")))
 }
 
 /// Поднять запись журнала из строки БД.
@@ -206,30 +207,43 @@ fn event_from_row(r: &PgRow) -> Result<AccountEvent, StoreError> {
             let who = r.get::<Option<String>, _>("who").unwrap_or_default();
             let reason = r.get::<Option<String>, _>("reason").unwrap_or_default();
             let incident = r.get::<Option<String>, _>("incident").unwrap_or_default();
-            Origin::Operator(Operator::new(&who, &reason, &incident).map_err(|e| bad(&e.to_string()))?)
+            Origin::Operator(
+                Operator::new(&who, &reason, &incident).map_err(|e| bad(&e.to_string()))?,
+            )
         }
         other => return Err(bad(&format!("неизвестный источник «{other}»"))),
     };
     let kind = EventKind::decode(&r.get::<String, _>("kind")).map_err(|e| bad(&e.to_string()))?;
     let prev = hash_from_db(&r.get::<String, _>("prev_hash"))?;
     let hash = hash_from_db(&r.get::<String, _>("hash"))?;
-    Ok(AccountEvent::from_storage(seq, r.get::<i64, _>("at_ms"), origin, kind, prev, hash))
+    Ok(AccountEvent::from_storage(
+        seq,
+        r.get::<i64, _>("at_ms"),
+        origin,
+        kind,
+        prev,
+        hash,
+    ))
 }
 
 #[async_trait]
 impl Persistence for PgStore {
     async fn init(&self) -> Result<(), StoreError> {
         // Несколько выражений одним execute: sqlx выполнит их как batch.
-        sqlx::raw_sql(SCHEMA).execute(&self.pool).await.map_err(db)?;
+        sqlx::raw_sql(SCHEMA)
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
         Ok(())
     }
 
     async fn load_all(&self) -> Result<LoadedState, StoreError> {
         // Счёт — самостоятельная сущность: перебираем то, что реально лежит в accounts.
-        let acc_rows = sqlx::query("SELECT user_id, balance, next_id, model FROM accounts ORDER BY user_id")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db)?;
+        let acc_rows =
+            sqlx::query("SELECT user_id, balance, next_id, model FROM accounts ORDER BY user_id")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(db)?;
 
         let mut accounts = Vec::new();
         for acc in &acc_rows {
@@ -307,7 +321,17 @@ impl Persistence for PgStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
 
-            accounts.push((uid, AccountSnapshot { balance, next_id, positions, pendings, closed, model }));
+            accounts.push((
+                uid,
+                AccountSnapshot {
+                    balance,
+                    next_id,
+                    positions,
+                    pendings,
+                    closed,
+                    model,
+                },
+            ));
         }
 
         // Журналы (TRM-13). Читаются по тем же счетам и в порядке записи: сверку
@@ -336,7 +360,12 @@ impl Persistence for PgStore {
         Ok(LoadedState { accounts, journals })
     }
 
-    async fn save_account(&self, user: UserId, snap: &AccountSnapshot, events: &[AccountEvent]) -> Result<(), StoreError> {
+    async fn save_account(
+        &self,
+        user: UserId,
+        snap: &AccountSnapshot,
+        events: &[AccountEvent],
+    ) -> Result<(), StoreError> {
         let id_db = user.0 as i64;
         let mut tx = self.pool.begin().await.map_err(db)?;
 
@@ -354,7 +383,11 @@ impl Persistence for PgStore {
 
         // Позиции и ордера переписываются целиком: их единицы-десятки, и это избавляет
         // от диффа. История так себя вести не может — она только дописывается.
-        sqlx::query("DELETE FROM positions WHERE user_id = $1").bind(id_db).execute(&mut *tx).await.map_err(db)?;
+        sqlx::query("DELETE FROM positions WHERE user_id = $1")
+            .bind(id_db)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
         for p in &snap.positions {
             sqlx::query(
                 "INSERT INTO positions (user_id, id, instrument, side, qty, entry, pd, qd, margin, sl, tp)
@@ -366,16 +399,29 @@ impl Persistence for PgStore {
             .execute(&mut *tx).await.map_err(db)?;
         }
 
-        sqlx::query("DELETE FROM pendings WHERE user_id = $1").bind(id_db).execute(&mut *tx).await.map_err(db)?;
+        sqlx::query("DELETE FROM pendings WHERE user_id = $1")
+            .bind(id_db)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
         for p in &snap.pendings {
             sqlx::query(
                 "INSERT INTO pendings (user_id, id, instrument, side, qty, price, pd, qd, sl, tp)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             )
-            .bind(id_db).bind(p.id as i64).bind(p.instrument as i32).bind(side_to_db(p.side))
-            .bind(p.qty).bind(p.price).bind(p.pd as i16).bind(p.qd as i16)
-            .bind(p.sl).bind(p.tp)
-            .execute(&mut *tx).await.map_err(db)?;
+            .bind(id_db)
+            .bind(p.id as i64)
+            .bind(p.instrument as i32)
+            .bind(side_to_db(p.side))
+            .bind(p.qty)
+            .bind(p.price)
+            .bind(p.pd as i16)
+            .bind(p.qd as i16)
+            .bind(p.sl)
+            .bind(p.tp)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
         }
 
         // Дописываем только хвост истории: стоимость закрытия сделки не должна зависеть
@@ -454,5 +500,4 @@ impl Persistence for PgStore {
         .map_err(db)?;
         Ok(UserId(row.get::<i64, _>("user_id") as u64))
     }
-
 }
