@@ -268,7 +268,7 @@ impl Account {
         }
 
         self.positions.remove(&pos_id);
-        self.log(EventKind::PositionClosed { id: pos_id, exit: entry, cause: CloseCause::Netting, observed: None, across_gap: false });
+        self.log(EventKind::PositionClosed { id: pos_id, exit: entry, cause: CloseCause::Netting, level: None, across_gap: false });
         let remainder = qty - closing;
         if remainder > 0 {
             // Встречный объём больше открытого: остаток открывает позицию в новую
@@ -282,16 +282,19 @@ impl Account {
     /// `cause` — не косметика: по журналу надо отличать «человек закрыл» от «сработал
     /// стоп». Иначе при разборе претензии «меня закрыли не по моей команде» ответить
     /// будет нечем, а это ровно тот разговор, ради которого журнал и заводится.
-    /// `exec` — цена ИСПОЛНЕНИЯ (по ней считаются деньги), `observed` — цена,
-    /// которая была на рынке. У закрытия по команде это одно и то же, и
-    /// `observed` там `None`; у стопа и тейка на разрыве они расходятся, и
-    /// журнал обязан назвать обе (TRM-31).
-    fn close_pos(&mut self, id: u64, exec: i64, observed: Option<i64>, across_gap: bool, cause: CloseCause) -> Option<Cents> {
+    /// `exec` — цена ИСПОЛНЕНИЯ: по ней считаются деньги, и у триггеров это
+    /// наблюдённая рыночная цена (Р-178, проскальзывание). `level` — уровень,
+    /// который ставил человек; у закрытия по команде уровня нет, там `None`.
+    ///
+    /// Обе нужны вместе: по одной `exec` нельзя отличить «рынок дошёл ровно до
+    /// стопа» от «рынок перепрыгнул стоп на разрыве», а это разные разговоры
+    /// с клиентом (TRM-31).
+    fn close_pos(&mut self, id: u64, exec: i64, level: Option<i64>, across_gap: bool, cause: CloseCause) -> Option<Cents> {
         let pos = self.positions.remove(&id)?;
         let pnl = pos.unrealized(exec);
         self.balance += pnl;
         self.closed.push(ClosedDeal { instrument: pos.instrument, side: pos.side, qty: pos.qty, entry: pos.entry, exit: exec, pnl, pd: pos.pd, qd: pos.qd });
-        self.log(EventKind::PositionClosed { id, exit: exec, cause, observed, across_gap });
+        self.log(EventKind::PositionClosed { id, exit: exec, cause, level, across_gap });
         Some(pnl)
     }
 
@@ -326,17 +329,22 @@ impl Account {
         for p in fire {
             // Сначала «ордер сработал», потом открытие позиции отдельной записью: это
             // два разных события, и у открывшейся позиции свой id, а не id ордера.
-            // В журнал идёт и НАБЛЮДЁННАЯ цена (TRM-31): исполнение по уровню
-            // ордера — наше решение, а что было на рынке — факт, и восстановить
-            // его потом будет неоткуда.
-            let observed = marks.get(&p.instrument).copied();
-            self.log(EventKind::PendingTriggered { id: p.id, price: p.price, observed, across_gap });
-            let _ = self.try_open(lev, p.instrument, p.side, p.qty, p.price, p.pd, p.qd, p.sl, p.tp);
+            //
+            // Исполняем по НАБЛЮДЁННОЙ цене (Р-178), как и стопы. Для лимитного
+            // ордера это всегда НЕ ХУЖЕ его уровня: покупка срабатывает, когда
+            // рынок опустился до уровня или ниже, продажа — когда поднялся до
+            // уровня или выше. То есть на разрыве клиент получает лучшую цену,
+            // и это не щедрость, а то же самое правило: исполняется то, что на
+            // рынке, а не то, что мы пообещали нарисовать.
+            let exec = marks.get(&p.instrument).copied().unwrap_or(p.price);
+            self.log(EventKind::PendingTriggered { id: p.id, price: p.price, exec: Some(exec), across_gap });
+            let _ = self.try_open(lev, p.instrument, p.side, p.qty, exec, p.pd, p.qd, p.sl, p.tp);
         }
 
-        // SL/TP по открытым позициям. Кортеж несёт обе цены — исполнения и
-        // наблюдённую: на спокойном рынке они совпадают, на разрыве расходятся,
-        // и журналу нужны обе.
+        // SL/TP по открытым позициям. Кортеж несёт обе цены: ИСПОЛНЕНИЯ (по ней
+        // считаются деньги) и ПОСТАВЛЕННЫЙ УРОВЕНЬ (её ставил человек). На
+        // спокойном рынке они совпадают, на разрыве расходятся — и журналу
+        // нужны обе, иначе проскальзывание потом не из чего восстановить.
         let mut to_close: Vec<(u64, i64, i64, CloseCause)> = Vec::new();
         for pos in self.positions.values() {
             if let Some(&m) = marks.get(&pos.instrument) {
@@ -348,19 +356,23 @@ impl Account {
                     PosSide::Long => m >= tp,
                     PosSide::Short => m <= tp,
                 });
-                // Исполняем по УРОВНЮ триггера — так было и так остаётся: это
-                // политика исполнения, и менять её без решения владельца
-                // нельзя. Наблюдённая `m` идёт рядом, в запись.
+                // Исполняем по НАБЛЮДЁННОЙ цене `m` — решение владельца Р-178,
+                // проскальзывание. Гарантия уровня означала бы, что разницу на
+                // каждом скачке платит брокер: это отдельный продукт, который
+                // продают за деньги, а мы отдавали его молча и без предела.
+                //
+                // Уровень идёт рядом, в запись: человек ставил именно его, и
+                // разницу между «поставил» и «исполнилось» он вправе видеть.
                 if sl_hit {
-                    to_close.push((pos.id, pos.sl.unwrap(), m, CloseCause::StopLoss));
+                    to_close.push((pos.id, m, pos.sl.unwrap(), CloseCause::StopLoss));
                 } else if tp_hit {
-                    to_close.push((pos.id, pos.tp.unwrap(), m, CloseCause::TakeProfit));
+                    to_close.push((pos.id, m, pos.tp.unwrap(), CloseCause::TakeProfit));
                 }
             }
         }
         let closed_any = !to_close.is_empty();
-        for (id, exec, observed, cause) in to_close {
-            self.close_pos(id, exec, Some(observed), across_gap, cause);
+        for (id, exec, level, cause) in to_close {
+            self.close_pos(id, exec, Some(level), across_gap, cause);
         }
         fired_any || closed_any
     }
@@ -444,7 +456,7 @@ impl Broker {
     /// Закрыть позицию по марк-цене. Возвращает реализованный P&L.
     pub fn close(&mut self, user: UserId, id: u64, mark: i64) -> Result<Cents, BrokerError> {
         // Закрытие по команде исполняется по той же цене, которую видели:
-        // расхождения нет, и `observed` здесь молчит — не потому что неизвестно,
+        // расхождения нет, и `level` здесь молчит — не потому что неизвестно,
         // а потому что назвать нечего.
         self.acct(user).close_pos(id, mark, None, false, CloseCause::Command).ok_or(BrokerError::UnknownPosition)
     }

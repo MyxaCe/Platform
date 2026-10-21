@@ -210,29 +210,26 @@ fn margin_locks_funds_from_withdrawal() {
     // Ровно свободное — можно.
     assert!(b.withdraw(ALICE, free).is_ok());
 }
+// ---- Разрыв ряда, проскальзывание и правда в журнале (TRM-19, TRM-31) -----
 
-// ---- Разрыв ряда и правда в журнале (TRM-19, TRM-31) ----------------------
-
-/// Цена на разрыве ушла ДАЛЬШЕ уровня стопа. Исполняем по уровню — так решено
-/// и так остаётся до ответа владельца, — но журнал обязан назвать и ту цену,
-/// которая была на рынке: «закрыто по 5 950 000», когда торговали по 5 400 000,
-/// это неправда в неизменяемой записи.
+/// Рынок на разрыве перепрыгнул стоп. Исполняем по НАБЛЮДЁННОЙ цене (Р-178):
+/// гарантия уровня означала бы, что разницу платит брокер — на каждом скачке и
+/// без предела. В журнал идут обе цены, иначе проскальзывание потом не из чего
+/// восстановить.
 #[test]
-fn gap_close_records_the_observed_price_and_still_executes_at_the_level() {
+fn gap_close_executes_at_the_observed_price_and_records_the_level() {
     let mut b = Broker::new(1_000_000, 1);
     b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, Some(5_950_000), None).unwrap();
 
     assert_eq!(b.check(&marks(1, 5_400_000), true), vec![ALICE], "стоп обязан сработать и на разрыве");
 
     let closed = b.closed_deals(ALICE);
-    assert_eq!(closed[0].exit, 5_950_000, "исполнение осталось по уровню триггера — политика не менялась");
+    assert_eq!(closed[0].exit, 5_400_000, "исполнено по рынку, а не по уровню");
 
-    let ev = b.take_events(ALICE);
-    let last = ev.last().expect("закрытие обязано быть в событиях");
-    match last {
-        EventKind::PositionClosed { exit, observed, across_gap, cause, .. } => {
-            assert_eq!(*exit, 5_950_000, "исполнено по уровню");
-            assert_eq!(*observed, Some(5_400_000), "а наблюдали другое — и это обязано быть записано");
+    match b.take_events(ALICE).last().expect("закрытие обязано быть в событиях") {
+        EventKind::PositionClosed { exit, level, across_gap, cause, .. } => {
+            assert_eq!(*exit, 5_400_000, "в журнале цена исполнения");
+            assert_eq!(*level, Some(5_950_000), "и уровень, который ставил человек");
             assert!(*across_gap, "факт разрыва обязан быть виден");
             assert_eq!(*cause, CloseCause::StopLoss);
         }
@@ -240,36 +237,77 @@ fn gap_close_records_the_observed_price_and_still_executes_at_the_level() {
     }
 }
 
-/// На спокойном рынке наблюдённая цена и цена исполнения совпадают, а разрыв не
+/// Проскальзывание — это РАЗНИЦА, и она должна быть больше у большего разрыва.
+/// Числа тут не эталон, а следствие: проверяется свойство, а не сегодняшний
+/// результат.
+#[test]
+fn bigger_gap_costs_the_client_more() {
+    let loss_at = |mark: i64| {
+        let mut b = Broker::new(1_000_000, 1);
+        b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, Some(5_950_000), None).unwrap();
+        b.check(&marks(1, mark), true);
+        b.closed_deals(ALICE)[0].pnl
+    };
+    let small = loss_at(5_940_000);
+    let big = loss_at(5_400_000);
+    assert!(big < small, "чем дальше рынок перепрыгнул стоп, тем больше потерял клиент: {big} против {small}");
+}
+
+/// Когда рынок дошёл ровно до уровня, проскальзывания нет и разрыв не
 /// объявляется. Иначе признак стоял бы всегда и его перестали бы читать.
 #[test]
-fn quiet_close_is_not_marked_as_a_gap() {
+fn quiet_close_has_no_slippage_and_is_not_marked_as_a_gap() {
     let mut b = Broker::new(1_000_000, 1);
     b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, Some(5_950_000), None).unwrap();
     b.check(&marks(1, 5_950_000), false);
 
-    let ev = b.take_events(ALICE);
-    match ev.last().expect("закрытие") {
-        EventKind::PositionClosed { exit, observed, across_gap, .. } => {
-            assert_eq!(*observed, Some(*exit), "цена та же, что и наблюдали");
+    match b.take_events(ALICE).last().expect("закрытие") {
+        EventKind::PositionClosed { exit, level, across_gap, .. } => {
+            assert_eq!(*level, Some(*exit), "исполнилось ровно по поставленному — проскальзывания нет");
             assert!(!*across_gap, "спокойное закрытие разрывом не зовётся");
         }
         other => panic!("ожидалось закрытие позиции, а не {other:?}"),
     }
 }
 
-/// Закрытие по команде человека разрывом не метится никогда: там исполняется
-/// ровно та цена, которую показали, и называть в журнале нечего.
+/// Тейк-профит на разрыве проскальзывает В ПОЛЬЗУ клиента: рынок перепрыгнул
+/// уровень вверх, и продано выше, чем он просил. Правило одно и то же —
+/// исполняется то, что на рынке; «в нашу пользу» исключением не является.
 #[test]
-fn manual_close_names_no_observed_price() {
+fn take_profit_slips_in_the_clients_favour() {
+    // Сравниваем с тем, что дал бы УРОВЕНЬ, а не с числом: число — это
+    // сегодняшняя шкала, а утверждение здесь про направление выгоды.
+    let pnl_at = |mark: i64| {
+        let mut b = Broker::new(1_000_000, 1);
+        b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, Some(6_100_000)).unwrap();
+        b.check(&marks(1, mark), true);
+        let closed = b.closed_deals(ALICE);
+        (closed[0].exit, closed[0].pnl)
+    };
+
+    let (exit_at_level, pnl_at_level) = pnl_at(6_100_000);
+    let (exit_gapped, pnl_gapped) = pnl_at(6_300_000);
+
+    assert_eq!(exit_at_level, 6_100_000, "рынок дошёл ровно до тейка — исполнение совпало с уровнем");
+    assert_eq!(exit_gapped, 6_300_000, "рынок перепрыгнул тейк — исполнено по рынку, а не по уровню");
+    assert!(
+        pnl_gapped > pnl_at_level,
+        "на разрыве вверх клиент обязан получить БОЛЬШЕ, чем по уровню: {pnl_gapped} против {pnl_at_level}"
+    );
+}
+
+/// Закрытие по команде человека: уровня там нет вовсе, и разрывом оно не
+/// метится никогда — исполняется ровно та цена, которую показали.
+#[test]
+fn manual_close_names_no_level() {
     let mut b = Broker::new(1_000_000, 1);
     b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, None).unwrap();
     let id = b.positions(ALICE)[0].id;
     b.close(ALICE, id, 6_010_000).unwrap();
 
     match b.take_events(ALICE).last().expect("закрытие") {
-        EventKind::PositionClosed { observed, across_gap, cause, .. } => {
-            assert_eq!(*observed, None);
+        EventKind::PositionClosed { level, across_gap, cause, .. } => {
+            assert_eq!(*level, None);
             assert!(!*across_gap);
             assert_eq!(*cause, CloseCause::Command);
         }
@@ -277,13 +315,18 @@ fn manual_close_names_no_observed_price() {
     }
 }
 
-/// Сработавший отложенный ордер — та же ложь на разрыве, что и стоп, и молчать
-/// о ней нельзя только потому, что спорят чаще о стопах.
+/// Лимитный ордер на разрыве исполняется НЕ ХУЖЕ своего уровня: покупка
+/// срабатывает, когда рынок опустился до уровня или ниже. Позиция обязана
+/// открыться по рыночной цене, а не по заявленной.
 #[test]
-fn pending_fill_on_a_gap_records_the_observed_price_too() {
+fn pending_fill_on_a_gap_opens_at_the_market_not_at_the_level() {
     let mut b = Broker::new(1_000_000, 1);
     b.place_pending(ALICE, 1, PosSide::Long, 100, 5_900_000, PD, QD, None, None);
     b.check(&marks(1, 5_300_000), true);
+
+    let pos = b.positions(ALICE);
+    assert_eq!(pos.len(), 1, "ордер обязан был открыть позицию");
+    assert_eq!(pos[0].entry, 5_300_000, "вход по рынку: клиент купил дешевле, чем просил");
 
     let ev = b.take_events(ALICE);
     let fill = ev
@@ -291,9 +334,9 @@ fn pending_fill_on_a_gap_records_the_observed_price_too() {
         .find(|k| matches!(k, EventKind::PendingTriggered { .. }))
         .expect("сработавший ордер обязан быть в событиях");
     match fill {
-        EventKind::PendingTriggered { price, observed, across_gap, .. } => {
-            assert_eq!(*price, 5_900_000, "исполнение по уровню ордера");
-            assert_eq!(*observed, Some(5_300_000));
+        EventKind::PendingTriggered { price, exec, across_gap, .. } => {
+            assert_eq!(*price, 5_900_000, "уровень ордера");
+            assert_eq!(*exec, Some(5_300_000), "и цена, по которой он исполнен");
             assert!(*across_gap);
         }
         other => panic!("ожидался сработавший ордер, а не {other:?}"),

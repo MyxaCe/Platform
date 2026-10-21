@@ -174,20 +174,23 @@ pub enum EventKind {
     PositionReduced { id: u64, qty: i64, exit: i64 },
     /// Позиция закрыта целиком.
     ///
-    /// `exit` — цена, по которой **исполнено** (у стопа и тейка это уровень
-    /// триггера). `observed` — цена, которая в этот момент была **на рынке**.
-    /// На спокойном рынке они совпадают; на разрыве — нет, и тогда `exit`
-    /// называет цену, по которой никто не торговал.
+    /// `exit` — цена, по которой **исполнено**: по ней считаются деньги. У
+    /// стопа и тейка это **наблюдённая рыночная** цена (Р-178,
+    /// проскальзывание). `level` — уровень, который ставил человек; у закрытия
+    /// по команде уровня нет вовсе, там `None`.
     ///
-    /// Журнал обязан писать **произошедшее** (TRM-31): «закрыто по 100», когда
-    /// рынок на 100 не торговался, — неправда в неизменяемой записи, которая
-    /// лежит в основании ручных проводок и разбора претензий. Политику
-    /// исполнения это НЕ меняет: чем закрывать — уровнем триггера или
-    /// наблюдённой ценой — решает владелец, и до его ответа `exit` прежний.
+    /// На спокойном рынке они совпадают, на разрыве расходятся — и эта разница
+    /// и есть проскальзывание. Нужны обе: по одной `exit` не отличить «рынок
+    /// дошёл ровно до стопа» от «рынок перепрыгнул стоп», а это разные
+    /// разговоры с клиентом (TRM-31).
+    ///
+    /// Почему не гарантируем уровень: разницу тогда платит брокер — на каждом
+    /// скачке и без предела. Гарантированный стоп это отдельный продукт,
+    /// который продают за деньги, а не умолчание, о котором никто не знает.
     ///
     /// `across_gap` — закрытие случилось на первом тике после молчания фида,
     /// то есть ряд цены был разорван (Р-073).
-    PositionClosed { id: u64, exit: i64, cause: CloseCause, observed: Option<i64>, across_gap: bool },
+    PositionClosed { id: u64, exit: i64, cause: CloseCause, level: Option<i64>, across_gap: bool },
     /// Размещён отложенный ордер.
     PendingPlaced {
         id: u64,
@@ -204,11 +207,14 @@ pub enum EventKind {
     PendingCancelled { id: u64 },
     /// Отложенный ордер сработал: сам ордер исчез, а открытие позиции — отдельной записью.
     ///
-    /// `price` — уровень ордера, по которому он исполнен; `observed` — цена на
-    /// рынке в тот момент. Та же причина, что у [`EventKind::PositionClosed`]:
-    /// у отложенного ордера разрыв лжёт ровно так же, и молчать об этом в
-    /// журнале нельзя только потому, что спорят чаще о стопах.
-    PendingTriggered { id: u64, price: i64, observed: Option<i64>, across_gap: bool },
+    /// `price` — уровень самого ордера, `exec` — цена, по которой он
+    /// действительно исполнен (наблюдённая рыночная, Р-178).
+    ///
+    /// Для лимитного ордера исполнение по рынку всегда **не хуже** его уровня:
+    /// покупка срабатывает, когда рынок опустился до уровня или ниже, продажа
+    /// — когда поднялся до уровня или выше. Разрыв здесь играет за клиента, и
+    /// это то же правило, а не исключение из него.
+    PendingTriggered { id: u64, price: i64, exec: Option<i64>, across_gap: bool },
 }
 
 // ------------------------- Каноническая запись -------------------------------
@@ -332,14 +338,14 @@ impl EventKind {
                 opt(*tp)
             ),
             EventKind::PositionReduced { id, qty, exit } => format!("position_reduced id={id} qty={qty} exit={exit}"),
-            EventKind::PositionClosed { id, exit, cause, observed, across_gap } => {
+            EventKind::PositionClosed { id, exit, cause, level, across_gap } => {
                 let c = match cause {
                     CloseCause::Command => "command",
                     CloseCause::StopLoss => "stop_loss",
                     CloseCause::TakeProfit => "take_profit",
                     CloseCause::Netting => "netting",
                 };
-                format!("position_closed id={id} exit={exit} cause={c} observed={} gap={}", opt(*observed), flag(*across_gap))
+                format!("position_closed id={id} exit={exit} cause={c} level={} gap={}", opt(*level), flag(*across_gap))
             }
             EventKind::PendingPlaced { id, instrument, side, qty, price, pd, qd, sl, tp } => format!(
                 "pending_placed id={id} instrument={instrument} side={} qty={qty} price={price} pd={pd} qd={qd} sl={} tp={}",
@@ -348,8 +354,8 @@ impl EventKind {
                 opt(*tp)
             ),
             EventKind::PendingCancelled { id } => format!("pending_cancelled id={id}"),
-            EventKind::PendingTriggered { id, price, observed, across_gap } => {
-                format!("pending_triggered id={id} price={price} observed={} gap={}", opt(*observed), flag(*across_gap))
+            EventKind::PendingTriggered { id, price, exec, across_gap } => {
+                format!("pending_triggered id={id} price={price} exec={} gap={}", opt(*exec), flag(*across_gap))
             }
         }
     }
@@ -400,7 +406,7 @@ impl EventKind {
                     "netting" => CloseCause::Netting,
                     _ => return Err(BadRecord("неизвестная причина закрытия")),
                 },
-                observed: num_opt_added_later(&f, "observed")?,
+                level: num_opt_added_later(&f, "level")?,
                 across_gap: flag_added_later(&f, "gap")?,
             },
             "pending_placed" => EventKind::PendingPlaced {
@@ -418,7 +424,7 @@ impl EventKind {
             "pending_triggered" => EventKind::PendingTriggered {
                 id: num(&f, "id")?,
                 price: num(&f, "price")?,
-                observed: num_opt_added_later(&f, "observed")?,
+                exec: num_opt_added_later(&f, "exec")?,
                 across_gap: flag_added_later(&f, "gap")?,
             },
             _ => return Err(BadRecord("неизвестный вид события")),
@@ -615,12 +621,12 @@ impl ReplayState {
                 self.balance += pnl;
                 self.closed.push(deal);
             }
-            // Свёртка считает деньги по ИСПОЛНЕННОЙ цене `exit`. `observed` и
+            // Свёртка считает деньги по ИСПОЛНЕННОЙ цене `exit`. `level` и
             // `across_gap` — свидетельство, а не вход расчёта: пока политику
             // исполнения не изменили, баланс обязан получаться тот же, что и
             // до появления этих полей, иначе расширение журнала молча
             // переписало бы историю счетов.
-            EventKind::PositionClosed { id, exit, cause: _, observed: _, across_gap: _ } => {
+            EventKind::PositionClosed { id, exit, cause: _, level: _, across_gap: _ } => {
                 let Some(i) = self.positions.iter().position(|p| p.id == *id) else {
                     self.orphans.push(*id);
                     return;
@@ -1006,7 +1012,7 @@ mod tests {
             },
             EventKind::PositionIncreased { id: 1, add_qty: 300, add_entry: 5400, sl: None, tp: Some(5500) },
             EventKind::PositionReduced { id: 1, qty: 150, exit: 5600 },
-            EventKind::PositionClosed { id: 1, exit: 5100, cause: CloseCause::StopLoss, observed: Some(5050), across_gap: true },
+            EventKind::PositionClosed { id: 1, exit: 5100, cause: CloseCause::StopLoss, level: Some(5050), across_gap: true },
             EventKind::PendingPlaced {
                 id: 2,
                 instrument: 3,
@@ -1019,7 +1025,7 @@ mod tests {
                 tp: None,
             },
             EventKind::PendingCancelled { id: 2 },
-            EventKind::PendingTriggered { id: 2, price: 4000, observed: Some(3990), across_gap: false },
+            EventKind::PendingTriggered { id: 2, price: 4000, exec: Some(3990), across_gap: false },
         ]
     }
 
@@ -1041,17 +1047,17 @@ mod tests {
     fn close_causes_are_distinguishable() {
         let causes = [CloseCause::Command, CloseCause::StopLoss, CloseCause::TakeProfit, CloseCause::Netting];
         let mut texts: Vec<String> =
-            causes.iter().map(|c| EventKind::PositionClosed { id: 1, exit: 1, cause: *c, observed: None, across_gap: false }.encode()).collect();
+            causes.iter().map(|c| EventKind::PositionClosed { id: 1, exit: 1, cause: *c, level: None, across_gap: false }.encode()).collect();
         texts.sort();
         texts.dedup();
         assert_eq!(texts.len(), causes.len(), "причины закрытия обязаны различаться в записи");
         for c in causes {
-            let k = EventKind::PositionClosed { id: 1, exit: 1, cause: c, observed: None, across_gap: false };
+            let k = EventKind::PositionClosed { id: 1, exit: 1, cause: c, level: None, across_gap: false };
             assert_eq!(EventKind::decode(&k.encode()), Ok(k));
         }
     }
 
-    /// Записи, сделанные ДО появления `observed`/`gap`, обязаны читаться.
+    /// Записи, сделанные ДО появления `level`/`gap`, обязаны читаться.
     ///
     /// Журнал неизменяем и лежит в основании балансов. Если расширение формата
     /// сделает вчерашние записи нечитаемыми, свёртка остановится на первой из
@@ -1067,7 +1073,7 @@ mod tests {
                 id: 7,
                 exit: 5100,
                 cause: CloseCause::StopLoss,
-                observed: None,
+                level: None,
                 across_gap: false,
             }),
             "старая запись закрытия перестала читаться — это стёртая история, а не строгость"
@@ -1076,41 +1082,45 @@ mod tests {
         let old_fill = "pending_triggered id=9 price=4000";
         assert_eq!(
             EventKind::decode(old_fill),
-            Ok(EventKind::PendingTriggered { id: 9, price: 4000, observed: None, across_gap: false })
+            Ok(EventKind::PendingTriggered { id: 9, price: 4000, exec: None, across_gap: false })
         );
     }
 
     /// Терпимость к ОТСУТСТВИЮ поля — не терпимость к мусору в нём.
     #[test]
     fn present_but_unreadable_new_field_is_still_corruption() {
-        assert!(EventKind::decode("position_closed id=7 exit=5100 cause=stop_loss observed=кот").is_err());
+        assert!(EventKind::decode("position_closed id=7 exit=5100 cause=stop_loss level=кот").is_err());
         assert!(
             EventKind::decode("position_closed id=7 exit=5100 cause=stop_loss gap=может_быть").is_err(),
             "признак разрыва принимает только 0 и 1: «может быть» в журнале не бывает"
         );
     }
 
-    /// Наблюдённая цена и факт разрыва обязаны быть РАЗЛИЧИМЫ в тексте: иначе
-    /// закрытие по уровню и закрытие на дыре выглядят в журнале одинаково, а
-    /// спорят именно о втором.
+    /// Проскальзывание обязано быть ВИДНО в записи: стоп, сработавший ровно по
+    /// поставленному уровню, и стоп, перепрыгнутый на разрыве, — это разные
+    /// разговоры с клиентом, и в журнале они не должны выглядеть одинаково.
     #[test]
-    fn gap_close_is_distinguishable_from_a_quiet_one() {
+    fn slippage_is_visible_in_the_record() {
+        // Рынок дошёл ровно до уровня: исполнение совпало с поставленным.
         let quiet = EventKind::PositionClosed {
             id: 1,
             exit: 5000,
             cause: CloseCause::StopLoss,
-            observed: Some(5000),
+            level: Some(5000),
             across_gap: false,
         };
-        let gapped = EventKind::PositionClosed {
+        // Рынок перепрыгнул уровень: поставили 5000, исполнилось по 4200.
+        // Эти 800 и есть проскальзывание, и восстановить их можно только
+        // потому, что записаны обе цены.
+        let slipped = EventKind::PositionClosed {
             id: 1,
-            exit: 5000,
+            exit: 4200,
             cause: CloseCause::StopLoss,
-            observed: Some(4200),
+            level: Some(5000),
             across_gap: true,
         };
-        assert_ne!(quiet.encode(), gapped.encode());
-        assert_eq!(EventKind::decode(&gapped.encode()), Ok(gapped));
+        assert_ne!(quiet.encode(), slipped.encode());
+        assert_eq!(EventKind::decode(&slipped.encode()), Ok(slipped));
     }
 
     #[test]

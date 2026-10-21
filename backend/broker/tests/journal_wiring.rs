@@ -125,7 +125,18 @@ fn stop_loss_is_recorded_with_its_cause_and_the_balance_replays() {
     r.must_reconcile("после срабатывания стопа");
 
     let last = r.j.events().last().unwrap();
-    assert!(matches!(last.kind(), EventKind::PositionClosed { cause: CloseCause::StopLoss, exit: 49_000, .. }));
+    // Рынок на 48 500 при стопе 49 000 — это проскальзывание, и исполняется
+    // оно по рынку (Р-178). Раньше здесь стояло `exit: 49_000`: тест
+    // утверждал, что мы закрыли по уровню, то есть что разницу доплатил
+    // брокер. Это и была та неограниченная гарантия, о которой никто не знал.
+    assert!(
+        matches!(
+            last.kind(),
+            EventKind::PositionClosed { cause: CloseCause::StopLoss, exit: 48_500, level: Some(49_000), .. }
+        ),
+        "ожидалось закрытие по рынку с записанным уровнем, а не {:?}",
+        last.kind()
+    );
     assert_eq!(last.origin(), &Origin::System, "сработавший стоп не бывает действием человека");
 }
 
