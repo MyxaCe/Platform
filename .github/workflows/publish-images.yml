@@ -1,0 +1,211 @@
+name: Образы
+
+# ПУБЛИКАЦИЯ ОБРАЗОВ · OPS-23, зона `deploy`.
+#
+# Собираем здесь, сервер только скачивает. Сборка на сервере не даёт ответить,
+# какая ревизия работает, — это уже стоило платформе трёх поколений прод-CRM с
+# тегом `latest`.
+#
+# ТЕГ — ПОЛНЫЙ ХЕШ КОММИТА И НИЧЕГО БОЛЬШЕ. `latest` не заводится вовсе, и это
+# проверяется механизмом (шаг «Запрет latest»), а не доверием к читателю.
+#
+# ЭТОТ ПРОГОН НЕ ЗАМЕНЯЕТ `deploy.yml`, А ДЕЛАЕТ ЕГО НЕНУЖНЫМ В НЫНЕШНЕМ ВИДЕ:
+# там на сервере выполняется `docker compose up --build`, то есть сборка на
+# сервере. Правка `deploy.yml` — не эта задача; дефект назван штабу.
+#
+# ОБА ОБРАЗА ОКРУЖЕНИЕ-АГНОСТИЧНЫ, и это их свойство, а не недосмотр:
+# у шлюза аргументов сборки нет, фронт рендерит конфиг из env на старте
+# (ADR-023). Поэтому домена здесь нет и быть не может — в отличие от витрины
+# и кабинета, где публичные адреса вшиваются на сборке.
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  # Прерванная публикация оставила бы тег наполовину, а тег неизменяем и
+  # второй раз не пишется.
+  group: images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Собрать и опубликовать · ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: broker-terminal-gateway
+            context: ./backend
+            dockerfile: gateway/Dockerfile
+          - image: broker-terminal-web
+            context: ./apps/terminal
+            dockerfile: Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Имя образа и тег
+        id: ref
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          ref="ghcr.io/${owner}/${IMAGE}"
+          tag="${{ github.sha }}"
+
+          # ГЕЙТ ФОРМЫ ТЕГА. Работает над вычисленным значением, а не над
+          # текстом файла: плавающий тег не пройдёт сюда, откуда бы ни взялся.
+          if ! printf '%s' "$tag" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::тег «$tag» не является полным хешем коммита; плавающие теги запрещены"
+            exit 1
+          fi
+
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_REF=$ref" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: Вход в ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Два разных запрета, и сливать их нельзя: первый про то, что `latest`
+      # не должен существовать никогда, второй — что существующий тег не
+      # переписывается. Разные причины, разные починки.
+      - name: Запрет latest
+        run: |
+          set -uo pipefail
+          out=$(docker manifest inspect "$IMAGE_REF:latest" 2>&1) && rc=0 || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::в реестре есть $IMAGE_REF:latest — плавающий тег запрещён платформой, удалите версию пакета"
+            exit 1
+          fi
+          echo "latest отсутствует. Ответ реестра (печатаем целиком, чтобы отказ прав не выглядел отсутствием тега):"
+          echo "$out"
+
+      - name: Неизменяемость тега
+        run: |
+          set -uo pipefail
+          out=$(docker manifest inspect "$IMAGE_REF:$IMAGE_TAG" 2>&1) && rc=0 || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::$IMAGE_REF:$IMAGE_TAG уже опубликован. Тег неизменяем: перезапись запрещена. Нужен новый образ — нужен новый коммит."
+            echo "$out" | head -20
+            exit 1
+          fi
+          echo "тега ещё нет, публикуем. Ответ реестра:"
+          echo "$out"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Собираем в локальный демон, а НЕ сразу в реестр: метку ревизии надо
+      # проверить до публикации, иначе красный прогон оставит в реестре тег,
+      # которому нельзя верить.
+      - name: Сборка
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.context }}/${{ matrix.dockerfile }}
+          load: true
+          push: false
+          provenance: false
+          tags: ${{ steps.ref.outputs.ref }}:${{ steps.ref.outputs.tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.sha }}
+            com.broker.public-addresses=none
+            com.broker.built-by=${{ github.workflow }}/${{ github.run_id }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Метка ревизии стоит и совпадает с коммитом
+        run: |
+          set -euo pipefail
+          got=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_REF:$IMAGE_TAG")
+          if [ "$got" != "$IMAGE_TAG" ]; then
+            echo "::error::метка ревизии «$got» не равна коммиту «$IMAGE_TAG» — из чего собран образ, ответить нечем"
+            exit 1
+          fi
+          echo "revision=$got"
+          docker inspect --format '{{json .Config.Labels}}' "$IMAGE_REF:$IMAGE_TAG"
+
+      - name: Публикация
+        run: docker push "$IMAGE_REF:$IMAGE_TAG"
+
+      - name: Итог
+        run: |
+          set -euo pipefail
+          digest=$(docker buildx imagetools inspect "$IMAGE_REF:$IMAGE_TAG" --format '{{.Manifest.Digest}}')
+          {
+            echo "### ${{ matrix.image }}"
+            echo ""
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| образ | \`$IMAGE_REF\` |"
+            echo "| тег (неизменяемый) | \`$IMAGE_TAG\` |"
+            echo "| digest | \`$digest\` |"
+            echo ""
+            echo "Скачать: \`docker pull $IMAGE_REF@$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  pull:
+    name: Скачать обратно · ${{ matrix.image }}
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [broker-terminal-gateway, broker-terminal-web]
+    steps:
+      # Отдельное задание на чистом раннере — иначе «скачивается» проверялось бы
+      # на машине, где образ уже лежит в демоне с момента сборки.
+      - name: Имя образа
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE_REF=ghcr.io/${owner}/${{ matrix.image }}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${{ github.sha }}" >> "$GITHUB_ENV"
+
+      # НЕ ГЕЙТ, И ЭТО СКАЗАНО ВСЛУХ: публичность пакета — решение владельца.
+      # Публичный сервер тянет без ключа, приватный требует токена на чтение.
+      # Оба состояния законны, шаг сообщает, какое сейчас.
+      - name: Видимость пакета — анонимная попытка
+        run: |
+          set -uo pipefail
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          if docker pull "$IMAGE_REF:$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "ПАКЕТ ПУБЛИЧНЫЙ: сервер скачает без ключа"
+            echo "- \`${{ matrix.image }}\` — **публичный**" >> "$GITHUB_STEP_SUMMARY"
+            docker rmi "$IMAGE_REF:$IMAGE_TAG" >/dev/null 2>&1 || true
+          else
+            echo "ПАКЕТ ПРИВАТНЫЙ: серверу понадобится токен на чтение пакетов"
+            echo "- \`${{ matrix.image }}\` — **приватный**, серверу нужен токен" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Вход в ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Скачать и сверить ревизию
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE_REF:$IMAGE_TAG"
+          got=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_REF:$IMAGE_TAG")
+          if [ "$got" != "$IMAGE_TAG" ]; then
+            echo "::error::скачанный образ собран из «$got», а запрашивали «$IMAGE_TAG»"
+            exit 1
+          fi
+          echo "скачан $IMAGE_REF:$IMAGE_TAG, ревизия сходится"
