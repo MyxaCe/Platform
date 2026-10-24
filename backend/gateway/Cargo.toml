@@ -27,8 +27,22 @@ futures-util = "0.3"
 # SSO: валидация handoff-JWT платформы по JWKS (RS256). Без use_pem — ключи строим
 # из RSA-компонент (n,e) JWKS, PEM не нужен (ADR-023, фаза Т2).
 jsonwebtoken = { version = "9", default-features = false }
+# Шина событий (TRM-40). AMQP 0-9-1 через lapin.
+#
+# `default-features = false` + `rustls`: по умолчанию lapin тянет native-tls, а это
+# системный OpenSSL — его нет в `rust:slim`, и сборка образа упала бы на линковке.
+# rustls чистый Rust и собирается везде, где собирается остальное.
+lapin = { version = "2", default-features = false, features = ["rustls"] }
+# `event_id`, выведенный из факта (UUIDv5 = SHA-1 от имени), а не случайный: тот же
+# факт обязан давать тот же идентификатор, иначе дедуп потребителя бесполезен.
+# Поэтому `v4` и `getrandom` не нужны вовсе.
+uuid = { version = "1", default-features = false, features = ["std", "v5"] }
+# `occurred_at` в ISO-8601. Часов не нужно — время приходит из записи журнала.
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc"] }
+# Трейт отправителя асинхронный: повторную доставку проверяем на отказывающем
+# двойнике, а не на отключённой шине. Был в dev-зависимостях — переехал наверх.
+async-trait = "0.1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-async-trait = "0.1"

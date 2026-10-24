@@ -106,7 +106,40 @@ impl gateway::persistence::Persistence for FailingStore {
         _u: domain::account::UserId,
         _s: &broker::AccountSnapshot,
         _e: &[broker::journal::AccountEvent],
+        _out: &[gateway::persistence::OutboxRecord],
     ) -> Result<(), gateway::persistence::StoreError> {
+        Err(gateway::persistence::StoreError("disk on fire".into()))
+    }
+
+    // Очередь шины у этого двойника тоже отказывает: хранилище «горит» целиком,
+    // а не выборочно. Пустые заглушки здесь соврали бы — и соврали бы ровно в ту
+    // сторону, в которую нам удобно.
+    async fn claim_outbox(
+        &self,
+        _limit: i64,
+        _lease_ms: i64,
+    ) -> Result<Vec<gateway::persistence::OutboxClaim>, gateway::persistence::StoreError> {
+        Err(gateway::persistence::StoreError("disk on fire".into()))
+    }
+    async fn mark_published(&self, _id: i64) -> Result<(), gateway::persistence::StoreError> {
+        Err(gateway::persistence::StoreError("disk on fire".into()))
+    }
+    async fn mark_failed(
+        &self,
+        _id: i64,
+        _attempts: i32,
+        _retry_in_ms: i64,
+        _error: &str,
+    ) -> Result<(), gateway::persistence::StoreError> {
+        Err(gateway::persistence::StoreError("disk on fire".into()))
+    }
+    async fn outbox_backlog(&self) -> Result<i64, gateway::persistence::StoreError> {
+        Err(gateway::persistence::StoreError("disk on fire".into()))
+    }
+    async fn identity_of(
+        &self,
+        _u: domain::account::UserId,
+    ) -> Result<Option<(String, String)>, gateway::persistence::StoreError> {
         Err(gateway::persistence::StoreError("disk on fire".into()))
     }
 }

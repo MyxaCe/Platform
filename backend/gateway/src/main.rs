@@ -5,7 +5,7 @@ async fn main() {
     // Хранилище выбирается переменной окружения (ADR-016). Без неё — MemoryStore:
     // всё в памяти процесса, чтобы локальный запуск и тесты не требовали БД. Путь
     // записи при этом настоящий, включая журнал счёта (ADR-027).
-    let state = match std::env::var("DATABASE_URL") {
+    let mut state = match std::env::var("DATABASE_URL") {
         Ok(url) if !url.is_empty() => {
             let store = gateway::persistence::PgStore::connect(&url)
                 .await
@@ -24,6 +24,9 @@ async fn main() {
     if let Err(e) = gateway::restore_state(&state).await {
         panic!("[gateway] не удалось поднять состояние: {e}");
     }
+    // Релей шины (TRM-40). После `restore_state`: таблица очереди заводится там же,
+    // где остальная схема, и отправлять до её создания нечего и некуда.
+    gateway::spawn_bus_relay(&mut state);
     gateway::feed::spawn(state.clone()); // реальные данные с Binance (ADR-013)
     gateway::spawn_monitor(state.clone()); // триггеры лимитных ордеров и SL/TP (ADR-014)
 
