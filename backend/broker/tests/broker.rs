@@ -1331,3 +1331,94 @@ fn the_margin_invariant_speaks_the_accounts_currency() {
         );
     }
 }
+
+// ---- Сброс демо-счёта (TRM-54) --------------------------------------------
+
+/// **Сброс записывается движением со знаком, а не стартовой суммой.**
+///
+/// «Стало 10 000» не отвечает, сколько списали или добавили, — а по журналу
+/// обязано восстанавливаться движение, а не только итог.
+#[test]
+fn a_reset_is_recorded_as_a_signed_movement() {
+    let mut b = Broker::new(1_000_000, 1);
+    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE));
+    let _ = b.take_events(ALICE);
+
+    // Проторговали в минус: остаток 900 000.
+    let id = open(&mut b, PosSide::Long, 6_000_000);
+    b.close(ALICE, id, 5_000_000).expect("закрытие");
+    let lost = 1_000_000 - b.balance(ALICE);
+    assert!(lost > 0, "счёт обязан просесть, иначе проверять нечего");
+    let _ = b.take_events(ALICE);
+
+    assert_eq!(b.reset_demo(ALICE).expect("сброс"), 1_000_000);
+    match b.take_events(ALICE).as_slice() {
+        [EventKind::DemoAccountReset { adjustment }] => {
+            assert_eq!(
+                *adjustment, lost,
+                "в записи — ровно столько, сколько добавили"
+            );
+        }
+        other => panic!("ожидалась одна проводка сброса: {other:?}"),
+    }
+}
+
+/// Сброс **вниз** тоже движение: счёт в плюсе возвращается к стартовому.
+#[test]
+fn a_reset_can_move_the_balance_down() {
+    let mut b = Broker::new(1_000_000, 1);
+    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE));
+    b.deposit(ALICE, 500_000);
+    let _ = b.take_events(ALICE);
+
+    assert_eq!(b.reset_demo(ALICE).expect("сброс"), 1_000_000);
+    match b.take_events(ALICE).as_slice() {
+        [EventKind::DemoAccountReset { adjustment }] => assert_eq!(*adjustment, -500_000),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Остаток уже стартовый — **проводки нет**: движение в ноль это не движение,
+/// а запись о нём засоряла бы ленту.
+#[test]
+fn resetting_an_untouched_account_writes_nothing() {
+    let mut b = Broker::new(1_000_000, 1);
+    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE));
+    let _ = b.take_events(ALICE);
+    assert_eq!(b.reset_demo(ALICE).expect("сброс"), 1_000_000);
+    assert!(b.take_events(ALICE).is_empty());
+}
+
+/// **Счёт с открытой позицией не сбрасывается.** Иначе остаток был бы от одной
+/// жизни счёта, а позиции от другой; закрыть их самим значило бы провести
+/// сделку, которой никто не просил.
+#[test]
+fn a_reset_is_refused_while_the_account_is_not_flat() {
+    let mut b = Broker::new(1_000_000, 1);
+    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE));
+    open(&mut b, PosSide::Long, 6_000_000);
+    assert_eq!(b.reset_demo(ALICE), Err(BrokerError::AccountNotFlat));
+
+    // И с отложенным ордером тоже: он тоже обязательство счёта.
+    let mut b2 = Broker::new(1_000_000, 1);
+    b2.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE));
+    b2.place_pending(ALICE, 1, PosSide::Long, 1000, 5_000_000, PD, QD, None, None);
+    assert_eq!(b2.reset_demo(ALICE), Err(BrokerError::AccountNotFlat));
+}
+
+/// **Реальный счёт не сбрасывается.** Сбрасывать настоящие деньги к «стартовой
+/// сумме» нечему: её там нет, реальный счёт открывается нулём.
+#[test]
+fn a_real_account_cannot_be_reset() {
+    let mut b = Broker::new(1_000_000, 1);
+    b.open_account_with(ALICE, real_profile(ALICE));
+    assert_eq!(b.reset_demo(ALICE), Err(BrokerError::NotADemoAccount));
+}
+
+/// Несуществующий счёт — свой отказ: «счёта нет» и «счёт не демо» чинятся
+/// по-разному.
+#[test]
+fn resetting_a_missing_account_says_so() {
+    let mut b = Broker::new(1_000_000, 1);
+    assert_eq!(b.reset_demo(ALICE), Err(BrokerError::UnknownAccount));
+}

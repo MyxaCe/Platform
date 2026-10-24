@@ -1188,6 +1188,7 @@ pub fn router(state: AppState) -> Router {
         .route("/pending/:id", delete(cancel_pending))
         .route("/account", get(account))
         .route("/account/journal", get(account_journal))
+        .route("/account/demo-reset", post(demo_reset))
         .route("/stream", get(ws_stream))
         // SSO платформы (ADR-023, Т2): обмен handoff-JWT на сессию терминала и логаут.
         .route("/v1/session", post(session_create))
@@ -2056,6 +2057,35 @@ async fn account_journal(
         excluded_from_reporting_through: j.state().excluded_from_reporting_through,
         entries,
     }))
+}
+
+/// Сбросить демо-счёт к стартовому остатку (TRM-54).
+///
+/// **Ручка живёт здесь, потому что владелец денежного числа — терминал.**
+/// Кабинет правил свою копию у себя, и следующее же событие о балансе
+/// возвращало прежнюю сумму: сброс отменялся сам. Теперь сброс — операция
+/// счёта, событие на шину уходит **следствием**, а не вместо неё.
+///
+/// Идёт обычным путём мутации: журнал, инварианты, сверка, исходящая очередь —
+/// одной транзакцией. Отдельного пути у денег не бывает.
+async fn demo_reset(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AccountDto>, ApiErr> {
+    let user = require_user(&st, &headers).await?;
+    with_account(&st, user, Origin::Client, |b| {
+        b.reset_demo(user).map(|_| ()).map_err(|e| match e {
+            // Коды различимы: «не демо» чинит не тот, кто «закройте позиции».
+            broker::BrokerError::NotADemoAccount => {
+                err(StatusCode::FORBIDDEN, "not_a_demo_account")
+            }
+            broker::BrokerError::AccountNotFlat => err(StatusCode::CONFLICT, "account_not_flat"),
+            broker::BrokerError::UnknownAccount => err(StatusCode::NOT_FOUND, "unknown_account"),
+            _ => err(StatusCode::BAD_REQUEST, "reset_failed"),
+        })
+    })
+    .await?;
+    account(State(st), headers).await
 }
 
 // ---- SSO: обмен handoff-JWT на сессию терминала (ADR-023, Т2) --------------
@@ -3529,6 +3559,23 @@ mod journal_wiring_tests {
         );
     }
 
+    /// Сброс при открытой позиции отклоняется своим кодом: «закройте позиции»
+    /// и «счёт не демо» чинятся по-разному.
+    #[tokio::test]
+    async fn a_reset_with_an_open_position_is_refused_by_its_own_code() {
+        let st = build_state();
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+        assert_eq!(
+            send(&app, "POST", "/deals", Some(deal_body())).await.0,
+            StatusCode::OK
+        );
+
+        let (status, body) = send(&app, "POST", "/account/demo-reset", None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "account_not_flat", "{body}");
+    }
+
     // ================= Заведение счёта не теряется (TRM-46) =================
     //
     // Проверяется СВОЙСТВО, а не один сценарий: счёт заводится до операции и
@@ -4023,6 +4070,73 @@ mod bus_wiring_tests {
         assert!(
             of_kind(&all, bus::EV_TRADE_EXECUTED).is_empty(),
             "на уровне предупреждения ещё не закрывают: {all:?}"
+        );
+    }
+
+    /// **Сброс демо-счёта — операция терминала, и событие уходит следствием**
+    /// (TRM-54).
+    ///
+    /// Критерий владельца: после сброса следующее событие о балансе **не
+    /// возвращает прежнюю сумму**. Раньше возвращало — кабинет правил свою
+    /// копию, а терминал продолжал считать от своей.
+    #[tokio::test]
+    async fn a_demo_reset_moves_the_money_and_tells_the_bus() {
+        let st = build_state_with(tenanted(DEFAULT_USER));
+        restore_state(&st).await.unwrap();
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+
+        // Торгуем в минус и закрываем: остаток уходит от стартового.
+        assert_eq!(
+            send(
+                &app,
+                "POST",
+                "/deals",
+                Some(serde_json::json!({"instrument":1,"side":"buy","qty":1000}))
+            )
+            .await,
+            StatusCode::OK
+        );
+        with_price(&st, 1, 4_000_000).await;
+        assert_eq!(
+            send(&app, "POST", "/deals/1/close", None).await,
+            StatusCode::OK
+        );
+        let lost = st.broker.lock().await.balance(DEFAULT_USER);
+        assert!(lost < 10_000_000, "счёт обязан просесть");
+
+        assert_eq!(
+            send(&app, "POST", "/account/demo-reset", None).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            st.broker.lock().await.balance(DEFAULT_USER),
+            10_000_000,
+            "деньги меняет ТЕРМИНАЛ, а не кабинет у себя"
+        );
+
+        // Событие ушло, и в нём новая сумма — не прежняя.
+        let all = queued(&st).await;
+        let last = of_kind(&all, bus::EV_BALANCE_CHANGED)
+            .last()
+            .copied()
+            .expect("событие об остатке обязано уехать");
+        assert_eq!(last["data"]["balanceCents"], 10_000_000);
+        assert_eq!(last["data"]["reason"], "reset");
+
+        // И проводка в журнале — со знаком и суммой.
+        let kinds: Vec<String> = st
+            .journals
+            .lock()
+            .await
+            .get(&DEFAULT_USER)
+            .map(|j| j.events().iter().map(|e| e.kind().encode()).collect())
+            .unwrap_or_default();
+        assert!(
+            kinds
+                .iter()
+                .any(|k| k.starts_with("demo_account_reset adjustment=")),
+            "сброс обязан быть именованной проводкой: {kinds:?}"
         );
     }
 

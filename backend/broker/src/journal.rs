@@ -276,6 +276,17 @@ pub enum EventKind {
         exec: Option<i64>,
         across_gap: bool,
     },
+    /// **Демо-счёт сброшен к стартовому остатку** (TRM-54).
+    ///
+    /// `adjustment` — на сколько изменился остаток: со знаком, потому что
+    /// сбросить можно и вниз. Отдельной статьёй, а не записью стартовой суммы:
+    /// «стало 10 000» не отвечает, **сколько списали или добавили**, а по
+    /// журналу обязано восстанавливаться движение, а не только итог. Та же
+    /// причина, по которой именована компенсация.
+    ///
+    /// Владелец денежного числа — терминал (решение владельца 24.10). Кабинет
+    /// эту запись не делает и делать не может: он отражает, а не пишет деньги.
+    DemoAccountReset { adjustment: Cents },
     /// **Отрицательный остаток погашен за счёт брокера** (TRM-42).
     ///
     /// `amount` — сумма компенсации, ровно столько, сколько не хватало до нуля.
@@ -341,7 +352,8 @@ impl EventKind {
             | EventKind::PendingPlaced { .. }
             | EventKind::PendingCancelled { .. }
             | EventKind::PendingTriggered { .. }
-            | EventKind::NegativeBalanceCompensated { .. } => true,
+            | EventKind::NegativeBalanceCompensated { .. }
+            | EventKind::DemoAccountReset { .. } => true,
             EventKind::HistoryExcludedFromReporting { .. } => false,
         }
     }
@@ -558,6 +570,9 @@ impl EventKind {
             EventKind::NegativeBalanceCompensated { amount } => {
                 format!("negative_balance_compensated amount={amount}")
             }
+            EventKind::DemoAccountReset { adjustment } => {
+                format!("demo_account_reset adjustment={adjustment}")
+            }
         }
     }
 
@@ -653,6 +668,9 @@ impl EventKind {
             }
             "negative_balance_compensated" => EventKind::NegativeBalanceCompensated {
                 amount: num(&f, "amount")?,
+            },
+            "demo_account_reset" => EventKind::DemoAccountReset {
+                adjustment: num(&f, "adjustment")?,
             },
             _ => return Err(BadRecord("неизвестный вид события")),
         })
@@ -890,6 +908,10 @@ impl ReplayState {
             // подгонять его к ожидаемому — иначе испорченная сумма молча
             // исправится при подъёме и расхождения никто не увидит.
             EventKind::NegativeBalanceCompensated { amount } => self.balance += *amount,
+            // Сброс тоже применяется ДВИЖЕНИЕМ, а не присвоением стартовой
+            // суммы: свёртка обязана получать остаток из проводок. Присвоение
+            // молча исправило бы испорченную запись при подъёме.
+            EventKind::DemoAccountReset { adjustment } => self.balance += *adjustment,
             EventKind::Withdrawn { amount } => self.balance -= *amount,
             EventKind::PositionOpened {
                 id,
