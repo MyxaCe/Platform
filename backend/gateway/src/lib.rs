@@ -159,6 +159,29 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         .and_then(|s| s.parse::<i128>().ok())
         .filter(|c| *c > 0)
         .unwrap_or(10_000_000);
+    // Уровень принудительного закрытия (TRM-41). Имя переменной — будущее имя
+    // поля профиля юрисдикции (`CMS-24`, по умолчанию Сейшелы): когда профиль
+    // появится, меняется источник, а не словарь.
+    //
+    // **Умолчания нет, и это решение, а не недоделка.** Порог — свойство
+    // юрисдикции; выдуманный у нас, он молча разошёлся бы с тем, по которому
+    // считает источник, и обе стороны были бы «правы». То же правило, по
+    // которому порог свежести котировок задаёт MDS, а не потребитель
+    // (КОНТРАКТЫ §5г): порог приходит снаружи или не применяется вовсе.
+    //
+    // Не задан → принудительного закрытия НЕТ, и это видно в `/health` и в логе
+    // старта. Молчать об отсутствующем риск-контроле нельзя: счёт выглядит
+    // защищённым ровно до первого разрыва.
+    let stop_out_pct = std::env::var("MARGIN_STOP_OUT_LEVEL_PERCENT")
+        .ok()
+        .and_then(|s| s.trim().parse::<i128>().ok())
+        .filter(|p| *p > 0);
+    match stop_out_pct {
+        Some(p) => println!("[gateway] принудительное закрытие по марже: ниже {p}%"),
+        None => eprintln!(
+            "[gateway] ВНИМАНИЕ: MARGIN_STOP_OUT_LEVEL_PERCENT не задан — принудительного закрытия по марже НЕТ. Счёт может уйти в минус без ограничения сверху. Порог задаёт юрисдикция (CMS-24), выдумывать его здесь нельзя."
+        ),
+    }
     let feed_instruments = feed::instruments();
     let symbols = symbol_index(&feed_instruments);
     let tenant_instruments = TenantSource::from_env(&symbols);
@@ -173,7 +196,9 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         depth_cache: Arc::new(Mutex::new(HashMap::new())),
         stats_cache: Arc::new(Mutex::new(HashMap::new())),
         tenant_instruments: Arc::new(tenant_instruments),
-        broker: Arc::new(Mutex::new(Broker::new(start_cents, 1))), // старт из env, leverage 1
+        broker: Arc::new(Mutex::new(
+            Broker::new(start_cents, 1).with_stop_out_pct(stop_out_pct),
+        )), // старт из env, leverage 1
         store,
         acct_locks: Arc::new(Mutex::new(HashMap::new())),
         quarantined: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -1170,7 +1195,19 @@ struct AccountDto {
     balance: i128,
     equity: i128,
     used_margin: i128,
+    /// Свободная маржа — `equity - занятая маржа`, **одно определение на весь
+    /// счёт** (TRM-41). До этого экран и допуск считали её по-разному, и человек
+    /// видел не то число, по которому движок решает, пустить ли сделку.
     free_margin: i128,
+    /// Уровень маржи в процентах. `null` — позиций нет, и уровень **не
+    /// определён**: это не «бесконечно хорошо», вопрос такому счёту не задаётся.
+    /// По нему же срабатывает принудительное закрытие.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    margin_level_pct: Option<i128>,
+    /// Порог принудительного закрытия в процентах. `null` — **закрытия нет**:
+    /// порог не задан, и счёт ничем не ограничен снизу (TRM-41).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_out_level_pct: Option<i128>,
     open_pnl: i128,
 }
 #[derive(Serialize)]
@@ -1533,9 +1570,15 @@ async fn open_deal(
             t.last,
         )
     };
+    // Текущие цены нужны допуску: свободная маржа считается через equity, то
+    // есть с учётом нереализованного результата уже открытых позиций (TRM-41).
+    // Снимаются ДО лока счёта: тикеры живут под своим локом, и брать два лока
+    // во вложенном порядке — способ получить взаимную блокировку.
+    let m = marks(&st).await;
     let id = with_account(&st, user, Origin::Client, |b| {
         b.open(
             user,
+            &m,
             req.instrument,
             side,
             req.qty,
@@ -1775,6 +1818,10 @@ async fn account(
     let open_pnl = b.open_pnl(user, &m);
     let used = b.used_margin(user);
     let equity = balance + open_pnl;
+    // Свободную маржу спрашиваем у брокера, а не считаем здесь заново: до
+    // TRM-41 экран считал её по своей формуле, движок — по своей, и число на
+    // экране не было тем, по которому пускают сделку.
+    let free = b.free_margin(user, &m);
     let model = match b.model(user) {
         broker::PositionModel::Netting => "netting",
         broker::PositionModel::Hedging => "hedging",
@@ -1784,7 +1831,9 @@ async fn account(
         balance,
         equity,
         used_margin: used,
-        free_margin: equity - used,
+        free_margin: free,
+        margin_level_pct: b.margin_level_pct(user, &m),
+        stop_out_level_pct: b.stop_out_pct(),
         open_pnl,
     }))
 }
@@ -3681,5 +3730,155 @@ mod bus_wiring_tests {
             v["shared_account"], true,
             "общий счёт обязан быть виден машине, а не только по симптому: {v}"
         );
+    }
+}
+
+/// Экран и движок считают свободную маржу ОДНИМ числом (TRM-41).
+///
+/// Проверка идёт через роутер, а не по брокеру: расхождение жило именно между
+/// слоями — ручка `/account` считала `equity - used` у себя, а допуск к открытию
+/// внутри брокера считал `balance - used`. Каждый по отдельности был
+/// самосогласован, и ни один тест уровня единицы этого не видел.
+#[cfg(test)]
+mod margin_wiring_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn get(app: &Router, uri: &str) -> serde_json::Value {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    async fn post(app: &Router, uri: &str, body: serde_json::Value) -> StatusCode {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        app.clone().oneshot(req).await.unwrap().status()
+    }
+
+    async fn price(st: &AppState, instrument: u32, px: i64) {
+        st.tickers.lock().await.insert(
+            instrument,
+            feed::Ticker {
+                last: px,
+                change: 0.0,
+                high: px,
+                bid: px,
+                ask: px,
+            },
+        );
+    }
+
+    /// Отказ не приходит на счёт, где экран показывает свободные деньги.
+    #[tokio::test]
+    async fn the_screen_and_the_engine_agree_on_free_margin() {
+        let st = build_state();
+        price(&st, 1, 5_000_000).await; // BTC $50 000.00, pd=2 qd=5
+        let app = router(st.clone());
+
+        // Открываем 0.01 → нотионал $500, маржа $500 при плече 1.
+        assert_eq!(
+            post(
+                &app,
+                "/deals",
+                serde_json::json!({"instrument":1,"side":"buy","qty":1000})
+            )
+            .await,
+            StatusCode::OK
+        );
+
+        // Рынок уходит вниз: нереализованный убыток съедает свободное.
+        price(&st, 1, 2_500_000).await;
+
+        let acc = get(&app, "/account").await;
+        let free = acc["free_margin"].as_i64().expect("свободная маржа");
+        assert!(
+            free < acc["balance"].as_i64().unwrap() - acc["used_margin"].as_i64().unwrap(),
+            "экран обязан учитывать нереализованный убыток: {acc}"
+        );
+
+        // Просим объём, нотионал которого чуть БОЛЬШЕ названного свободного.
+        // При pd=2, qd=5 нотионал в центах = `цена * qty / 100_000`, поэтому
+        // объём выводим из цены, а не из вымышленного множителя: иначе проверка
+        // зависела бы от стартового баланса, которого она не задаёт.
+        const PX: i64 = 2_500_000;
+        let too_much = free * 100_000 / PX + 10_000;
+        let status = post(
+            &app,
+            "/deals",
+            serde_json::json!({"instrument":1,"side":"buy","qty": too_much}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::PAYMENT_REQUIRED,
+            "движок обязан отказать там же, где отказывает экран: free={free}, {acc}"
+        );
+    }
+
+    /// Уровень маржи отдаётся наружу и не определён без позиций.
+    #[tokio::test]
+    async fn margin_level_is_served_and_undefined_without_positions() {
+        let st = build_state();
+        price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+
+        // Счёт заводим настоящей сделкой и закрываем её: нужен СУЩЕСТВУЮЩИЙ
+        // счёт без позиций. Спросить уровень у незаведённого счёта значило бы
+        // получить `None` по другой причине и не заметить подмены на ноль.
+        assert_eq!(
+            post(
+                &app,
+                "/deals",
+                serde_json::json!({"instrument":1,"side":"buy","qty":1000})
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post(&app, "/deals/1/close", serde_json::json!({})).await,
+            StatusCode::OK
+        );
+
+        let acc = get(&app, "/account").await;
+        assert_eq!(acc["used_margin"], 0, "позиций не осталось: {acc}");
+        assert!(
+            acc.get("margin_level_pct").is_none(),
+            "позиций нет — уровня нет, а не ноль: {acc}"
+        );
+        assert!(
+            acc.get("stop_out_level_pct").is_none(),
+            "порог в тестах не задан, и это видно: {acc}"
+        );
+
+        assert_eq!(
+            post(
+                &app,
+                "/deals",
+                serde_json::json!({"instrument":1,"side":"buy","qty":1000})
+            )
+            .await,
+            StatusCode::OK
+        );
+        // Баланс $100 000, занятая маржа $500 при плече 1 → 20 000%. Число
+        // выведено из входных данных руками: сравнивать с `equity*100/used`,
+        // посчитанным здесь же, значило бы сравнить реализацию с собой.
+        let acc = get(&app, "/account").await;
+        assert_eq!(
+            acc["used_margin"], 50_000,
+            "нотионал 0.01 × $50 000 = $500: {acc}"
+        );
+        assert_eq!(acc["margin_level_pct"], 20_000, "{acc}");
     }
 }

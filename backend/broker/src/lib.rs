@@ -192,6 +192,53 @@ impl Account {
         self.positions.values().map(|p| p.margin).sum()
     }
 
+    /// Нереализованный результат по открытым позициям при текущих ценах.
+    ///
+    /// Инструмент без цены считается по цене входа — то есть «пока не знаем,
+    /// движения нет». Выдумывать движение по отсутствующей цене нельзя, а
+    /// исключать позицию из расчёта значило бы занизить занятый риск.
+    fn open_pnl(&self, marks: &HashMap<u32, i64>) -> Cents {
+        self.positions
+            .values()
+            .map(|p| p.unrealized(*marks.get(&p.instrument).unwrap_or(&p.entry)))
+            .sum()
+    }
+
+    /// Средства счёта с учётом незакрытых позиций.
+    fn equity(&self, marks: &HashMap<u32, i64>) -> Cents {
+        self.balance + self.open_pnl(marks)
+    }
+
+    /// **Единственное определение свободной маржи** (TRM-41).
+    ///
+    /// Было два, и они расходились: допуск к открытию считал `balance -
+    /// used_margin`, а счёт, который видит человек, — `equity - used_margin`.
+    /// То есть число на экране не было тем числом, по которому движок решает,
+    /// пустить ли сделку. С убыточной открытой позицией экран показывал меньше
+    /// свободного, чем движок разрешал; с прибыльной — больше, и человек получал
+    /// отказ «не хватает маржи», глядя на экран, где её хватает.
+    ///
+    /// Верное — через equity: нереализованный убыток уже съел средства, и не
+    /// замечать его при допуске значит позволить набирать позиции на деньги,
+    /// которых уже нет. Это же число — вход в уровень маржи, по которому
+    /// работает принудительное закрытие; два определения сделали бы допуск и
+    /// закрытие спорящими об одном счёте.
+    fn free_margin(&self, marks: &HashMap<u32, i64>) -> Cents {
+        self.equity(marks) - self.used_margin()
+    }
+
+    /// Уровень маржи в процентах: `equity / занятая маржа · 100`.
+    ///
+    /// `None` — занятой маржи нет. Это **не** «бесконечно хорошо» и не ноль:
+    /// вопрос «насколько счёт близок к принудительному закрытию» счёту без
+    /// позиций не задаётся вовсе, и подставлять сюда число значило бы ответить
+    /// на незаданный вопрос. Делению на ноль здесь взяться неоткуда именно
+    /// потому, что случай назван отдельно.
+    fn margin_level_pct(&self, marks: &HashMap<u32, i64>) -> Option<i128> {
+        let used = self.used_margin();
+        (used > 0).then(|| self.equity(marks) * 100 / used)
+    }
+
     fn log(&mut self, e: EventKind) {
         self.outbox.push(e);
     }
@@ -200,6 +247,7 @@ impl Account {
     fn try_open(
         &mut self,
         lev: i128,
+        marks: &HashMap<u32, i64>,
         instrument: u32,
         side: PosSide,
         qty: i64,
@@ -211,10 +259,10 @@ impl Account {
     ) -> Result<u64, BrokerError> {
         match self.model {
             PositionModel::Hedging => {
-                self.open_new(lev, instrument, side, qty, entry, pd, qd, sl, tp)
+                self.open_new(lev, marks, instrument, side, qty, entry, pd, qd, sl, tp)
             }
             PositionModel::Netting => {
-                self.open_netting(lev, instrument, side, qty, entry, pd, qd, sl, tp)
+                self.open_netting(lev, marks, instrument, side, qty, entry, pd, qd, sl, tp)
             }
         }
     }
@@ -224,6 +272,7 @@ impl Account {
     fn open_new(
         &mut self,
         lev: i128,
+        marks: &HashMap<u32, i64>,
         instrument: u32,
         side: PosSide,
         qty: i64,
@@ -234,7 +283,8 @@ impl Account {
         tp: Option<i64>,
     ) -> Result<u64, BrokerError> {
         let margin = margin_for(entry, qty, pd, qd, lev);
-        if self.balance - self.used_margin() < margin {
+        // Свободная маржа считается ОДНИМ способом — через equity (TRM-41).
+        if self.free_margin(marks) < margin {
             return Err(BrokerError::InsufficientMargin);
         }
         self.next_id += 1;
@@ -281,6 +331,7 @@ impl Account {
     fn open_netting(
         &mut self,
         lev: i128,
+        marks: &HashMap<u32, i64>,
         instrument: u32,
         side: PosSide,
         qty: i64,
@@ -296,7 +347,7 @@ impl Account {
             .find(|p| p.instrument == instrument)
             .map(|p| p.id);
         let Some(pos_id) = existing else {
-            return self.open_new(lev, instrument, side, qty, entry, pd, qd, sl, tp);
+            return self.open_new(lev, marks, instrument, side, qty, entry, pd, qd, sl, tp);
         };
         let cur = self
             .positions
@@ -311,7 +362,9 @@ impl Account {
             let new_margin = margin_for(new_entry, new_qty, pd, qd, lev);
             // Считаем ДОПОЛНИТЕЛЬНУЮ маржу: часть уже занята этой же позицией.
             let extra = new_margin - cur.margin;
-            if extra > 0 && self.balance - self.used_margin() < extra {
+            // Тем же единственным определением, что и обычное открытие (TRM-41):
+            // доливка — это увеличение риска, и считаться она обязана так же.
+            if extra > 0 && self.free_margin(marks) < extra {
                 return Err(BrokerError::InsufficientMargin);
             }
             let p = self.positions.get_mut(&pos_id).expect("позиция на месте");
@@ -383,7 +436,9 @@ impl Account {
             // Встречный объём больше открытого: остаток открывает позицию в новую
             // сторону. В историю попадает только свёрнутая часть — остаток ещё не
             // закрыт, и место ему не в истории закрытых сделок (ADR-025).
-            return self.open_new(lev, instrument, side, remainder, entry, pd, qd, sl, tp);
+            return self.open_new(
+                lev, marks, instrument, side, remainder, entry, pd, qd, sl, tp,
+            );
         }
         Ok(pos_id)
     }
@@ -440,7 +495,13 @@ impl Account {
     /// значило бы не исполнить стоп на реальном движении. Меняется только
     /// запись: закрытие на разрыве должно быть отличимо в журнале, потому что
     /// спорят именно о нём.
-    fn run_triggers(&mut self, lev: i128, marks: &HashMap<u32, i64>, across_gap: bool) -> bool {
+    fn run_triggers(
+        &mut self,
+        lev: i128,
+        marks: &HashMap<u32, i64>,
+        across_gap: bool,
+        stop_out_pct: Option<i128>,
+    ) -> bool {
         // Сработавшие лимитные ордера → открыть позицию.
         let mut fire: Vec<PendingOrder> = Vec::new();
         self.pendings.retain(|_, p| match marks.get(&p.instrument) {
@@ -478,6 +539,7 @@ impl Account {
             });
             let _ = self.try_open(
                 lev,
+                marks,
                 p.instrument,
                 p.side,
                 p.qty,
@@ -522,7 +584,76 @@ impl Account {
         for (id, exec, level, cause) in to_close {
             self.close_pos(id, exec, Some(level), across_gap, cause);
         }
-        fired_any || closed_any
+
+        // Принудительное закрытие по марже — ПОСЛЕ собственных стопов клиента
+        // (TRM-41). Порядок не стилистический: если стоп человека сработал на
+        // этом же тике, закрыть обязан он, а не мы. Иначе брокер отбирает у
+        // клиента исполнение его же распоряжения и ставит себе причину закрытия.
+        let stopped_out = self.run_stop_out(marks, across_gap, stop_out_pct);
+
+        fired_any || closed_any || stopped_out
+    }
+
+    /// Закрывать, пока уровень маржи не поднимется выше порога.
+    ///
+    /// **Порог приходит снаружи или закрытия нет вовсе.** Выдуманное на нашей
+    /// стороне число молча разошлось бы с тем, по которому считает источник, —
+    /// то же правило, по которому порог свежести котировок задаёт MDS, а не
+    /// потребитель (КОНТРАКТЫ §5г). Порог — свойство юрисдикции, и его место в
+    /// профиле, а не в коде.
+    ///
+    /// **Закрываем самую убыточную позицию первой.** Арифметически уровень
+    /// поднимает любое закрытие: equity от самого факта закрытия не меняется
+    /// (нереализованный убыток просто становится реализованным), а занятая маржа
+    /// падает. Но выбор не арифметический: убыток течёт из конкретной позиции, и
+    /// закрыть сначала её — значит остановить то, что и подвело счёт к порогу.
+    /// Закрытие «самой крупной по марже» подняло бы уровень быстрее и оставило
+    /// бы течь.
+    ///
+    /// Позиция без цены **не закрывается**: закрыть по цене входа значило бы
+    /// выдумать исполнение. Её маржа продолжает считаться занятой, и если
+    /// уровень из-за неё не поднимается, цикл честно останавливается, не
+    /// закрыв ничего лишнего.
+    fn run_stop_out(
+        &mut self,
+        marks: &HashMap<u32, i64>,
+        across_gap: bool,
+        stop_out_pct: Option<i128>,
+    ) -> bool {
+        let Some(threshold) = stop_out_pct else {
+            return false;
+        };
+        let mut closed = false;
+        loop {
+            let used = self.used_margin();
+            if used <= 0 {
+                break; // позиций нет — закрывать нечего
+            }
+            // Сравнение без деления: `equity * 100 <= порог * занятая маржа`.
+            // Делением мы бы округляли уровень и срабатывали на долю процента
+            // раньше или позже порога, в зависимости от величин.
+            if self.equity(marks) * 100 > threshold * used {
+                break;
+            }
+            // Самая убыточная ИЗ ТЕХ, у кого есть цена.
+            let worst = self
+                .positions
+                .values()
+                .filter_map(|p| {
+                    marks
+                        .get(&p.instrument)
+                        .map(|m| (p.id, *m, p.unrealized(*m)))
+                })
+                .min_by_key(|(_, _, pnl)| *pnl);
+            let Some((id, mark, _)) = worst else {
+                break; // цен нет ни по одной — закрывать нечем
+            };
+            // Уровня человек здесь не ставил: закрытие наше, и называть
+            // что-либо «уровнем» было бы приписыванием ему чужого решения.
+            self.close_pos(id, mark, None, across_gap, CloseCause::StopOut);
+            closed = true;
+        }
+        closed
     }
 }
 
@@ -530,6 +661,11 @@ pub struct Broker {
     start_balance: Cents,
     leverage: i128,
     accounts: HashMap<UserId, Account>,
+    /// Уровень маржи в процентах, ниже которого счёт закрывается принудительно
+    /// (TRM-41). `None` — **закрытия нет**, и это осознанное состояние, а не
+    /// забытая настройка: порог задаёт юрисдикция, и выдумать его здесь значило
+    /// бы подменить её решение своим.
+    stop_out_pct: Option<i128>,
 }
 
 impl Broker {
@@ -538,7 +674,22 @@ impl Broker {
             start_balance,
             leverage: leverage.max(1),
             accounts: HashMap::new(),
+            stop_out_pct: None,
         }
+    }
+
+    /// Задать порог принудительного закрытия (TRM-41).
+    ///
+    /// Отдельным шагом, а не аргументом конструктора: порог приходит из профиля
+    /// юрисдикции, а конструктор зовут и там, где профиля нет (тесты ядра).
+    /// Незаданный порог — честное «закрытия нет», и оно видно в `/health`.
+    pub fn with_stop_out_pct(mut self, pct: Option<i128>) -> Self {
+        self.stop_out_pct = pct;
+        self
+    }
+
+    pub fn stop_out_pct(&self) -> Option<i128> {
+        self.stop_out_pct
     }
 
     fn acct(&mut self, user: UserId) -> &mut Account {
@@ -630,8 +781,24 @@ impl Broker {
             .map(|a| a.used_margin())
             .unwrap_or(0)
     }
-    pub fn free_margin(&self, user: UserId) -> Cents {
-        self.balance(user) - self.used_margin(user)
+    /// Свободная маржа — через equity, **одним определением на весь счёт**
+    /// (TRM-41). Требует цены: нереализованный результат — часть средств.
+    pub fn free_margin(&self, user: UserId, marks: &HashMap<u32, i64>) -> Cents {
+        self.accounts
+            .get(&user)
+            .map(|a| a.free_margin(marks))
+            .unwrap_or(self.start_balance)
+    }
+
+    /// Уровень маржи в процентах: `equity / занятая маржа`.
+    ///
+    /// `None` — занятой маржи нет, и уровень **не определён**. Не «бесконечность»
+    /// и не ноль: счёт без позиций нельзя ни закрыть принудительно, ни признать
+    /// здоровым по этому показателю — вопрос к нему не задаётся.
+    pub fn margin_level_pct(&self, user: UserId, marks: &HashMap<u32, i64>) -> Option<i128> {
+        self.accounts
+            .get(&user)
+            .and_then(|a| a.margin_level_pct(marks))
     }
     pub fn positions(&self, user: UserId) -> Vec<Position> {
         self.accounts
@@ -673,6 +840,7 @@ impl Broker {
     pub fn open(
         &mut self,
         user: UserId,
+        marks: &HashMap<u32, i64>,
         instrument: u32,
         side: PosSide,
         qty: i64,
@@ -684,7 +852,7 @@ impl Broker {
     ) -> Result<u64, BrokerError> {
         let lev = self.leverage;
         self.acct(user)
-            .try_open(lev, instrument, side, qty, entry, pd, qd, sl, tp)
+            .try_open(lev, marks, instrument, side, qty, entry, pd, qd, sl, tp)
     }
 
     /// Закрыть позицию по марк-цене. Возвращает реализованный P&L.
@@ -711,8 +879,13 @@ impl Broker {
 
     /// Вывести со счёта. Нельзя вывести больше, чем свободно (баланс минус занятое
     /// под маржу открытых позиций). Возвращает новый баланс.
-    pub fn withdraw(&mut self, user: UserId, amount: Cents) -> Result<Cents, BrokerError> {
-        if amount > self.free_margin(user) {
+    pub fn withdraw(
+        &mut self,
+        user: UserId,
+        amount: Cents,
+        marks: &HashMap<u32, i64>,
+    ) -> Result<Cents, BrokerError> {
+        if amount > self.free_margin(user, marks) {
             return Err(BrokerError::InsufficientFunds);
         }
         let a = self.acct(user);
@@ -785,9 +958,10 @@ impl Broker {
     /// вызывающий: о свежести цен знает тот, кто их принимает, а не брокер.
     pub fn check(&mut self, marks: &HashMap<u32, i64>, across_gap: bool) -> Vec<UserId> {
         let lev = self.leverage;
+        let stop_out = self.stop_out_pct;
         let mut changed = Vec::new();
         for (user, a) in self.accounts.iter_mut() {
-            if a.run_triggers(lev, marks, across_gap) {
+            if a.run_triggers(lev, marks, across_gap, stop_out) {
                 changed.push(*user);
             }
         }
@@ -1032,6 +1206,18 @@ pub fn check_snapshot(snap: &AccountSnapshot, leverage: i128) -> Vec<Violation> 
 // Проверки идут над слепком, поэтому и тесты — над слепком: тот же режим, в
 // котором проверка работает в бою. Прошлая реализация жила в `PgStore`, а тесты
 // шли на `NoopStore`, где она была пустой — и не выполнялась ни разу (TRM-06).
+/// Пустой справочник цен для проверок ядра.
+///
+/// Пустой он намеренно: без цен нереализованный результат равен нулю (позиции
+/// считаются по цене входа), то есть `equity == balance`, и свободная маржа
+/// совпадает с прежней, балансовой. Значит существующие проверки продолжают
+/// проверять **ровно то, что проверяли**, а не новое поведение заодно. Там, где
+/// проверяется само новое поведение, цены задаются явно.
+#[cfg(test)]
+fn no_marks() -> HashMap<u32, i64> {
+    HashMap::new()
+}
+
 #[cfg(test)]
 mod invariant_tests {
     use super::*;
@@ -1203,7 +1389,18 @@ mod invariant_tests {
         let mut b = Broker::new(10_000_000, 1);
         let u = UserId(1);
         let id = b
-            .open(u, 1, PosSide::Long, 1000, 50_000, 2, 3, None, None)
+            .open(
+                u,
+                &no_marks(),
+                1,
+                PosSide::Long,
+                1000,
+                50_000,
+                2,
+                3,
+                None,
+                None,
+            )
             .expect("открытие");
         assert_eq!(check_snapshot(&b.snapshot(u), 1), vec![], "после открытия");
         b.place_pending(u, 2, PosSide::Short, 500, 40_000, 2, 3, None, None);
@@ -1222,10 +1419,32 @@ mod invariant_tests {
     fn used_margin_matches_sum_of_positions() {
         let mut b = Broker::new(10_000_000, 1);
         let u = UserId(1);
-        b.open(u, 1, PosSide::Long, 1000, 50_000, 2, 3, None, None)
-            .unwrap();
-        b.open(u, 2, PosSide::Short, 300, 20_000, 2, 3, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            1000,
+            50_000,
+            2,
+            3,
+            None,
+            None,
+        )
+        .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            2,
+            PosSide::Short,
+            300,
+            20_000,
+            2,
+            3,
+            None,
+            None,
+        )
+        .unwrap();
         let snap = b.snapshot(u);
         let sum: Cents = snap.positions.iter().map(|p| p.margin).sum();
         assert_eq!(
@@ -1307,10 +1526,32 @@ mod netting_tests {
     #[test]
     fn same_side_averages_entry_and_keeps_one_position() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None)
-            .unwrap();
-        b.open(u, 1, PosSide::Long, 300, 5400, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            100,
+            5000,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            300,
+            5400,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
 
         let ps = b.positions(u);
         assert_eq!(
@@ -1333,6 +1574,7 @@ mod netting_tests {
         let (mut b, u) = netting_broker();
         b.open(
             u,
+            &no_marks(),
             1,
             PosSide::Long,
             100,
@@ -1343,8 +1585,19 @@ mod netting_tests {
             Some(5500),
         )
         .unwrap();
-        b.open(u, 1, PosSide::Long, 100, 5200, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            100,
+            5200,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
         let ps = b.positions(u);
         assert_eq!(ps[0].sl, Some(4900), "SL не должен теряться при доливке");
         assert_eq!(ps[0].tp, Some(5500), "TP не должен теряться при доливке");
@@ -1355,12 +1608,34 @@ mod netting_tests {
     #[test]
     fn opposite_smaller_reduces_position_and_realizes_partial_pnl() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 400, 5300, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            400,
+            5300,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
         let before = b.balance(u);
 
-        b.open(u, 1, PosSide::Short, 150, 5600, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Short,
+            150,
+            5600,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
 
         let ps = b.positions(u);
         assert_eq!(ps.len(), 1, "позиция обязана остаться, а не удвоиться");
@@ -1398,10 +1673,32 @@ mod netting_tests {
     #[test]
     fn opposite_equal_closes_position_completely() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 200, 5000, PD, QD, None, None)
-            .unwrap();
-        b.open(u, 1, PosSide::Short, 200, 5100, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            200,
+            5000,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Short,
+            200,
+            5100,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(
             b.positions(u).is_empty(),
@@ -1416,12 +1713,34 @@ mod netting_tests {
     #[test]
     fn opposite_larger_flips_position_and_records_only_the_closed_part() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            100,
+            5000,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
         let before = b.balance(u);
 
-        b.open(u, 1, PosSide::Short, 250, 5200, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Short,
+            250,
+            5200,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
 
         let ps = b.positions(u);
         assert_eq!(ps.len(), 1, "после переворота остаётся одна позиция");
@@ -1452,18 +1771,51 @@ mod netting_tests {
     #[test]
     fn netting_keeps_invariants_through_a_sequence() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 400, 5300, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            400,
+            5300,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(check_snapshot(&b.snapshot(u), 1), vec![], "после открытия");
-        b.open(u, 1, PosSide::Short, 150, 5600, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Short,
+            150,
+            5600,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             check_snapshot(&b.snapshot(u), 1),
             vec![],
             "после частичного сворачивания"
         );
-        b.open(u, 1, PosSide::Short, 500, 5100, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Short,
+            500,
+            5100,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             check_snapshot(&b.snapshot(u), 1),
             vec![],
@@ -1475,10 +1827,32 @@ mod netting_tests {
     #[test]
     fn netting_is_per_instrument() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None)
-            .unwrap();
-        b.open(u, 2, PosSide::Short, 100, 3000, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            100,
+            5000,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            2,
+            PosSide::Short,
+            100,
+            3000,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             b.positions(u).len(),
             2,
@@ -1492,10 +1866,32 @@ mod netting_tests {
     fn hedging_still_opens_a_second_position() {
         let mut b = Broker::new(10_000_000, 1);
         let u = UserId(1);
-        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None)
-            .unwrap();
-        b.open(u, 1, PosSide::Short, 100, 5200, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            100,
+            5000,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Short,
+            100,
+            5200,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             b.positions(u).len(),
             2,
@@ -1522,8 +1918,19 @@ mod netting_tests {
     fn model_changes_only_when_flat() {
         let mut b = Broker::new(10_000_000, 1);
         let u = UserId(1);
-        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            100,
+            5000,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(
             !b.adopt_model(u, PositionModel::Netting),
             "с открытой позицией модель менять нельзя"
@@ -1560,8 +1967,19 @@ mod netting_tests {
     #[test]
     fn model_survives_snapshot_roundtrip() {
         let (mut b, u) = netting_broker();
-        b.open(u, 1, PosSide::Long, 100, 5000, PD, QD, None, None)
-            .unwrap();
+        b.open(
+            u,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            100,
+            5000,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
         let snap = b.snapshot(u);
         assert_eq!(snap.model, PositionModel::Netting);
 
@@ -1574,7 +1992,18 @@ mod netting_tests {
         );
         // И поведение восстановленного счёта — неттинговое, а не только поле.
         restored
-            .open(u, 1, PosSide::Short, 100, 5100, PD, QD, None, None)
+            .open(
+                u,
+                &no_marks(),
+                1,
+                PosSide::Short,
+                100,
+                5100,
+                PD,
+                QD,
+                None,
+                None,
+            )
             .unwrap();
         assert!(
             restored.positions(u).is_empty(),

@@ -6,6 +6,13 @@ use broker::journal::{CloseCause, EventKind};
 use broker::{Broker, BrokerError, PosSide};
 use domain::account::UserId;
 
+/// Пустой справочник цен: без цен нереализованный результат равен нулю, то есть
+/// `equity == balance`, и проверки продолжают проверять ровно то, что проверяли
+/// до появления единого определения свободной маржи (TRM-41).
+fn no_marks() -> std::collections::HashMap<u32, i64> {
+    std::collections::HashMap::new()
+}
+
 const ALICE: UserId = UserId(1);
 const PD: u8 = 2;
 const QD: u8 = 5;
@@ -15,7 +22,7 @@ fn marks(inst: u32, price: i64) -> HashMap<u32, i64> {
     HashMap::from([(inst, price)])
 }
 fn open(b: &mut Broker, side: PosSide, price: i64) -> u64 {
-    b.open(ALICE, 1, side, 1000, price, PD, QD, None, None)
+    b.open(ALICE, &no_marks(), 1, side, 1000, price, PD, QD, None, None)
         .unwrap()
 }
 
@@ -26,7 +33,7 @@ fn open_locks_margin() {
     let mut b = Broker::new(1_000_000, 1);
     open(&mut b, PosSide::Long, 6_000_000);
     assert_eq!(b.used_margin(ALICE), 60_000);
-    assert_eq!(b.free_margin(ALICE), 940_000);
+    assert_eq!(b.free_margin(ALICE, &no_marks()), 940_000);
     assert_eq!(b.balance(ALICE), 1_000_000);
 }
 
@@ -34,7 +41,18 @@ fn open_locks_margin() {
 fn insufficient_margin_is_rejected() {
     let mut b = Broker::new(50_000, 1);
     assert_eq!(
-        b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, None),
+        b.open(
+            ALICE,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            1000,
+            6_000_000,
+            PD,
+            QD,
+            None,
+            None
+        ),
         Err(BrokerError::InsufficientMargin)
     );
 }
@@ -47,6 +65,7 @@ fn long_pnl_and_short_pnl() {
     let mut b2 = Broker::new(1_000_000, 1);
     b2.open(
         ALICE,
+        &no_marks(),
         1,
         PosSide::Short,
         1000,
@@ -116,6 +135,7 @@ fn stop_loss_closes_position() {
     let mut b = Broker::new(1_000_000, 1);
     b.open(
         ALICE,
+        &no_marks(),
         1,
         PosSide::Long,
         1000,
@@ -141,6 +161,7 @@ fn take_profit_closes_position() {
     let mut b = Broker::new(1_000_000, 1);
     b.open(
         ALICE,
+        &no_marks(),
         1,
         PosSide::Long,
         1000,
@@ -163,6 +184,7 @@ fn check_reports_only_changed_accounts() {
     let mut b = Broker::new(1_000_000, 1);
     b.open(
         ALICE,
+        &no_marks(),
         1,
         PosSide::Long,
         1000,
@@ -198,6 +220,7 @@ fn snapshot_restore_roundtrip() {
     let mut b = Broker::new(1_000_000, 1);
     b.open(
         ALICE,
+        &no_marks(),
         1,
         PosSide::Long,
         1000,
@@ -249,7 +272,7 @@ fn deposit_increases_balance() {
 #[test]
 fn withdraw_decreases_balance() {
     let mut b = Broker::new(1_000_000, 1);
-    assert_eq!(b.withdraw(ALICE, 400_000).unwrap(), 600_000);
+    assert_eq!(b.withdraw(ALICE, 400_000, &no_marks()).unwrap(), 600_000);
     assert_eq!(b.balance(ALICE), 600_000);
 }
 
@@ -257,7 +280,7 @@ fn withdraw_decreases_balance() {
 fn cannot_withdraw_more_than_free() {
     let mut b = Broker::new(1_000_000, 1);
     assert_eq!(
-        b.withdraw(ALICE, 1_000_001),
+        b.withdraw(ALICE, 1_000_001, &no_marks()),
         Err(BrokerError::InsufficientFunds)
     );
     assert_eq!(
@@ -271,17 +294,28 @@ fn cannot_withdraw_more_than_free() {
 fn margin_locks_funds_from_withdrawal() {
     let mut b = Broker::new(1_000_000, 1);
     // Открываем позицию: нотионал = маржа при leverage=1 → часть баланса занята.
-    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, None)
-        .unwrap();
-    let free = b.free_margin(ALICE);
+    b.open(
+        ALICE,
+        &no_marks(),
+        1,
+        PosSide::Long,
+        1000,
+        6_000_000,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
+    let free = b.free_margin(ALICE, &no_marks());
     assert!(free < 1_000_000, "часть средств ушла под маржу");
     // Больше свободного вывести нельзя.
     assert_eq!(
-        b.withdraw(ALICE, free + 1),
+        b.withdraw(ALICE, free + 1, &no_marks()),
         Err(BrokerError::InsufficientFunds)
     );
     // Ровно свободное — можно.
-    assert!(b.withdraw(ALICE, free).is_ok());
+    assert!(b.withdraw(ALICE, free, &no_marks()).is_ok());
 }
 // ---- Разрыв ряда, проскальзывание и правда в журнале (TRM-19, TRM-31) -----
 
@@ -294,6 +328,7 @@ fn gap_close_executes_at_the_observed_price_and_records_the_level() {
     let mut b = Broker::new(1_000_000, 1);
     b.open(
         ALICE,
+        &no_marks(),
         1,
         PosSide::Long,
         1000,
@@ -347,6 +382,7 @@ fn bigger_gap_costs_the_client_more() {
         let mut b = Broker::new(1_000_000, 1);
         b.open(
             ALICE,
+            &no_marks(),
             1,
             PosSide::Long,
             1000,
@@ -375,6 +411,7 @@ fn quiet_close_has_no_slippage_and_is_not_marked_as_a_gap() {
     let mut b = Broker::new(1_000_000, 1);
     b.open(
         ALICE,
+        &no_marks(),
         1,
         PosSide::Long,
         1000,
@@ -416,6 +453,7 @@ fn take_profit_slips_in_the_clients_favour() {
         let mut b = Broker::new(1_000_000, 1);
         b.open(
             ALICE,
+            &no_marks(),
             1,
             PosSide::Long,
             1000,
@@ -453,8 +491,19 @@ fn take_profit_slips_in_the_clients_favour() {
 #[test]
 fn manual_close_names_no_level() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, None)
-        .unwrap();
+    b.open(
+        ALICE,
+        &no_marks(),
+        1,
+        PosSide::Long,
+        1000,
+        6_000_000,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
     let id = b.positions(ALICE)[0].id;
     b.close(ALICE, id, 6_010_000).unwrap();
 
@@ -520,6 +569,7 @@ fn closed_deal_carries_the_level_and_the_gap_outward() {
     let mut b = Broker::new(1_000_000, 1);
     b.open(
         ALICE,
+        &no_marks(),
         1,
         PosSide::Long,
         1000,
@@ -553,8 +603,19 @@ fn closed_deal_carries_the_level_and_the_gap_outward() {
 #[test]
 fn manual_close_distinguishes_absent_level_from_absent_gap() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open(ALICE, 1, PosSide::Long, 1000, 6_000_000, PD, QD, None, None)
-        .unwrap();
+    b.open(
+        ALICE,
+        &no_marks(),
+        1,
+        PosSide::Long,
+        1000,
+        6_000_000,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
     let id = b.positions(ALICE)[0].id;
     b.close(ALICE, id, 6_010_000).unwrap();
 
@@ -564,5 +625,260 @@ fn manual_close_distinguishes_absent_level_from_absent_gap() {
         d.across_gap,
         Some(false),
         "а разрыв проверяли — его не было"
+    );
+}
+
+// ======== Единое определение свободной маржи и стоп-аут (TRM-41) ===========
+//
+// Числа подобраны так, чтобы порог достигался ТОЧНО, а не «где-то рядом»:
+// проверка, которая срабатывает с запасом, не отличает «сработало на пороге» от
+// «сработало раньше». Инструмент учебный: pd=2, qd=0 — чтобы арифметику можно
+// было проверить в уме, а не доверять ей.
+
+/// `цена × объём` в центах при pd=2, qd=0 — ровно `price_raw * qty`.
+const TPD: u8 = 2;
+const TQD: u8 = 0;
+
+/// Открыть позицию учебного инструмента.
+fn open_t(b: &mut Broker, inst: u32, side: PosSide, entry: i64, qty: i64) -> u64 {
+    b.open(
+        ALICE,
+        &no_marks(),
+        inst,
+        side,
+        qty,
+        entry,
+        TPD,
+        TQD,
+        None,
+        None,
+    )
+    .expect("открытие обязано пройти")
+}
+
+// ---- Свободная маржа учитывает нереализованный убыток ----------------------
+
+/// **Нереализованный убыток уменьшает свободную маржу.**
+///
+/// До TRM-41 допуск считал `balance - used_margin` и убытка не замечал: человек
+/// с проваленной позицией мог набирать новые на деньги, которых уже нет.
+#[test]
+fn unrealised_loss_reduces_free_margin() {
+    let mut b = Broker::new(20_000, 10);
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10); // нотионал $1000, маржа $100
+
+    assert_eq!(b.used_margin(ALICE), 10_000);
+    assert_eq!(
+        b.free_margin(ALICE, &no_marks()),
+        10_000,
+        "без движения цены"
+    );
+
+    let m = marks(1, 9_000); // -$100
+    assert_eq!(b.open_pnl(ALICE, &m), -10_000);
+    assert_eq!(b.equity(ALICE, &m), 10_000);
+    assert_eq!(
+        b.free_margin(ALICE, &m),
+        0,
+        "убыток съел всё свободное — по балансу его бы ещё хватало"
+    );
+}
+
+/// И допуск к открытию считает ТЕМ ЖЕ числом. Это главное свойство: экран и
+/// движок обязаны отвечать одинаково, иначе отказ приходит на счёт, где «есть
+/// деньги».
+#[test]
+fn admission_uses_the_same_number_as_the_screen() {
+    let mut b = Broker::new(20_000, 10);
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10);
+    let m = marks(1, 9_000);
+
+    assert_eq!(b.free_margin(ALICE, &m), 0, "свободного нет");
+    assert_eq!(
+        b.open(
+            ALICE,
+            &m,
+            2,
+            PosSide::Long,
+            10,
+            10_000,
+            TPD,
+            TQD,
+            None,
+            None
+        ),
+        Err(BrokerError::InsufficientMargin),
+        "и открыть новую нельзя — по балансу было бы можно"
+    );
+}
+
+// ---- Уровень маржи ---------------------------------------------------------
+
+/// Счёт без позиций: уровень **не определён**. Не ноль и не «бесконечно
+/// хорошо» — вопрос ему не задаётся, и делению на ноль взяться неоткуда.
+#[test]
+fn margin_level_is_undefined_without_positions() {
+    // Счёт обязан СУЩЕСТВОВАТЬ, иначе проверяется не то.
+    //
+    // Первая редакция спрашивала уровень у несуществующего счёта и была зелёной
+    // по другой причине: `Broker::margin_level_pct` отдаёт `None` уже потому,
+    // что счёта нет, и до расчёта уровня дело не доходит. Мутация «уровень без
+    // позиций равен нулю» её не покрасила — тест проверял `accounts.get`, а не
+    // уровень. Найдено мутацией, исправлено заведением счёта.
+    let mut b = Broker::new(20_000, 10);
+    b.open_account(ALICE);
+    assert!(
+        b.has_account(ALICE),
+        "счёт заведён — вопрос есть кому задать"
+    );
+    assert!(b.positions(ALICE).is_empty(), "и позиций у него нет");
+
+    assert_eq!(
+        b.margin_level_pct(ALICE, &no_marks()),
+        None,
+        "у счёта без позиций уровень НЕ ОПРЕДЕЛЁН: это не ноль"
+    );
+}
+
+#[test]
+fn margin_level_is_equity_over_used_margin() {
+    let mut b = Broker::new(20_000, 10);
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10);
+    assert_eq!(b.margin_level_pct(ALICE, &marks(1, 10_000)), Some(200));
+    assert_eq!(b.margin_level_pct(ALICE, &marks(1, 9_000)), Some(100));
+    assert_eq!(b.margin_level_pct(ALICE, &marks(1, 8_500)), Some(50));
+}
+
+// ---- Принудительное закрытие ----------------------------------------------
+
+/// **Порога нет — закрытия нет.** Счёт проваливается сколь угодно глубоко, и это
+/// честное состояние ненастроенного риск-контроля, а не поломка. Выдуманный у
+/// нас порог разошёлся бы с тем, по которому считает юрисдикция.
+#[test]
+fn without_a_threshold_nothing_is_closed() {
+    let mut b = Broker::new(20_000, 10);
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10);
+    let changed = b.check(&marks(1, 1_000), false);
+    assert!(changed.is_empty(), "без порога закрывать нечем");
+    assert_eq!(b.positions(ALICE).len(), 1, "позиция на месте");
+}
+
+/// Порог задан — позиция закрывается, **когда уровень дошёл до порога**, и ни
+/// тиком раньше.
+#[test]
+fn the_position_is_closed_exactly_at_the_threshold() {
+    let mut b = Broker::new(20_000, 10).with_stop_out_pct(Some(50));
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10);
+
+    // 100% — выше порога, не трогаем.
+    assert!(b.check(&marks(1, 9_000), false).is_empty(), "уровень 100%");
+    assert_eq!(b.positions(ALICE).len(), 1);
+
+    // 50% — порог достигнут, закрываем.
+    let changed = b.check(&marks(1, 8_500), false);
+    assert_eq!(changed, vec![ALICE], "счёт обязан быть отмечен изменённым");
+    assert!(b.positions(ALICE).is_empty(), "позиция закрыта");
+}
+
+/// Закрытие по марже **называется своей причиной**: закрыл риск-контроль, а не
+/// человек и не его стоп. На претензию «почему закрыли» это разные ответы.
+#[test]
+fn a_forced_close_names_its_own_cause() {
+    let mut b = Broker::new(20_000, 10).with_stop_out_pct(Some(50));
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10);
+    b.check(&marks(1, 8_500), false);
+
+    let ev = b.take_events(ALICE);
+    let closed = ev
+        .iter()
+        .find_map(|e| match e {
+            EventKind::PositionClosed { cause, level, .. } => Some((cause, level)),
+            _ => None,
+        })
+        .expect("закрытие обязано быть записано");
+    assert_eq!(*closed.0, CloseCause::StopOut);
+    assert_eq!(
+        *closed.1, None,
+        "уровня человек здесь не ставил — приписывать ему наше решение нельзя"
+    );
+}
+
+/// **Стоп клиента старше принудительного закрытия.** Если на этом же тике
+/// сработал его собственный стоп, закрывает он: иначе брокер отбирает
+/// исполнение чужого распоряжения и ставит себе причину.
+#[test]
+fn the_clients_own_stop_wins_on_the_same_tick() {
+    let mut b = Broker::new(20_000, 10).with_stop_out_pct(Some(50));
+    b.open(
+        ALICE,
+        &no_marks(),
+        1,
+        PosSide::Long,
+        10,
+        10_000,
+        TPD,
+        TQD,
+        Some(8_600), // стоп человека сработает на 8_500
+        None,
+    )
+    .unwrap();
+
+    b.check(&marks(1, 8_500), false);
+
+    let ev = b.take_events(ALICE);
+    let cause = ev
+        .iter()
+        .find_map(|e| match e {
+            EventKind::PositionClosed { cause, .. } => Some(*cause),
+            _ => None,
+        })
+        .expect("закрытие");
+    assert_eq!(cause, CloseCause::StopLoss, "закрыл стоп человека, а не мы");
+}
+
+/// Закрывается **самая убыточная** позиция, и только пока уровень не поднялся.
+/// Закрыть всё подряд значило бы отобрать у человека позиции, которые счёт уже
+/// не топят.
+#[test]
+fn the_worst_position_goes_first_and_the_rest_stay() {
+    let mut b = Broker::new(20_000, 10).with_stop_out_pct(Some(50));
+    open_t(&mut b, 1, PosSide::Long, 5_000, 10); // маржа $50
+    open_t(&mut b, 2, PosSide::Long, 5_000, 10); // маржа $50
+
+    // 1 проваливается на -$140, 2 — всего на -$10.
+    let m = HashMap::from([(1u32, 3_600i64), (2u32, 4_900i64)]);
+    assert_eq!(b.equity(ALICE, &m), 5_000);
+    assert_eq!(b.margin_level_pct(ALICE, &m), Some(50), "порог достигнут");
+
+    b.check(&m, false);
+
+    let left = b.positions(ALICE);
+    assert_eq!(left.len(), 1, "закрыта одна, а не обе: {left:?}");
+    assert_eq!(left[0].instrument, 2, "осталась та, что почти не в убытке");
+    assert_eq!(
+        b.margin_level_pct(ALICE, &m),
+        Some(100),
+        "уровень поднялся — цикл обязан был остановиться"
+    );
+}
+
+/// Позиция **без цены не закрывается**: закрыть по цене входа значило бы
+/// выдумать исполнение. Цикл при этом обязан остановиться, а не крутиться.
+#[test]
+fn a_position_without_a_price_is_not_force_closed() {
+    let mut b = Broker::new(20_000, 10).with_stop_out_pct(Some(50));
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10);
+    open_t(&mut b, 2, PosSide::Long, 10_000, 10);
+
+    // Цена есть только у первой, и её убыток утягивает уровень ниже порога.
+    let m = marks(1, 7_000);
+    assert!(b.margin_level_pct(ALICE, &m).unwrap() <= 50);
+
+    b.check(&m, false);
+
+    let left = b.positions(ALICE);
+    assert!(
+        left.iter().any(|p| p.instrument == 2),
+        "позиция без цены обязана остаться: закрывать её нечем по какой цене"
     );
 }
