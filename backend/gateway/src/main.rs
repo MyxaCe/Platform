@@ -26,6 +26,7 @@ async fn main() {
     }
     // Релей шины (TRM-40). После `restore_state`: таблица очереди заводится там же,
     // где остальная схема, и отправлять до её создания нечего и некуда.
+    gateway::announce_account_mode(&state);
     gateway::spawn_bus_relay(&mut state);
     gateway::feed::spawn(state.clone()); // реальные данные с Binance (ADR-013)
     gateway::spawn_monitor(state.clone()); // триггеры лимитных ордеров и SL/TP (ADR-014)
