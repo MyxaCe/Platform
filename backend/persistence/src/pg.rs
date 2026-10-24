@@ -545,7 +545,11 @@ impl Persistence for PgStore {
         Ok(())
     }
 
-    async fn claim_outbox(&self, limit: i64, lease_ms: i64) -> Result<Vec<OutboxClaim>, StoreError> {
+    async fn claim_outbox(
+        &self,
+        limit: i64,
+        lease_ms: i64,
+    ) -> Result<Vec<OutboxClaim>, StoreError> {
         // `FOR UPDATE SKIP LOCKED` + сдвиг `next_attempt_at` = аренда: второй
         // экземпляр не возьмёт те же строки, пока первый с ними работает. Аренда
         // НЕ трогает `attempts`: счётчик обязан считать отказы шины, а не заходы

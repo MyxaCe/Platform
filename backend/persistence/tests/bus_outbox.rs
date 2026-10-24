@@ -129,7 +129,10 @@ async fn claimed_row_is_leased() {
         "взятое под арендой повторно не выдают"
     );
     let dump = store.outbox_dump();
-    assert_eq!(dump[0].1, 0, "аренда — не попытка: счётчик отказов не трогаем");
+    assert_eq!(
+        dump[0].1, 0,
+        "аренда — не попытка: счётчик отказов не трогаем"
+    );
 }
 
 /// Повтор того же `event_id` — повторная запись того же факта, а не второе
@@ -192,7 +195,9 @@ async fn envelope_survives_a_restart() {
     let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
         panic!("TEST_DATABASE_URL не задан — живой прогон НЕ выполнен, это не «зелено»");
     };
-    let store = persistence::PgStore::connect(&url).await.expect("связь с БД");
+    let store = persistence::PgStore::connect(&url)
+        .await
+        .expect("связь с БД");
     store.init().await.expect("схема");
 
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -225,7 +230,9 @@ async fn envelope_survives_a_restart() {
 
     // Перезапуск процесса: новое подключение, ничего в памяти не осталось.
     drop(store);
-    let reborn = persistence::PgStore::connect(&url).await.expect("связь заново");
+    let reborn = persistence::PgStore::connect(&url)
+        .await
+        .expect("связь заново");
     let claimed = reborn.claim_outbox(10, 0).await.expect("выборка");
     assert!(
         claimed.iter().any(|c| c.event_id == "live-1"),

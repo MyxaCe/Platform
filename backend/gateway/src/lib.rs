@@ -481,13 +481,12 @@ async fn ensure_account_opened(st: &AppState, user: UserId) -> Result<(), ApiErr
     )
     .await;
 
-    if let Err(e) = st
-        .store
-        .save_account(user, &snap, &sealed, &outgoing)
-        .await
-    {
+    if let Err(e) = st.store.save_account(user, &snap, &sealed, &outgoing).await {
         undo(st, user).await;
-        eprintln!("[gateway] счёт {} не заведён, запись не удалась: {e}", user.0);
+        eprintln!(
+            "[gateway] счёт {} не заведён, запись не удалась: {e}",
+            user.0
+        );
         return Err(err(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable"));
     }
 
@@ -592,11 +591,7 @@ async fn with_account<T>(
     // событие, записанное отдельно от денег, рано или поздно с ними разойдётся.
     let outgoing = bus_envelopes(st, user, before_bus, &snap, &kinds, &sealed).await;
 
-    if let Err(e) = st
-        .store
-        .save_account(user, &snap, &sealed, &outgoing)
-        .await
-    {
+    if let Err(e) = st.store.save_account(user, &snap, &sealed, &outgoing).await {
         st.broker.lock().await.restore(user, before);
         eprintln!("[gateway] запись состояния не удалась, счёт откачен: {e}");
         return Err(err(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable"));
@@ -2018,11 +2013,7 @@ pub async fn monitor_tick(st: &AppState) {
         // уходить так же. Путь, на котором событие собирается только у ручных
         // операций, молчит ровно про то, о чём спорят с клиентом.
         let outgoing = bus_envelopes(st, user, before_bus, &snap, &kinds, &sealed).await;
-        if let Err(e) = st
-            .store
-            .save_account(user, &snap, &sealed, &outgoing)
-            .await
-        {
+        if let Err(e) = st.store.save_account(user, &snap, &sealed, &outgoing).await {
             eprintln!("[monitor] не удалось сохранить счёт {}: {e}", user.0);
             continue; // в память журнал не принимаем: в хранилище его нет
         }
@@ -3293,7 +3284,10 @@ mod journal_wiring_tests {
         let kinds = events_of(&st).await;
         assert!(kinds[0].starts_with("account_opened"), "{kinds:?}");
         assert_eq!(
-            kinds.iter().filter(|k| k.starts_with("account_opened")).count(),
+            kinds
+                .iter()
+                .filter(|k| k.starts_with("account_opened"))
+                .count(),
             1,
             "счёт заводится один раз: {kinds:?}"
         );
@@ -3330,9 +3324,7 @@ mod journal_wiring_tests {
             }
         }
 
-        let st = build_state_with(Arc::new(FailOnce(
-            std::sync::atomic::AtomicBool::new(true),
-        )));
+        let st = build_state_with(Arc::new(FailOnce(std::sync::atomic::AtomicBool::new(true))));
         with_price(&st, 1, 50_000).await;
         let app = router(st.clone());
 
@@ -3349,7 +3341,9 @@ mod journal_wiring_tests {
         assert_eq!(status, StatusCode::OK);
         let kinds = events_of(&st).await;
         assert!(
-            kinds.first().is_some_and(|k| k.starts_with("account_opened")),
+            kinds
+                .first()
+                .is_some_and(|k| k.starts_with("account_opened")),
             "после отката происхождение обязано записаться: {kinds:?}"
         );
     }
@@ -3473,10 +3467,7 @@ mod bus_wiring_tests {
             .collect()
     }
 
-    fn of_kind<'a>(
-        all: &'a [serde_json::Value],
-        name: &str,
-    ) -> Vec<&'a serde_json::Value> {
+    fn of_kind<'a>(all: &'a [serde_json::Value], name: &str) -> Vec<&'a serde_json::Value> {
         all.iter().filter(|e| e["event"] == name).collect()
     }
 
@@ -3491,7 +3482,10 @@ mod bus_wiring_tests {
         let body = serde_json::json!({
             "instrument": 1, "side": "buy", "qty": 100_000, "sl": 4_900_000
         });
-        assert_eq!(send(&app, "POST", "/deals", Some(body)).await, StatusCode::OK);
+        assert_eq!(
+            send(&app, "POST", "/deals", Some(body)).await,
+            StatusCode::OK
+        );
 
         // Рынок перепрыгнул стоп: исполнение по 48 000.00, уровень был 49 000.00.
         with_price(&st, 1, 4_800_000).await;
@@ -3652,7 +3646,12 @@ mod bus_wiring_tests {
 
         let resp = app
             .clone()
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();

@@ -140,9 +140,7 @@ pub fn event_id(kind: &str, key: &str) -> String {
 /// Момент ISO-8601 с миллисекундами и `Z`. Схема потребителя — `z.string().datetime()`.
 pub fn iso_millis(at_ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(at_ms)
-        .unwrap_or_else(|| {
-            chrono::DateTime::from_timestamp_millis(0).expect("эпоха представима")
-        })
+        .unwrap_or_else(|| chrono::DateTime::from_timestamp_millis(0).expect("эпоха представима"))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
@@ -509,9 +507,7 @@ pub async fn relay_once(
                     "[bus] отправка не удалась {} event_id={} попытка={attempts} повтор через {delay} мс: {e}",
                     row.routing_key, row.event_id
                 );
-                store
-                    .mark_failed(row.id, attempts, delay, &e.0)
-                    .await?;
+                store.mark_failed(row.id, attempts, delay, &e.0).await?;
                 // Дальше по пачке не идём: шина либо лежит, либо нет, и остальные
                 // строки отказали бы так же — но с инкрементом `attempts`, который
                 // увёл бы их отступ в часы из-за одной чужой неудачи.
@@ -648,7 +644,10 @@ impl BusPublisher for AmqpPublisher {
         // `NotRequested` означало бы, что подтверждений у канала не просили —
         // то есть `confirm_select` до публикации не выполнился. Это не успех:
         // ровно в этом случае «отправлено» значит «записано в сокет».
-        if matches!(confirm, lapin::publisher_confirm::Confirmation::NotRequested) {
+        if matches!(
+            confirm,
+            lapin::publisher_confirm::Confirmation::NotRequested
+        ) {
             return Err(BusError(
                 "канал не в режиме подтверждений — отправку нечем подтвердить".into(),
             ));
@@ -659,7 +658,9 @@ impl BusPublisher for AmqpPublisher {
 
 /// Собрать отправителя из окружения. `None` — шина не настроена.
 pub fn publisher_from_env() -> Option<Arc<dyn BusPublisher>> {
-    let url = std::env::var("BUS_URL").ok().filter(|s| !s.trim().is_empty())?;
+    let url = std::env::var("BUS_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())?;
     let exchange = std::env::var("BUS_EXCHANGE")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -718,7 +719,7 @@ mod tests {
         ClosedDeal {
             instrument: 1,
             side: PosSide::Long,
-            qty: 150_000,  // 1.50000 при qd = 5
+            qty: 150_000,     // 1.50000 при qd = 5
             entry: 6_700_000, // 67 000.00 при pd = 2
             exit: 6_823_412,  // 68 234.12
             pnl: 185_118,
@@ -778,8 +779,16 @@ mod tests {
             &known,
         );
         let d = &trade_of(&evs).data;
-        assert_eq!(d["price"], serde_json::json!(68_234.12), "цена в валюте, не в единицах точности");
-        assert_eq!(d["volume"], serde_json::json!(1.5), "объём в лотах, не в единицах точности");
+        assert_eq!(
+            d["price"],
+            serde_json::json!(68_234.12),
+            "цена в валюте, не в единицах точности"
+        );
+        assert_eq!(
+            d["volume"],
+            serde_json::json!(1.5),
+            "объём в лотах, не в единицах точности"
+        );
         assert_eq!(
             d["realizedPnlCents"],
             serde_json::json!(185_118),
@@ -795,7 +804,11 @@ mod tests {
         assert_eq!(decimal(-1, 2), "-0.01");
         assert_eq!(decimal(0, 5), "0.00000");
         assert_eq!(decimal(123, 0), "123", "ноль знаков — целое остаётся целым");
-        assert_eq!(decimal(i64::MAX, 2), "92233720368547758.07", "предел не переполняет");
+        assert_eq!(
+            decimal(i64::MAX, 2),
+            "92233720368547758.07",
+            "предел не переполняет"
+        );
     }
 
     // ---- Уровень и признак разрыва (Р-193, КОНТРАКТЫ §5) -------------------
@@ -818,7 +831,11 @@ mod tests {
             d.get("across_gap").is_none(),
             "внутреннее имя за границу не выходит"
         );
-        assert_eq!(d["level"], serde_json::json!(68_000.0), "уровень — в тех же единицах, что цена");
+        assert_eq!(
+            d["level"],
+            serde_json::json!(68_000.0),
+            "уровень — в тех же единицах, что цена"
+        );
     }
 
     /// **Отсутствие поля означает «неизвестно», а не «нет».**
@@ -828,7 +845,13 @@ mod tests {
     /// видели: отсутствующее значение ищут, лгущее читают как правду.
     #[test]
     fn unknown_level_and_gap_are_absent_not_false() {
-        let evs = envelopes_for(&who(5), &before_empty(), &after_one_deal(None, None), &[], &known);
+        let evs = envelopes_for(
+            &who(5),
+            &before_empty(),
+            &after_one_deal(None, None),
+            &[],
+            &known,
+        );
         let d = &trade_of(&evs).data;
         assert!(d.get("level").is_none(), "уровня не было — поля нет");
         assert!(
@@ -841,9 +864,24 @@ mod tests {
     /// строгое поле обнулило бы разбор событий, уже лежащих в очередях.
     #[test]
     fn trade_without_optional_fields_is_still_complete() {
-        let evs = envelopes_for(&who(5), &before_empty(), &after_one_deal(None, None), &[], &known);
+        let evs = envelopes_for(
+            &who(5),
+            &before_empty(),
+            &after_one_deal(None, None),
+            &[],
+            &known,
+        );
         let d = &trade_of(&evs).data;
-        for key in ["tenant", "userId", "tradeId", "symbol", "side", "volume", "price", "executedAt"] {
+        for key in [
+            "tenant",
+            "userId",
+            "tradeId",
+            "symbol",
+            "side",
+            "volume",
+            "price",
+            "executedAt",
+        ] {
             assert!(d.get(key).is_some(), "обязательное поле {key} пропало");
         }
     }
@@ -852,16 +890,31 @@ mod tests {
 
     #[test]
     fn envelope_addresses_the_site_and_its_user() {
-        let evs = envelopes_for(&who(5), &before_empty(), &after_one_deal(None, None), &[], &known);
+        let evs = envelopes_for(
+            &who(5),
+            &before_empty(),
+            &after_one_deal(None, None),
+            &[],
+            &known,
+        );
         let e = trade_of(&evs);
         assert_eq!(e.event, EV_TRADE_EXECUTED);
         assert_eq!(e.version, EVENT_VERSION);
         assert_eq!(e.source, SOURCE);
         assert_eq!(e.occurred_at, "2026-01-01T00:00:00.123Z");
         assert_eq!(e.data["tenant"], TENANT);
-        assert_eq!(e.data["userId"], SUB, "адресат — пользователь САЙТА, не наш номер счёта");
-        assert_eq!(e.data["symbol"], "BTCUSD", "написание платформы, не ETH-USDT и не номер");
-        assert_eq!(e.data["side"], "buy", "сторона СДЕЛКИ, а не закрывающей ноги");
+        assert_eq!(
+            e.data["userId"], SUB,
+            "адресат — пользователь САЙТА, не наш номер счёта"
+        );
+        assert_eq!(
+            e.data["symbol"], "BTCUSD",
+            "написание платформы, не ETH-USDT и не номер"
+        );
+        assert_eq!(
+            e.data["side"], "buy",
+            "сторона СДЕЛКИ, а не закрывающей ноги"
+        );
     }
 
     /// Идентификатор выведен из факта: та же сделка — тот же `event_id`.
@@ -871,8 +924,20 @@ mod tests {
     /// одинаковые, а не похожие.
     #[test]
     fn event_id_is_derived_from_the_fact() {
-        let once = envelopes_for(&who(5), &before_empty(), &after_one_deal(None, None), &[], &known);
-        let twice = envelopes_for(&who(5), &before_empty(), &after_one_deal(None, None), &[], &known);
+        let once = envelopes_for(
+            &who(5),
+            &before_empty(),
+            &after_one_deal(None, None),
+            &[],
+            &known,
+        );
+        let twice = envelopes_for(
+            &who(5),
+            &before_empty(),
+            &after_one_deal(None, None),
+            &[],
+            &known,
+        );
         assert_eq!(trade_of(&once).event_id, trade_of(&twice).event_id);
         assert_ne!(
             event_id(EV_TRADE_EXECUTED, "7:0"),
@@ -994,10 +1059,22 @@ mod tests {
         // реализацию и не поймала бы смену основания. Числа те же, что у релея
         // платформы (`BASE * 5^(attempts-1)`, потолок час) — одинаковый закон
         // повторов в одном контуре был выбран намеренно.
-        assert_eq!(next_delay_ms(5), 3_125_000, "пятая ещё не упёрлась в потолок");
+        assert_eq!(
+            next_delay_ms(5),
+            3_125_000,
+            "пятая ещё не упёрлась в потолок"
+        );
         assert_eq!(next_delay_ms(6), 3_600_000, "шестая — потолок, час");
-        assert_eq!(next_delay_ms(50), 3_600_000, "и дальше час, а не переполнение");
-        assert_eq!(next_delay_ms(0), 5_000, "нулевая попытка не уводит отступ в ноль");
+        assert_eq!(
+            next_delay_ms(50),
+            3_600_000,
+            "и дальше час, а не переполнение"
+        );
+        assert_eq!(
+            next_delay_ms(0),
+            5_000,
+            "нулевая попытка не уводит отступ в ноль"
+        );
     }
 
     #[test]
@@ -1017,7 +1094,13 @@ mod tests {
     #[test]
     fn close_cause_stays_inside() {
         let _ = CloseCause::StopLoss;
-        let evs = envelopes_for(&who(5), &before_empty(), &after_one_deal(None, None), &[], &known);
+        let evs = envelopes_for(
+            &who(5),
+            &before_empty(),
+            &after_one_deal(None, None),
+            &[],
+            &known,
+        );
         assert!(trade_of(&evs).data.get("cause").is_none());
     }
 }

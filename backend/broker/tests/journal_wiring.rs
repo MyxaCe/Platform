@@ -467,7 +467,11 @@ fn money_without_provenance_is_not_called_reconciled() {
     );
 
     let status = audit(&r.j, &snap);
-    assert_eq!(status.tag(), "no_provenance", "диагноз обязан называться своим именем: {status}");
+    assert_eq!(
+        status.tag(),
+        "no_provenance",
+        "диагноз обязан называться своим именем: {status}"
+    );
     assert!(!status.ok(), "«деньги без происхождения» — не «в порядке»");
 }
 
@@ -487,7 +491,11 @@ fn wrong_money_outranks_missing_provenance() {
     let mut snap = r.b.snapshot(U);
     snap.balance += 1; // деньги разъехались
     let status = audit(&r.j, &snap);
-    assert_eq!(status.tag(), "diverged", "неверные деньги срочнее неполной истории: {status}");
+    assert_eq!(
+        status.tag(),
+        "diverged",
+        "неверные деньги срочнее неполной истории: {status}"
+    );
 }
 
 /// Счёт, заведённый по правилам, остаётся «в порядке»: проверка не красит всех
