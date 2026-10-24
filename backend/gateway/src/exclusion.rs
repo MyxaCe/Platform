@@ -1,4 +1,4 @@
-//! # sandbox — объявление истории счёта песочницей (TRM-48)
+//! # exclusion — история счёта исключается из отчётности (TRM-48)
 //!
 //! Решение владельца 24.10: три сделки, сделанные на общем демо-счёте, в реальные
 //! балансы и отчётность не входят. Приписывать их человеку нельзя — из данных не
@@ -16,7 +16,7 @@
 //!
 //! ## Почему здесь, а не в бинаре
 //!
-//! Применяет объявление сегодня отдельный бинарь (`mark-sandbox`), а не ручка:
+//! Применяет объявление сегодня отдельный бинарь (`exclude-history`), а не ручка:
 //! ручки оператора (ADM-03) не существует, сетевую поверхность ради одной
 //! разовой операции открывать нечем, и бинарь **заставляет назвать аргументы
 //! явно** — кто, на каком основании, по какому случаю. Это ровно тот след,
@@ -71,7 +71,7 @@ pub struct Declaration {
 /// журнале, и давать её вводить руками значило бы разрешить объявить песочницей
 /// то, чего ещё нет.
 pub fn declare(journal: &Journal, at_ms: i64, operator: Operator) -> Result<Declaration, Refusal> {
-    if let Some(through_seq) = journal.state().sandbox_through {
+    if let Some(through_seq) = journal.state().excluded_from_reporting_through {
         return Err(Refusal::AlreadyDeclared { through_seq });
     }
     let through_seq = journal
@@ -83,7 +83,7 @@ pub fn declare(journal: &Journal, at_ms: i64, operator: Operator) -> Result<Decl
     let sealed = journal.seal(
         at_ms,
         &Origin::Operator(operator),
-        &[EventKind::SandboxDeclared { through_seq }],
+        &[EventKind::HistoryExcludedFromReporting { through_seq }],
     );
     Ok(Declaration {
         through_seq,
@@ -139,7 +139,7 @@ mod tests {
         );
         assert_eq!(
             d.sealed[0].kind(),
-            &EventKind::SandboxDeclared { through_seq: 2 }
+            &EventKind::HistoryExcludedFromReporting { through_seq: 2 }
         );
     }
 
@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(after.opened, before.opened, "происхождение");
         assert_eq!(after.orphans, before.orphans, "сироты");
         assert_eq!(
-            after.sandbox_through,
+            after.excluded_from_reporting_through,
             Some(2),
             "изменилось РОВНО одно — заявление"
         );

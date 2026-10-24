@@ -21,8 +21,8 @@ path = "src/main.rs"
 # открывать нечем, а аргументы бинаря обязывают назвать кто/основание/случай —
 # кнопка такого следа не оставляет.
 [[bin]]
-name = "mark-sandbox"
-path = "src/bin/mark-sandbox.rs"
+name = "exclude-history"
+path = "src/bin/exclude-history.rs"
 
 [dependencies]
 domain = { path = "../domain" }

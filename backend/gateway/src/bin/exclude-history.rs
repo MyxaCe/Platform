@@ -1,14 +1,15 @@
-//! Объявить историю счёта песочницей (TRM-48) — разовая операция оператора.
+//! Исключить историю счёта из реальных балансов и отчётности (TRM-48) —
+//! разовая операция оператора.
 //!
 //! ```text
-//! mark-sandbox --user 1 --who ops@platform \
+//! exclude-history --user 1 --who ops@platform \
 //!              --reason "решение владельца 24.10" --incident TRM-48 [--apply]
 //! ```
 //!
 //! **Без `--apply` ничего не пишет.** Печатает, что именно было бы записано, —
 //! разовая правка денежного журнала не делается вслепую.
 //!
-//! Решение живёт в `gateway::sandbox`, здесь только оболочка: когда появится
+//! Решение живёт в `gateway::exclusion`, здесь только оболочка: когда появится
 //! ручка оператора (ADM-03), она позовёт тот же код, а не напишет свой.
 //!
 //! Почему бинарь, а не ручка (решение штаба 24.10): ADM-03 целиком за два дня не
@@ -18,8 +19,8 @@
 
 use broker::journal::{Journal, Operator};
 use domain::account::UserId;
+use gateway::exclusion;
 use gateway::persistence::{Persistence, PgStore};
-use gateway::sandbox;
 
 struct Args {
     user: u64,
@@ -66,7 +67,7 @@ fn parse() -> Result<Args, String> {
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
-        eprintln!("[mark-sandbox] {e}");
+        eprintln!("[exclude-history] {e}");
         std::process::exit(1);
     }
 }
@@ -124,7 +125,7 @@ async fn run() -> Result<(), String> {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    let decl = sandbox::declare(&journal, at_ms, operator).map_err(|e| e.to_string())?;
+    let decl = exclusion::declare(&journal, at_ms, operator).map_err(|e| e.to_string())?;
     let record = &decl.sealed[0];
 
     println!("счёт:            {}", user.0);

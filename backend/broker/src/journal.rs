@@ -265,8 +265,18 @@ pub enum EventKind {
     /// `SandboxDeclared` её роднит только то, что обе появились недавно; к
     /// правилу «один вид, не меняющий состояние» эта запись отношения не имеет.
     NegativeBalanceCompensated { amount: Cents },
-    /// История счёта с первой записи по `through_seq` объявлена **песочницей**
-    /// (TRM-48): в реальные балансы и отчётность она не входит.
+    /// История счёта с первой записи по `through_seq` **в реальные балансы и
+    /// отчётность не входит** (TRM-48).
+    ///
+    /// # Почему не «песочница» (переименовано 24.10)
+    ///
+    /// Слово «песочница» к этому моменту значило у нас **три разных вещи**:
+    /// род счёта (`real · demo · sandbox`), происхождение счёта
+    /// (`registration · migration · sandbox`) и — здесь — заявление о
+    /// **диапазоне записей**. Три смысла одного слова это наш класс дефекта, и
+    /// третий был выпущен последним, применён ни разу и потому стоил дешевле
+    /// всех. Имя теперь говорит ровно то, что запись делает, и ни с чем из
+    /// модели счёта пересечься не может.
     ///
     /// **Это первая и единственная запись, которая говорит о САМОЙ ЛЕНТЕ, а не о
     /// деньгах.** Денег она не трогает: свёртка её не применяет. Решение штаба от
@@ -282,7 +292,7 @@ pub enum EventKind {
     /// `through_seq` обязателен и обязан быть **границей**: заявление без границы
     /// завтра нечем проверить, и оно тихо распространится на то, чего мы не имели
     /// в виду. Значение равно номеру предыдущей записи ленты.
-    SandboxDeclared { through_seq: u64 },
+    HistoryExcludedFromReporting { through_seq: u64 },
 }
 
 impl EventKind {
@@ -309,7 +319,7 @@ impl EventKind {
             | EventKind::PendingCancelled { .. }
             | EventKind::PendingTriggered { .. }
             | EventKind::NegativeBalanceCompensated { .. } => true,
-            EventKind::SandboxDeclared { .. } => false,
+            EventKind::HistoryExcludedFromReporting { .. } => false,
         }
     }
 }
@@ -469,8 +479,8 @@ impl EventKind {
             EventKind::PendingTriggered { id, price, exec, across_gap } => {
                 format!("pending_triggered id={id} price={price} exec={} gap={}", opt(*exec), flag(*across_gap))
             }
-            EventKind::SandboxDeclared { through_seq } => {
-                format!("sandbox_declared through_seq={through_seq}")
+            EventKind::HistoryExcludedFromReporting { through_seq } => {
+                format!("history_excluded_from_reporting through_seq={through_seq}")
             }
             EventKind::NegativeBalanceCompensated { amount } => {
                 format!("negative_balance_compensated amount={amount}")
@@ -554,9 +564,16 @@ impl EventKind {
                 exec: num_opt_added_later(&f, "exec")?,
                 across_gap: flag_added_later(&f, "gap")?,
             },
-            "sandbox_declared" => EventKind::SandboxDeclared {
-                through_seq: num(&f, "through_seq")?,
-            },
+            // Старое имя принимается при РАЗБОРЕ и больше никогда не пишется.
+            // Записи, сделанные под ним, сохраняют свой канон и свой отпечаток
+            // (см. `AccountEvent::canon`), поэтому переименование их не трогает:
+            // читаются новым видом, подписаны прежним текстом. Ради этого канон
+            // и перестал пересобираться.
+            "sandbox_declared" | "history_excluded_from_reporting" => {
+                EventKind::HistoryExcludedFromReporting {
+                    through_seq: num(&f, "through_seq")?,
+                }
+            }
             "negative_balance_compensated" => EventKind::NegativeBalanceCompensated {
                 amount: num(&f, "amount")?,
             },
@@ -676,6 +693,13 @@ impl AccountEvent {
         &self.canon
     }
 
+    /// Отпечаток, посчитанный заново. Только для проверок: в бою сверкой
+    /// занимается [`Journal::verify`], и пересчитывать подпись по месту незачем.
+    #[cfg(test)]
+    pub fn digest_for_tests(&self) -> u128 {
+        self.digest()
+    }
+
     /// Поднять запись из хранилища **как она там лежит**, включая отпечаток.
     ///
     /// Отпечаток сознательно не пересчитывается: иначе правка строки в базе молча
@@ -724,10 +748,11 @@ pub struct ReplayState {
     /// События, которые свёртке не к чему применить (позиции с таким id нет).
     /// Молча пропускать их нельзя: это уже расхождение, просто обнаруженное раньше.
     pub orphans: Vec<u64>,
-    /// До какой записи история объявлена песочницей (TRM-48). `None` — заявления
-    /// не было. Это **не** состояние счёта и в сверку денег не входит: свёртка
-    /// держит его, чтобы читателю было где увидеть заявление.
-    pub sandbox_through: Option<u64>,
+    /// До какой записи история исключена из реальных балансов и отчётности
+    /// (TRM-48). `None` — заявления не было. Это **не** состояние счёта и в
+    /// сверку денег не входит: свёртка держит его, чтобы читателю было где
+    /// увидеть заявление.
+    pub excluded_from_reporting_through: Option<u64>,
 }
 
 impl ReplayState {
@@ -741,7 +766,7 @@ impl ReplayState {
             closed: Vec::new(),
             model: PositionModel::default(),
             orphans: Vec::new(),
-            sandbox_through: None,
+            excluded_from_reporting_through: None,
         }
     }
 
@@ -764,8 +789,8 @@ impl ReplayState {
         // «ничего не делаем» выглядела бы как забытая реализация, и следующий
         // дописал бы в неё логику.
         if !kind.changes_state() {
-            if let EventKind::SandboxDeclared { through_seq } = kind {
-                self.sandbox_through = Some(*through_seq);
+            if let EventKind::HistoryExcludedFromReporting { through_seq } = kind {
+                self.excluded_from_reporting_through = Some(*through_seq);
             }
             return;
         }
@@ -926,7 +951,7 @@ impl ReplayState {
             // Сюда не доходит: отсечено выше по `changes_state`. Ветка нужна
             // только ради исчерпывающего `match` — он и есть то, что заставит
             // следующего ответить, меняет ли деньги его новый вид записи.
-            EventKind::SandboxDeclared { .. } => {}
+            EventKind::HistoryExcludedFromReporting { .. } => {}
         }
     }
 }
@@ -1431,7 +1456,7 @@ mod tests {
                 exec: Some(3990),
                 across_gap: false,
             },
-            EventKind::SandboxDeclared { through_seq: 11 },
+            EventKind::HistoryExcludedFromReporting { through_seq: 11 },
         ]
     }
 
@@ -1539,6 +1564,37 @@ mod tests {
         assert_eq!(fault, JournalFault::Tampered { seq: 1 });
     }
 
+    /// **Запись под СТАРЫМ именем читается новым видом и сохраняет подпись.**
+    ///
+    /// Переименование `sandbox_declared` → `history_excluded_from_reporting`
+    /// (24.10) меняет канон будущих записей. Прежние обязаны остаться
+    /// нетронутыми: их текст — это их подпись.
+    ///
+    /// Ровно ради этого канон перестал пересобираться. До той починки
+    /// переименование вида записи было бы невозможно в принципе — любое новое
+    /// имя ломало бы отпечатки всех записей со старым.
+    ///
+    /// Отпечаток — литерал, посчитанный сторонней реализацией FNV-1a.
+    #[test]
+    fn a_record_under_the_old_name_still_verifies() {
+        const OLD: &str = "sandbox_declared through_seq=2";
+        const SIGNED_BACK_THEN: u128 = 0x2a4a8f7a89b547aa4d0f6db4fc006da5;
+
+        let e = AccountEvent::from_storage(3, 1_700_000_000_000, Origin::Client, OLD, 0, 0)
+            .expect("старое имя обязано разбираться");
+        assert_eq!(
+            e.kind(),
+            &EventKind::HistoryExcludedFromReporting { through_seq: 2 },
+            "читается НОВЫМ видом"
+        );
+        assert_eq!(e.canon(), OLD, "а подписана прежним текстом");
+        assert_eq!(
+            e.digest_for_tests(),
+            SIGNED_BACK_THEN,
+            "и отпечаток тот же, что был посчитан тогда"
+        );
+    }
+
     /// **Пропускается при свёртке РОВНО один вид записи** (TRM-48, условие штаба).
     ///
     /// Не «список исключений, который дорастёт», а один названный вид. Этот тест
@@ -1558,7 +1614,7 @@ mod tests {
             "пропускаться обязан ровно один вид записи, а не список: {skipped:?}"
         );
         assert!(
-            matches!(skipped[0], EventKind::SandboxDeclared { .. }),
+            matches!(skipped[0], EventKind::HistoryExcludedFromReporting { .. }),
             "и это объявление песочницы, а не что-то ещё: {:?}",
             skipped[0]
         );
@@ -1573,7 +1629,10 @@ mod tests {
         s.apply(&EventKind::Deposited { amount: 7 }, 1);
         let before = s.clone();
 
-        s.apply(&EventKind::SandboxDeclared { through_seq: 2 }, 1);
+        s.apply(
+            &EventKind::HistoryExcludedFromReporting { through_seq: 2 },
+            1,
+        );
 
         assert_eq!(s.balance, before.balance);
         assert_eq!(s.positions, before.positions);
@@ -1583,7 +1642,11 @@ mod tests {
         assert_eq!(s.model, before.model);
         assert_eq!(s.opened, before.opened);
         assert_eq!(s.orphans, before.orphans);
-        assert_eq!(s.sandbox_through, Some(2), "изменилось ровно заявление");
+        assert_eq!(
+            s.excluded_from_reporting_through,
+            Some(2),
+            "изменилось ровно заявление"
+        );
     }
 
     /// Все причины закрытия различимы в тексте: «закрыл человек» и «сработал стоп» —
