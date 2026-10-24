@@ -124,6 +124,45 @@ ALTER TABLE accounts ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'demo';
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'registration';
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS category_at_open TEXT NOT NULL DEFAULT 'retail';
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'USD';
+-- Точность валюты лежит РЯДОМ с кодом (TRM-55). Не выводится из справочника при
+-- каждом чтении: суммы хранятся целыми в наименьшей единице, и смысл
+-- записанного числа задаёт именно это значение. Правка справочника иначе молча
+-- переписала бы смысл всех прошлых сумм счёта.
+--
+-- Расхождение с перечнем кода ловится при чтении и даёт ОТКАЗ: «доллар с тремя
+-- знаками» — это испорченная строка, а не валюта.
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS currency_minor_units SMALLINT NOT NULL DEFAULT 2;
+
+-- НЕИЗМЕНЯЕМОСТЬ ПРОФИЛЯ — МЕХАНИЗМОМ, А НЕ ДИСЦИПЛИНОЙ (TRM-55, требование
+-- владельца). Отсутствие профиля в `DO UPDATE` защищает только от нашего же
+-- кода; прямой `UPDATE` по таблице его обходит. Запрет обязан стоять там, где
+-- данные, — как у журнала, который закрыт от правок тем же способом.
+--
+-- Смена валюты у живого счёта означает, что прошлые суммы посчитаны в одной
+-- наименьшей единице, а читаются в другой: деньги меняются в 10^n раз, и ни
+-- одна проверка этого не заметит, потому что число осталось прежним.
+CREATE OR REPLACE FUNCTION accounts_profile_is_immutable() RETURNS trigger AS $fn$
+BEGIN
+  IF NEW.currency IS DISTINCT FROM OLD.currency
+     OR NEW.currency_minor_units IS DISTINCT FROM OLD.currency_minor_units
+     OR NEW.kind IS DISTINCT FROM OLD.kind
+     OR NEW.origin IS DISTINCT FROM OLD.origin
+     OR NEW.category_at_open IS DISTINCT FROM OLD.category_at_open
+     -- Заполнение ПУСТОГО владельца — не смена, а достройка строки, которой
+     -- столбца раньше не существовало. Запрет на неё превратил бы саму
+     -- миграцию в нарушение: `UPDATE … WHERE owner_user_id IS NULL` выше —
+     -- это и есть достройка.
+     OR (OLD.owner_user_id IS NOT NULL
+         AND NEW.owner_user_id IS DISTINCT FROM OLD.owner_user_id) THEN
+    RAISE EXCEPTION 'account profile is immutable: account % is a different account, not an edit', NEW.user_id;
+  END IF;
+  RETURN NEW;
+END;
+$fn$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS accounts_profile_no_update ON accounts;
+CREATE TRIGGER accounts_profile_no_update
+  BEFORE UPDATE ON accounts
+  FOR EACH ROW EXECUTE FUNCTION accounts_profile_is_immutable();
 CREATE TABLE IF NOT EXISTS positions (
   user_id     BIGINT NOT NULL,
   id          BIGINT NOT NULL,
@@ -296,7 +335,7 @@ impl Persistence for PgStore {
     async fn load_all(&self) -> Result<LoadedState, StoreError> {
         // Счёт — самостоятельная сущность: перебираем то, что реально лежит в accounts.
         let acc_rows = sqlx::query(
-            "SELECT user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency
+            "SELECT user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units
                FROM accounts ORDER BY user_id",
         )
                 .fetch_all(&self.pool)
@@ -331,8 +370,19 @@ impl Persistence for PgStore {
                     domain::account::ClientCategory::parse(&cat_s)
                         .ok_or_else(|| bad_profile("категория", &cat_s))?,
                 ),
-                currency: domain::account::Currency::parse(&cur_s)
-                    .ok_or_else(|| bad_profile("валюта", &cur_s))?,
+                // Код И записанная рядом точность. Расхождение — отказ:
+                // истолковать прошлые суммы такого счёта нечем, а подставить
+                // любое из двух значило бы угадать размер чужих денег.
+                currency: domain::account::Currency::from_storage(
+                    &cur_s,
+                    acc.get::<i16, _>("currency_minor_units") as u8,
+                )
+                .ok_or_else(|| {
+                    bad_profile(
+                        "валюта",
+                        &format!("{cur_s}/{}", acc.get::<i16, _>("currency_minor_units")),
+                    )
+                })?,
             };
 
             let positions = sqlx::query(
@@ -461,8 +511,8 @@ impl Persistence for PgStore {
         // счёта, означали бы, что прошлые суммы посчитаны в одном, а читаются в
         // другом. Смена валюты — это новый счёт, а не правка поля.
         sqlx::query(
-            "INSERT INTO accounts (user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "INSERT INTO accounts (user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (user_id) DO UPDATE SET balance = EXCLUDED.balance, next_id = EXCLUDED.next_id, model = EXCLUDED.model",
         )
         .bind(id_db)
@@ -474,6 +524,7 @@ impl Persistence for PgStore {
         .bind(snap.profile.origin.tag())
         .bind(snap.profile.category_at_open.0.tag())
         .bind(snap.profile.currency.code())
+        .bind(snap.profile.currency.minor_units() as i16)
         .execute(&mut *tx)
         .await
         .map_err(db)?;

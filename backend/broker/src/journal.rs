@@ -861,6 +861,9 @@ impl ReplayState {
     /// Применить одно событие. Деньги считаются теми же функциями, что и в торговом
     /// ядре; независимо здесь воспроизводится **ветвление операции**.
     fn apply(&mut self, kind: &EventKind, lev: i128) {
+        // Множитель валюты счёта берётся ДО изменяемых заимствований ниже:
+        // позиция одалживается на правку, а валюта лежит в том же `self`.
+        let minor = self.profile.currency.minor_per_unit();
         // Записи, не меняющие состояние, свёртка не применяет. Какие именно —
         // объявлено в ОДНОМ месте, `EventKind::changes_state`, и список там не
         // растёт по надобности: второй такой вид будет новым решением штаба.
@@ -908,7 +911,7 @@ impl ReplayState {
                     entry: *entry,
                     pd: *pd,
                     qd: *qd,
-                    margin: margin_for(*entry, *qty, *pd, *qd, lev),
+                    margin: margin_for(*entry, *qty, *pd, *qd, lev, minor),
                     sl: *sl,
                     tp: *tp,
                 });
@@ -928,7 +931,7 @@ impl ReplayState {
                 let new_entry = merged_entry(p.qty, p.entry, *add_qty, *add_entry);
                 p.qty = new_qty;
                 p.entry = new_entry;
-                p.margin = margin_for(new_entry, new_qty, p.pd, p.qd, lev);
+                p.margin = margin_for(new_entry, new_qty, p.pd, p.qd, lev, minor);
                 if sl.is_some() {
                     p.sl = *sl;
                 }
@@ -941,7 +944,7 @@ impl ReplayState {
                     self.orphans.push(*id);
                     return;
                 };
-                let pnl = realized_on_close(p.side, p.entry, *exit, *qty, p.pd, p.qd);
+                let pnl = realized_on_close(p.side, p.entry, *exit, *qty, p.pd, p.qd, minor);
                 let deal = ClosedDeal {
                     instrument: p.instrument,
                     side: p.side,
@@ -960,7 +963,7 @@ impl ReplayState {
                 };
                 p.qty -= qty;
                 let left = p.qty;
-                p.margin = margin_for(p.entry, left, p.pd, p.qd, lev);
+                p.margin = margin_for(p.entry, left, p.pd, p.qd, lev, minor);
                 self.balance += pnl;
                 self.closed.push(deal);
             }
@@ -981,7 +984,7 @@ impl ReplayState {
                     return;
                 };
                 let p = self.positions.remove(i);
-                let pnl = realized_on_close(p.side, p.entry, *exit, p.qty, p.pd, p.qd);
+                let pnl = realized_on_close(p.side, p.entry, *exit, p.qty, p.pd, p.qd, minor);
                 self.balance += pnl;
                 self.closed.push(ClosedDeal {
                     instrument: p.instrument,

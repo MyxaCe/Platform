@@ -1226,3 +1226,108 @@ fn opening_an_existing_account_is_refused() {
     );
     assert_eq!(b.snapshot(ALICE).profile.kind, AccountKind::Demo);
 }
+
+// ---- Валюта счёта и её точность (TRM-55) ----------------------------------
+
+fn account_in(code: &str) -> (Broker, AccountProfile) {
+    let cur = Currency::parse(code).unwrap_or_else(|| panic!("{code} обязана быть известна"));
+    let profile = AccountProfile {
+        owner: ALICE,
+        currency: cur,
+        ..Default::default()
+    };
+    // Стартовый баланс задаём одинаковым ЧИСЛОМ наименьших единиц: сравнивать
+    // будем поведение расчёта, а не размер суммы.
+    (Broker::new(100_000_000, 1), profile)
+}
+
+/// **Три валюты с разной точностью — 0, 2 и 3 знака — считаются своим
+/// множителем, а не центом.**
+///
+/// Проверка нарочно на трёх: на двух любая реализация проходится завязкой
+/// «ноль или не ноль». Числа подобраны так, чтобы правильный ответ отличался
+/// у всех трёх ровно на порядок.
+///
+/// Нотионал позиции = `цена × объём`, выраженный в наименьших единицах валюты
+/// счёта. Цена 100.00 (pd=2), объём 1 (qd=0) → сто единиц валюты:
+/// в иенах это 100, в долларах 10 000 центов, в динарах 100 000 филсов.
+#[test]
+fn margin_scales_with_the_currency_not_with_a_hardwired_cent() {
+    let expected = [("JPY", 100i128), ("USD", 10_000), ("BHD", 100_000)];
+    for (code, want) in expected {
+        let (mut b, profile) = account_in(code);
+        b.open_account_with(ALICE, profile);
+        b.open(
+            ALICE,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            1,
+            10_000,
+            2,
+            0,
+            None,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{code}: открытие {e:?}"));
+        assert_eq!(
+            b.used_margin(ALICE),
+            want,
+            "{code}: занятая маржа обязана быть в наименьших единицах ЭТОЙ валюты"
+        );
+    }
+}
+
+/// То же для нереализованного результата: движение цены на единицу валюты даёт
+/// одну единицу в иенах, сто в долларах, тысячу в динарах.
+#[test]
+fn unrealised_pnl_scales_with_the_currency() {
+    let expected = [("JPY", 1i128), ("USD", 100), ("BHD", 1_000)];
+    for (code, want) in expected {
+        let (mut b, profile) = account_in(code);
+        b.open_account_with(ALICE, profile);
+        b.open(
+            ALICE,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            1,
+            10_000,
+            2,
+            0,
+            None,
+            None,
+        )
+        .unwrap();
+        // Цена выросла на 1.00 — то есть на одну единицу валюты.
+        assert_eq!(b.open_pnl(ALICE, &marks(1, 10_100)), want, "{code}");
+    }
+}
+
+/// И проверка инвариантов считает в той же валюте: иначе здоровая маржа
+/// иенового счёта объявлялась бы неверной в сто раз.
+#[test]
+fn the_margin_invariant_speaks_the_accounts_currency() {
+    for code in ["JPY", "USD", "BHD"] {
+        let (mut b, profile) = account_in(code);
+        b.open_account_with(ALICE, profile);
+        b.open(
+            ALICE,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            1,
+            10_000,
+            2,
+            0,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            broker::check_snapshot(&b.snapshot(ALICE), 1),
+            vec![],
+            "{code}: счёт здоров, и проверка обязана это видеть"
+        );
+    }
+}
