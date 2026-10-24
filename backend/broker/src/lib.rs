@@ -7,6 +7,12 @@
 use std::collections::HashMap;
 
 use domain::account::UserId;
+/// Реэкспорт словаря счёта: шлюз работает с ним через брокера, а не
+/// подключает `domain` ради одних имён.
+pub use domain::account::{
+    AccountKind, AccountOrigin, AccountProfile, CategoryAtOpen, CategoryNow, ClientCategory,
+    Currency,
+};
 
 pub mod journal;
 
@@ -167,6 +173,10 @@ pub enum BrokerError {
 
 #[derive(Debug, Default, Clone)]
 struct Account {
+    /// Неизменная часть счёта: владелец, род, происхождение, категория при
+    /// открытии, валюта (TRM-44). Устанавливается при заведении и обычными
+    /// операциями не меняется.
+    profile: AccountProfile,
     balance: Cents,
     next_id: u64,
     positions: HashMap<u64, Position>,
@@ -855,15 +865,23 @@ impl Broker {
 
     fn acct(&mut self, user: UserId) -> &mut Account {
         let start = self.start_balance;
+        // Ленивое заведение достаётся счетам, о профиле которых никто не сказал:
+        // это путь проверок ядра. В бою счёт заводит `open_account` с настоящим
+        // профилем, и до сюда дело не доходит (TRM-46).
+        let profile = AccountProfile::legacy_demo(user);
         self.accounts.entry(user).or_insert_with(|| {
             // Заведение счёта — тоже изменение состояния, и стартовый баланс обязан
             // иметь происхождение. Без этой записи первые деньги на счёте взялись бы
             // ниоткуда, и журнал начинался бы с необъяснимой суммы.
             let mut a = Account {
                 balance: start,
+                profile,
                 ..Default::default()
             };
-            a.log(EventKind::AccountOpened { balance: start });
+            a.log(EventKind::AccountOpened {
+                balance: start,
+                profile,
+            });
             a
         })
     }
@@ -888,9 +906,32 @@ impl Broker {
     /// деньги на счёте оставались без происхождения (найдено 24.10 живым
     /// прогоном). Разделять надо там, где разные факты, а не ловить их на выходе.
     pub fn open_account(&mut self, user: UserId) -> bool {
-        let fresh = !self.accounts.contains_key(&user);
-        let _ = self.acct(user);
-        fresh
+        self.open_account_with(user, AccountProfile::legacy_demo(user))
+    }
+
+    /// Завести счёт с **названным профилем** и стартовым балансом по его роду
+    /// (TRM-44).
+    ///
+    /// Стартовый баланс определяет род, а не вызывающий: **реальный счёт
+    /// открывается нулём**. Ненулевой начальный баланс на реальном счёте — это
+    /// деньги, взявшиеся ниоткуда, и решать это у места вызова нельзя, иначе
+    /// однажды решат иначе.
+    pub fn open_account_with(&mut self, user: UserId, profile: AccountProfile) -> bool {
+        if self.accounts.contains_key(&user) {
+            return false;
+        }
+        let start = start_balance_for(profile.kind, self.start_balance);
+        let mut a = Account {
+            balance: start,
+            profile,
+            ..Default::default()
+        };
+        a.log(EventKind::AccountOpened {
+            balance: start,
+            profile,
+        });
+        self.accounts.insert(user, a);
+        true
     }
 
     /// Убрать счёт из памяти целиком — **только** для отката неудавшегося
@@ -1141,6 +1182,7 @@ impl Broker {
     pub fn snapshot(&self, user: UserId) -> AccountSnapshot {
         match self.accounts.get(&user) {
             Some(a) => AccountSnapshot {
+                profile: a.profile,
                 balance: a.balance,
                 next_id: a.next_id,
                 positions: a.positions.values().cloned().collect(),
@@ -1149,6 +1191,7 @@ impl Broker {
                 model: a.model,
             },
             None => AccountSnapshot {
+                profile: AccountProfile::legacy_demo(user),
                 balance: self.start_balance,
                 next_id: 0,
                 positions: vec![],
@@ -1166,6 +1209,7 @@ impl Broker {
     /// журнал пишется только о том, что состоялось.
     pub fn restore(&mut self, user: UserId, snap: AccountSnapshot) {
         let a = Account {
+            profile: snap.profile,
             balance: snap.balance,
             next_id: snap.next_id,
             positions: snap.positions.into_iter().map(|p| (p.id, p)).collect(),
@@ -1230,6 +1274,11 @@ impl Broker {
 /// Слепок состояния одного счёта — единица обмена с хранилищем (ADR-016).
 #[derive(Debug, Clone, Default)]
 pub struct AccountSnapshot {
+    /// Владелец, род, происхождение, категория при открытии, валюта (TRM-44).
+    /// У счетов, поднятых из хранилища без этих столбцов, —
+    /// [`AccountProfile::legacy_demo`]: демо, розничный, доллар, регистрация.
+    /// Не умолчание «на всякий случай», а факт их истории.
+    pub profile: AccountProfile,
     pub balance: Cents,
     pub next_id: u64,
     pub positions: Vec<Position>,
@@ -1256,6 +1305,18 @@ pub struct Violation(pub String);
 impl std::fmt::Display for Violation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// Стартовый баланс по роду счёта (TRM-44, решение владельца).
+///
+/// **Реальный счёт открывается нулём.** Демо — настроенной суммой. Правило
+/// живёт здесь, а не у места вызова: иначе однажды его применят иначе, и на
+/// реальном счёте появятся деньги, взявшиеся ниоткуда.
+pub fn start_balance_for(kind: AccountKind, demo_start: Cents) -> Cents {
+    match kind {
+        AccountKind::Demo => demo_start,
+        AccountKind::Real => 0,
     }
 }
 
@@ -1410,6 +1471,7 @@ mod invariant_tests {
     /// инвариант поймал её сразу же — что и требовалось.
     fn healthy() -> AccountSnapshot {
         AccountSnapshot {
+            profile: Default::default(),
             balance: 1_000_000,
             next_id: 2,
             positions: vec![

@@ -22,6 +22,7 @@ fn trade_events(j: &Journal) -> Vec<broker::journal::AccountEvent> {
         &[
             EventKind::AccountOpened {
                 balance: 10_000_000,
+                profile: Default::default(),
             },
             EventKind::PositionOpened {
                 id: 1,
@@ -298,6 +299,27 @@ async fn a_row_written_in_the_old_shape_still_loads() {
     .unwrap();
 
     let loaded = store.load_all().await.expect("подъём");
+
+    // ЗАКРЫВАЮЩИЙ КРИТЕРИЙ МИГРАЦИИ (TRM-44): строка счёта, заведённая БЕЗ
+    // столбцов профиля, поднимается и получает профиль счетов, существовавших
+    // до правки, — демо, розничный, доллар, регистрация. Столбцы добавлены
+    // `ALTER … IF NOT EXISTS` с умолчаниями, и умолчания описывают историю, а
+    // не удобство: другого рода счетов в терминале не было.
+    let snap = loaded
+        .accounts
+        .iter()
+        .find(|(u, _)| *u == legacy)
+        .expect("счёт обязан подняться")
+        .1
+        .clone();
+    assert_eq!(snap.profile.kind, broker::AccountKind::Demo);
+    assert_eq!(snap.profile.origin, broker::AccountOrigin::Registration);
+    assert_eq!(snap.profile.currency, broker::Currency::USD);
+    assert_eq!(
+        snap.profile.owner.0, legacy.0,
+        "владелец заполнен из user_id — миграции потом не потребуется"
+    );
+
     let lane = loaded
         .journals
         .into_iter()
@@ -314,4 +336,60 @@ async fn a_row_written_in_the_old_shape_still_loads() {
     Journal::load(1, 0, lane).expect(
         "журнал со старой записью обязан сойтись: иначе выкатка отправит в карантин все счета",
     );
+}
+
+/// **Непонятное значение в профиле счёта — отказ чтения, а не умолчание**
+/// (TRM-44).
+///
+/// Род счёта решает, настоящие ли это деньги. Прочитать непонятное как «демо»
+/// значило бы угадывать, чьими деньгами торгуют: счёт с испорченным или более
+/// новым значением поднялся бы как бумажный и пустил бы к торговле без
+/// проверки личности.
+///
+/// Проверяется только живой базой: подсунуть такое значение можно лишь в саму
+/// таблицу — код его не напишет.
+#[tokio::test]
+#[ignore = "нужна живая БД: TEST_DATABASE_URL"]
+async fn an_unreadable_account_kind_is_refused() {
+    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+        panic!("TEST_DATABASE_URL не задан — живой прогон НЕ выполнен, это не «зелено»");
+    };
+    let victim = UserId(4343);
+    let store = persistence::PgStore::connect(&url)
+        .await
+        .expect("связь с БД");
+    store.init().await.expect("схема");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect(&url)
+        .await
+        .expect("пул");
+
+    sqlx::query("DELETE FROM accounts WHERE user_id = $1")
+        .bind(victim.0 as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO accounts (user_id, balance, next_id, model, kind) VALUES ($1, 0, 0, 0, 'margin')",
+    )
+    .bind(victim.0 as i64)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let err = store
+        .load_all()
+        .await
+        .expect_err("счёт с непонятным родом обязан быть отказом, а не демо-счётом");
+    let text = err.to_string();
+    assert!(
+        text.contains("род") && text.contains("margin"),
+        "отказ обязан называть, что именно не прочиталось: {text}"
+    );
+
+    sqlx::query("DELETE FROM accounts WHERE user_id = $1")
+        .bind(victim.0 as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
 }

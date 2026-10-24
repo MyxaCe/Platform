@@ -290,7 +290,7 @@ pub fn envelopes_for(
     // Повод — запись журнала, а не «счёта не было в слепке»: заведение счёта это
     // факт, который брокер объявляет сам, и читать его по косвенным признакам
     // значило бы завести второй источник правды о том же.
-    if let Some(EventKind::AccountOpened { balance }) = kinds
+    if let Some(EventKind::AccountOpened { balance, .. }) = kinds
         .iter()
         .find(|k| matches!(k, EventKind::AccountOpened { .. }))
     {
@@ -799,6 +799,7 @@ mod tests {
 
     fn empty_snap() -> AccountSnapshot {
         AccountSnapshot {
+            profile: Default::default(),
             balance: 1_000_000,
             next_id: 1,
             positions: Vec::new(),
@@ -1062,7 +1063,10 @@ mod tests {
             &who(1),
             &before_empty(),
             &empty_snap(),
-            &[EventKind::AccountOpened { balance: 1_000_000 }],
+            &[EventKind::AccountOpened {
+                balance: 1_000_000,
+                profile: Default::default(),
+            }],
             &known,
         );
         let e = evs
@@ -1132,7 +1136,10 @@ mod tests {
     #[test]
     fn every_reason_we_can_emit_is_one_the_consumer_knows() {
         let before = before_empty();
-        let opened = [EventKind::AccountOpened { balance: 1 }];
+        let opened = [EventKind::AccountOpened {
+            balance: 1,
+            profile: Default::default(),
+        }];
         let deposited = [EventKind::Deposited { amount: 1 }];
         let traded = after_one_deal(None, None);
         let mut moved = empty_snap();

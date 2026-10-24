@@ -1131,3 +1131,98 @@ fn the_compensation_replays_from_its_own_amount() {
     );
     assert_eq!(j.replay().balance, 0, "и это ноль, выведенный из проводок");
 }
+
+// ---- Модель счёта (TRM-44) -------------------------------------------------
+
+use broker::start_balance_for;
+use domain::account::{
+    AccountKind, AccountOrigin, AccountProfile, CategoryAtOpen, ClientCategory, Currency,
+};
+
+fn real_profile(owner: UserId) -> AccountProfile {
+    AccountProfile {
+        owner,
+        kind: AccountKind::Real,
+        origin: AccountOrigin::Registration,
+        category_at_open: CategoryAtOpen(ClientCategory::Retail),
+        currency: Currency::USD,
+    }
+}
+
+/// **Реальный счёт открывается нулём.** Ненулевой начальный баланс на реальном
+/// счёте — это деньги, взявшиеся ниоткуда.
+#[test]
+fn a_real_account_opens_with_nothing() {
+    assert_eq!(start_balance_for(AccountKind::Real, 1_000_000), 0);
+    assert_eq!(
+        start_balance_for(AccountKind::Demo, 1_000_000),
+        1_000_000,
+        "а демо — настроенной суммой"
+    );
+
+    let mut b = Broker::new(1_000_000, 1);
+    assert!(b.open_account_with(ALICE, real_profile(ALICE)));
+    assert_eq!(
+        b.balance(ALICE),
+        0,
+        "правило применяется при заведении, а не на словах"
+    );
+}
+
+/// Профиль попадает в запись о заведении: журнал обязан объяснять не только
+/// «сколько денег появилось», но и **на каком счёте**.
+#[test]
+fn the_profile_travels_in_the_opening_record() {
+    let mut b = Broker::new(1_000_000, 1);
+    b.open_account_with(ALICE, real_profile(ALICE));
+    let ev = b.take_events(ALICE);
+    match ev.first().expect("запись о заведении") {
+        EventKind::AccountOpened { balance, profile } => {
+            assert_eq!(*balance, 0);
+            assert_eq!(profile.kind, AccountKind::Real);
+            assert_eq!(profile.owner, ALICE);
+        }
+        other => panic!("не та запись: {other:?}"),
+    }
+}
+
+/// Профиль переживает круг через слепок: его забирает хранилище, и после
+/// подъёма счёт обязан остаться тем же счётом, а не стать демо-долларовым.
+#[test]
+fn the_profile_survives_a_snapshot_round_trip() {
+    let mut b = Broker::new(1_000_000, 1);
+    b.open_account_with(ALICE, real_profile(ALICE));
+    let snap = b.snapshot(ALICE);
+    assert_eq!(snap.profile.kind, AccountKind::Real);
+
+    let mut other = Broker::new(1_000_000, 1);
+    other.restore(ALICE, snap);
+    assert_eq!(other.snapshot(ALICE).profile.kind, AccountKind::Real);
+}
+
+/// Профиль **не меняется** обычными операциями: он устанавливается один раз.
+#[test]
+fn trading_does_not_change_the_profile() {
+    let mut b = Broker::new(1_000_000, 1);
+    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE));
+    let before = b.snapshot(ALICE).profile;
+    open(&mut b, PosSide::Long, 6_000_000);
+    assert_eq!(
+        b.snapshot(ALICE).profile,
+        before,
+        "сделка профиль не трогает"
+    );
+}
+
+/// Повторное заведение отклоняется: иначе второй вызов переписал бы род счёта
+/// и стартовый баланс у живого счёта.
+#[test]
+fn opening_an_existing_account_is_refused() {
+    let mut b = Broker::new(1_000_000, 1);
+    assert!(b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE)));
+    assert!(
+        !b.open_account_with(ALICE, real_profile(ALICE)),
+        "счёт уже есть — подменять его род нельзя"
+    );
+    assert_eq!(b.snapshot(ALICE).profile.kind, AccountKind::Demo);
+}

@@ -19,6 +19,7 @@ const U: UserId = UserId(91);
 
 fn snapshot(balance: i128) -> AccountSnapshot {
     AccountSnapshot {
+        profile: Default::default(),
         balance,
         next_id: 1,
         ..Default::default()
@@ -31,6 +32,7 @@ fn opening(j: &Journal) -> Vec<broker::journal::AccountEvent> {
         &Origin::Client,
         &[EventKind::AccountOpened {
             balance: 10_000_000,
+            profile: Default::default(),
         }],
     )
 }

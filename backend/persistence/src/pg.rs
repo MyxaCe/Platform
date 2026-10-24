@@ -105,6 +105,25 @@ CREATE TABLE IF NOT EXISTS accounts (
 -- CREATE TABLE IF NOT EXISTS её не тронет. DEFAULT 0 — не догадка: до 2026-09-04
 -- другой модели в коде не существовало, значит все прежние счета хеджирующие.
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS model SMALLINT NOT NULL DEFAULT 0;
+-- Профиль счёта (TRM-44): владелец, род, происхождение, категория при открытии,
+-- валюта. Отдельными ALTER по той же причине, что `model`: у существующих баз
+-- таблица уже есть, и CREATE TABLE IF NOT EXISTS её не тронет.
+--
+-- УМОЛЧАНИЯ ОПИСЫВАЮТ ИСТОРИЮ, А НЕ УДОБСТВО. До 2026-10-24 в терминале
+-- существовали только демо-счета в долларах, заведённые регистрацией, и все
+-- клиенты считались розничными: другого рода счетов не было. Поэтому
+-- `DEFAULT` здесь — утверждение о прошлом, которое можно проверить, а не
+-- значение, подставленное чтобы столбец не был пустым.
+--
+-- `owner` отдельным столбцом при том, что сегодня он равен `user_id`: ключ
+-- завтра станет идентификатором СЧЁТА, а владелец останется владельцем.
+-- Заполняется из `user_id` ровно затем, чтобы миграции потом не потребовалось.
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS owner_user_id BIGINT;
+UPDATE accounts SET owner_user_id = user_id WHERE owner_user_id IS NULL;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'demo';
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'registration';
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS category_at_open TEXT NOT NULL DEFAULT 'retail';
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'USD';
 CREATE TABLE IF NOT EXISTS positions (
   user_id     BIGINT NOT NULL,
   id          BIGINT NOT NULL,
@@ -276,8 +295,10 @@ impl Persistence for PgStore {
 
     async fn load_all(&self) -> Result<LoadedState, StoreError> {
         // Счёт — самостоятельная сущность: перебираем то, что реально лежит в accounts.
-        let acc_rows =
-            sqlx::query("SELECT user_id, balance, next_id, model FROM accounts ORDER BY user_id")
+        let acc_rows = sqlx::query(
+            "SELECT user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency
+               FROM accounts ORDER BY user_id",
+        )
                 .fetch_all(&self.pool)
                 .await
                 .map_err(db)?;
@@ -290,6 +311,29 @@ impl Persistence for PgStore {
             let next_id = acc.get::<i64, _>("next_id") as u64;
 
             let model = model_from_db(acc.get::<i16, _>("model"));
+            // Неизвестное значение в профиле — ОТКАЗ чтения, а не умолчание.
+            // Род счёта решает, настоящие ли это деньги; прочитать непонятное
+            // как «демо» значило бы угадывать, чьими деньгами торгуют.
+            let bad_profile = |what: &str, v: &str| {
+                StoreError(format!("счёт {}: {what} «{v}» не читается", uid.0))
+            };
+            let kind_s = acc.get::<String, _>("kind");
+            let origin_s = acc.get::<String, _>("origin");
+            let cat_s = acc.get::<String, _>("category_at_open");
+            let cur_s = acc.get::<String, _>("currency");
+            let profile = domain::account::AccountProfile {
+                owner: UserId(acc.get::<Option<i64>, _>("owner_user_id").unwrap_or(id_db) as u64),
+                kind: domain::account::AccountKind::parse(&kind_s)
+                    .ok_or_else(|| bad_profile("род", &kind_s))?,
+                origin: domain::account::AccountOrigin::parse(&origin_s)
+                    .ok_or_else(|| bad_profile("происхождение", &origin_s))?,
+                category_at_open: domain::account::CategoryAtOpen(
+                    domain::account::ClientCategory::parse(&cat_s)
+                        .ok_or_else(|| bad_profile("категория", &cat_s))?,
+                ),
+                currency: domain::account::Currency::parse(&cur_s)
+                    .ok_or_else(|| bad_profile("валюта", &cur_s))?,
+            };
 
             let positions = sqlx::query(
                 "SELECT id, instrument, side, qty, entry, pd, qd, margin, sl, tp FROM positions WHERE user_id = $1 ORDER BY id",
@@ -365,6 +409,7 @@ impl Persistence for PgStore {
             accounts.push((
                 uid,
                 AccountSnapshot {
+                    profile,
                     balance,
                     next_id,
                     positions,
@@ -411,14 +456,24 @@ impl Persistence for PgStore {
         let id_db = user.0 as i64;
         let mut tx = self.pool.begin().await.map_err(db)?;
 
+        // Профиль пишется при заведении и далее не меняется: в `DO UPDATE` его
+        // нет намеренно. Род счёта или валюта, поменявшиеся у существующего
+        // счёта, означали бы, что прошлые суммы посчитаны в одном, а читаются в
+        // другом. Смена валюты — это новый счёт, а не правка поля.
         sqlx::query(
-            "INSERT INTO accounts (user_id, balance, next_id, model) VALUES ($1, $2, $3, $4)
+            "INSERT INTO accounts (user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (user_id) DO UPDATE SET balance = EXCLUDED.balance, next_id = EXCLUDED.next_id, model = EXCLUDED.model",
         )
         .bind(id_db)
         .bind(to_numeric(snap.balance))
         .bind(snap.next_id as i64)
         .bind(model_to_db(snap.model))
+        .bind(snap.profile.owner.0 as i64)
+        .bind(snap.profile.kind.tag())
+        .bind(snap.profile.origin.tag())
+        .bind(snap.profile.category_at_open.0.tag())
+        .bind(snap.profile.currency.code())
         .execute(&mut *tx)
         .await
         .map_err(db)?;

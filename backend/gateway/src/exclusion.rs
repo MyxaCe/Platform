@@ -107,7 +107,10 @@ mod tests {
     fn journal_with_history() -> Journal {
         let mut j = Journal::new(LEV, START);
         let kinds = [
-            EventKind::AccountOpened { balance: START },
+            EventKind::AccountOpened {
+                balance: START,
+                profile: Default::default(),
+            },
             EventKind::PositionOpened {
                 id: 1,
                 instrument: 2,
