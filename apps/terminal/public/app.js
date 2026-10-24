@@ -667,16 +667,11 @@ function setUnit(u) {
 document.getElementById('unitLot').addEventListener('click', () => setUnit('lot'));
 document.getElementById('unitUsd').addEventListener('click', () => setUnit('usd'));
 document.getElementById('lot').addEventListener('input', updateSizeEq);
-// Отказ границы объясняется словами, а не кодом: «инструмент не разрешён сайту» и
-// «разрешения не доехали» — разные вещи. Первое окончательно, второе чинится
-// администратором, и человек должен понимать, ждать ему или нет (ADR-023 Т3).
-function rejectionText(status, code) {
-  if (code === 'instrument_not_allowed') return 'This instrument is not available on this site';
-  if (code === 'tenant_instruments_unavailable') return 'Instrument permissions unavailable — trading is closed';
-  if (status === 401) return 'No cabinet session — trading unavailable';
-  if (code === 'insufficient_margin') return 'Not enough free margin';
-  return `Rejected ${status}: ${code || ''}`;
-}
+// Отказ границы объясняется словами, а не кодом (КОНТРАКТЫ §4б). Таблица
+// переехала в `rejection.js`: здесь её было нечем проверить, и недостающую
+// строку нашёл пользователь — `tenant_instruments_unreadable` показывался сырым
+// кодом (TRM-43).
+const rejectionText = Rejection.text;
 
 async function submit(side) {
   const id = selected; if (id == null) return; const msg = document.getElementById('dealMsg');

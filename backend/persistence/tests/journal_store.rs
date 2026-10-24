@@ -66,7 +66,7 @@ async fn memory_store_round_trips_the_journal() {
     let j = Journal::new(1, 10_000_000);
     let events = trade_events(&j);
     store
-        .save_account(U, &snapshot(), &events)
+        .save_account(U, &snapshot(), &events, &[])
         .await
         .expect("запись");
 
@@ -102,9 +102,9 @@ async fn memory_store_refuses_to_overwrite_or_skip() {
     let store = MemoryStore::new();
     let j = Journal::new(1, 10_000_000);
     let events = trade_events(&j);
-    store.save_account(U, &snapshot(), &events).await.unwrap();
+    store.save_account(U, &snapshot(), &events, &[]).await.unwrap();
 
-    let again = store.save_account(U, &snapshot(), &events).await;
+    let again = store.save_account(U, &snapshot(), &events, &[]).await;
     assert!(again.is_err(), "повтор номера обязан быть отказом");
 
     // И пропуск номера тоже: дыра в ленте — потерянная история.
@@ -119,7 +119,7 @@ async fn memory_store_refuses_to_overwrite_or_skip() {
     );
     next.remove(0); // первую «потеряли» — вторая обязана не пройти
     assert!(
-        store.save_account(U, &snapshot(), &next).await.is_err(),
+        store.save_account(U, &snapshot(), &next, &[]).await.is_err(),
         "пропуск номера обязан быть отказом"
     );
 }
@@ -167,7 +167,7 @@ async fn postgres_journal_is_append_only_at_the_database_level() {
     let j = Journal::new(1, 10_000_000);
     let events = trade_events(&j);
     store
-        .save_account(U, &snapshot(), &events)
+        .save_account(U, &snapshot(), &events, &[])
         .await
         .expect("запись в БД");
 
@@ -196,7 +196,7 @@ async fn postgres_journal_is_append_only_at_the_database_level() {
 
     // Повтор номера тоже отказ — на уникальном ключе, а не на вежливости кода.
     assert!(
-        store.save_account(U, &snapshot(), &events).await.is_err(),
+        store.save_account(U, &snapshot(), &events, &[]).await.is_err(),
         "повтор номера обязан падать"
     );
 

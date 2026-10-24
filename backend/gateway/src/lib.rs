@@ -7,6 +7,8 @@
 //! Терминал автономный: без логина, один аккаунт [`DEFAULT_USER`]. Как его авторизовать из внешних
 //! сайтов/CMS — отдельное решение (пивот 2026-07-25, см. STATUS). Доменные типы наружу не протекают.
 
+/// Публикация событий счёта на шину платформы (TRM-40).
+pub mod bus;
 pub mod feed;
 /// Правило видимости по юрисдикции (TRM-15, Р-058). Публичный модуль, хотя
 /// вызывается сегодня только из тестов: он участник сверки реализаций между
@@ -48,6 +50,8 @@ type KlineCache = HashMap<(u32, u32), (Instant, Vec<feed::Kline>)>;
 type DepthCache = HashMap<(u32, usize), (Instant, feed::Depth)>;
 /// Кэш статистики: инструмент → (время, изменения по таймфреймам).
 type StatsCache = HashMap<u32, (Instant, Vec<StatDto>)>;
+/// Счёт → внешняя личность `(tenant, sub)`; `None` — счёт не привязан к сайту.
+type IdentityCache = HashMap<UserId, Option<(String, String)>>;
 
 /// Таймфреймы для статистики актива.
 const STAT_TFS: [u32; 8] = [60, 300, 900, 1800, 3600, 14400, 86400, 604800];
@@ -112,6 +116,18 @@ pub struct AppState {
     sso: Arc<sso::Sso>,
     /// Требовать ли сессию на торговых ручках. Выкл (dev/standalone) → счёт по умолчанию.
     sso_enabled: bool,
+    /// Кеш «внутренний счёт → внешняя личность `(tenant, sub)`» (TRM-40).
+    ///
+    /// Событие адресуется парой «сайт + пользователь сайта»: внутренний `UserId`
+    /// за границей терминала не значит ничего. Пара неизменна (её заводит
+    /// `resolve_identity` один раз), поэтому кешируется без срока — включая
+    /// `None`: «счёт заведён не через SSO» тоже ответ, и спрашивать его у базы
+    /// на каждой сделке незачем.
+    identities: Arc<Mutex<IdentityCache>>,
+    /// Настроена ли шина. Отдаётся в `/health`: «очередь копится» и «очередь
+    /// копится, потому что слать некуда» — разные состояния, и чинятся разными
+    /// людьми.
+    bus_enabled: bool,
 }
 
 pub fn build_state() -> AppState {
@@ -162,6 +178,53 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         journals: Arc::new(Mutex::new(HashMap::new())),
         sso,
         sso_enabled,
+        identities: Arc::new(Mutex::new(HashMap::new())),
+        bus_enabled: false,
+    }
+}
+
+/// Объявить вслух, на чей счёт идут запросы.
+///
+/// Без SSO [`require_principal`] отдаёт [`DEFAULT_USER`] **всем**: это задуманный
+/// standalone-режим (решение штаба 03.09 — терминал обязан подниматься сам по
+/// себе). Но тот же код обслуживает терминал, встроенный в кабинет, и там
+/// последствие другое: два человека торгуют на одном счёте и видят сделки друг
+/// друга.
+///
+/// Код отличить одно от другого не может — разницу задаёт развёртывание. Что он
+/// может и обязан — не молчать: умолчание, подставленное тихо, здесь оказывается
+/// в деньгах. Поэтому режим называет себя в логе старта и в `/health`
+/// (`shared_account`), ровно как режим хранилища (КОНТРАКТЫ §5в).
+pub fn announce_account_mode(st: &AppState) {
+    if st.sso_enabled {
+        println!("[gateway] личность: по сессии SSO, счёт у каждого свой");
+        return;
+    }
+    eprintln!(
+        "[gateway] ВНИМАНИЕ: SSO выключен — ВСЕ запросы идут на ОДИН общий счёт #{}.",
+        DEFAULT_USER.0
+    );
+    eprintln!("[gateway] Для автономного терминала это норма. Если этот экземпляр встроен в кабинет — это дефект: люди увидят сделки друг друга, а события на шину не уйдут вовсе (у общего счёта нет внешней личности). Включается SSO_DISABLED=0 при заданном CABINET_URL.");
+}
+
+/// Запустить релей шины, если она настроена (TRM-40).
+///
+/// Без `BUS_URL` релей не запускается, но **очередь наполняется всё равно**: это
+/// не заглушка ради зелёного теста. События копятся в хранилище и уедут, когда
+/// шину настроят. Молчаливая потеря на этом месте — ровно то, чем был массив в
+/// памяти.
+pub fn spawn_bus_relay(st: &mut AppState) {
+    match bus::publisher_from_env() {
+        Some(publisher) => {
+            st.bus_enabled = true;
+            bus::spawn_relay(st.store.clone(), publisher);
+        }
+        None => {
+            st.bus_enabled = false;
+            eprintln!(
+                "[bus] BUS_URL не задан — публикации НЕТ. События копятся в исходящей очереди и уедут после настройки; их число видно в /health (outbox_pending)."
+            );
+        }
     }
 }
 
@@ -250,6 +313,68 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
     Ok(())
 }
 
+/// Внешняя личность счёта для шины: `(tenant, sub)`. `None` — адресата нет.
+///
+/// Отказ чтения — это **не** `None`. `None` означает «счёт не привязан к сайту»
+/// (standalone), и событие по нему никому не адресовано; отказ означает «мы не
+/// знаем», и выдавать его за первое значило бы тихо терять события при моргнувшей
+/// базе. Поэтому отказ громкий и не кешируется.
+async fn identity_for_bus(st: &AppState, user: UserId) -> Option<(String, String)> {
+    if let Some(found) = st.identities.lock().await.get(&user) {
+        return found.clone();
+    }
+    match st.store.identity_of(user).await {
+        Ok(found) => {
+            st.identities.lock().await.insert(user, found.clone());
+            found
+        }
+        Err(e) => {
+            eprintln!(
+                "[bus] личность счёта {} не прочитана, событие НЕ будет собрано: {e}",
+                user.0
+            );
+            None
+        }
+    }
+}
+
+/// Собрать конверты в шину по изменению счёта (TRM-40).
+///
+/// Отдельной функцией, потому что путей мутации два — ручная операция и сработавший
+/// триггер, — а событие о сделке обязано уходить с обоих. Проверка, стоящая на том
+/// пути, о котором мы помним, пропускает ровно тот, о котором спорят: сработавший
+/// стоп меняет счёт так же, как нажатая кнопка.
+async fn bus_envelopes(
+    st: &AppState,
+    user: UserId,
+    before: bus::Before,
+    snap: &broker::AccountSnapshot,
+    kinds: &[broker::journal::EventKind],
+    sealed: &[broker::journal::AccountEvent],
+) -> Vec<persistence::OutboxRecord> {
+    if kinds.is_empty() {
+        return Vec::new();
+    }
+    let Some((tenant, sub)) = identity_for_bus(st, user).await else {
+        return Vec::new();
+    };
+    let Some(last) = sealed.last() else {
+        return Vec::new();
+    };
+    let who = bus::Addressee {
+        tenant: &tenant,
+        sub: &sub,
+        user: user.0,
+        seq: last.seq(),
+        at_ms: last.at_ms(),
+    };
+    let by_id = |id: u32| feed_by_id(st, id);
+    bus::envelopes_for(&who, &before, snap, kinds, &by_id)
+        .iter()
+        .map(|e| e.to_record())
+        .collect()
+}
+
 /// Лок конкретного счёта (создаётся лениво).
 async fn account_lock(st: &AppState, user: UserId) -> Arc<Mutex<()>> {
     st.acct_locks
@@ -258,6 +383,116 @@ async fn account_lock(st: &AppState, user: UserId) -> Arc<Mutex<()>> {
         .entry(user)
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
+}
+
+/// Завести счёт отдельной записью журнала — **до** первой операции и
+/// независимо от её исхода (TRM-46).
+///
+/// ## Почему отдельным шагом, а не вместе с операцией
+///
+/// Счёт заводился лениво, внутри первой же операции, и запись о заведении
+/// попадала в общую очередь её событий. Очередь сливается **всегда, в том числе
+/// на отказе** — и это правильно для событий операции: несостоявшееся не должно
+/// уехать в журнал прицепом к следующему.
+///
+/// Но рождение счёта — не событие операции. Операция откатывается, счёт
+/// **остаётся**: он уже в памяти, и второй раз `AccountOpened` никто не напишет,
+/// потому что счёт существует. Запись уезжала в никуда, журнал начинался сразу с
+/// `position_opened`, и первые деньги на счёте оставались без происхождения.
+///
+/// Найдено 24.10 живым прогоном: первая операция отказала по марже, вторая
+/// прошла — и сверка сказала «сходится», потому что свёртка начинается со
+/// стартового баланса и недостачу записи по сумме не видно.
+///
+/// Чинить это на путях отказа было нельзя: отказать может **любая** из операций,
+/// заводящих счёт (открытие — по марже, закрытие — неизвестной позицией, снятие
+/// ордера — неизвестным ордером), и завтра появится ещё одна. Поэтому разделены
+/// не исходы, а факты: рождение счёта пишется своей записью, раньше всего
+/// остального, и ничья неудача его не уносит.
+///
+/// ## Откат
+///
+/// Если запись не прошла, счёт **убирается из памяти**. Оставить его значило бы
+/// получить заведённый счёт без журнала, который при следующей попытке уже не
+/// напишет `AccountOpened`, — ровно тот дефект, от которого уходим.
+async fn ensure_account_opened(st: &AppState, user: UserId) -> Result<(), ApiErr> {
+    // Быстрый путь: счёт уже есть — ни записи, ни блокировок.
+    if st.broker.lock().await.has_account(user) {
+        return Ok(());
+    }
+
+    let (kinds, snap, lev, start_balance) = {
+        let mut b = st.broker.lock().await;
+        // Повторная проверка под локом: между быстрым путём и этим местом счёт мог
+        // завести соседний запрос. `open_account` отдаёт `false` — уходим, запись
+        // уже сделана тем, кто успел первым.
+        if !b.open_account(user) {
+            return Ok(());
+        }
+        (
+            b.take_events(user),
+            b.snapshot(user),
+            b.leverage(),
+            b.start_balance(),
+        )
+    };
+
+    // Откат заведения: счёт обязан исчезнуть из памяти вместе с несостоявшейся
+    // записью. Отдельной функцией, чтобы все три выхода делали ровно одно и то же.
+    async fn undo(st: &AppState, user: UserId) {
+        st.broker.lock().await.forget(user);
+    }
+
+    let sealed = {
+        let mut js = st.journals.lock().await;
+        let j = js
+            .entry(user)
+            .or_insert_with(|| Journal::new(lev, start_balance));
+        let sealed = j.seal(now_ms(), &Origin::System, &kinds);
+        let diverged = journal::reconcile(&j.preview(&sealed), &snap);
+        if !diverged.is_empty() {
+            drop(js);
+            undo(st, user).await;
+            for d in &diverged {
+                eprintln!(
+                    "[gateway] ЗАВЕДЕНИЕ СЧЁТА {} НЕ СХОДИТСЯ, счёт не заведён: {d}",
+                    user.0
+                );
+            }
+            return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "journal_divergence"));
+        }
+        sealed
+    };
+
+    // Событие на шину — тем же порядком, что у операций: собрать до записи,
+    // отправить после. `account.opened` обязан уехать раньше первой сделки, иначе
+    // в проекции кабинета нет строки счёта и сделка падает по внешнему ключу
+    // (найдено сквозным прогоном TRM-40).
+    let outgoing = bus_envelopes(
+        st,
+        user,
+        bus::Before {
+            closed: 0,
+            balance: start_balance,
+        },
+        &snap,
+        &kinds,
+        &sealed,
+    )
+    .await;
+
+    if let Err(e) = st
+        .store
+        .save_account(user, &snap, &sealed, &outgoing)
+        .await
+    {
+        undo(st, user).await;
+        eprintln!("[gateway] счёт {} не заведён, запись не удалась: {e}", user.0);
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable"));
+    }
+
+    commit_journal(st, user, sealed).await;
+    Ok(())
 }
 
 /// Мутация счёта с сохранением (ADR-016) и записью в журнал (TRM-13).
@@ -289,6 +524,11 @@ async fn with_account<T>(
     let lock = account_lock(st, user).await;
     let _guard = lock.lock().await;
 
+    // Счёт заводится ДО операции и своей записью (TRM-46). После этого ни одна
+    // операция уже не может родить счёт, а значит и уронить его рождение своим
+    // отказом: `f` ниже работает по заведомо существующему счёту.
+    ensure_account_opened(st, user).await?;
+
     let (out, before, snap, kinds, lev, start_balance) = {
         let mut b = st.broker.lock().await;
         let before = b.snapshot(user);
@@ -319,11 +559,17 @@ async fn with_account<T>(
     }
 
     // Журнал (TRM-13). Запечатываем, но ещё не пишем: сначала сверка.
-    let sealed = {
+    let (sealed, before_bus) = {
         let mut js = st.journals.lock().await;
         let j = js
             .entry(user)
             .or_insert_with(|| Journal::new(lev, start_balance));
+        // Чем счёт был до операции — по свёртке журнала (TRM-40). Берём здесь, пока
+        // запись ещё не принята: после `commit_journal` свёртка уже «после».
+        let before_bus = bus::Before {
+            closed: j.state().closed.len(),
+            balance: j.state().balance,
+        };
         let sealed = j.seal(now_ms(), &origin, &kinds);
         let would_be = j.preview(&sealed);
         let diverged = journal::reconcile(&would_be, &snap);
@@ -338,10 +584,19 @@ async fn with_account<T>(
             }
             return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "journal_divergence"));
         }
-        sealed
+        (sealed, before_bus)
     };
 
-    if let Err(e) = st.store.save_account(user, &snap, &sealed).await {
+    // Конверты в шину — ДО записи, отправка — ПОСЛЕ (TRM-40). Собираем здесь,
+    // чтобы они уехали в хранилище той же транзакцией, что слепок и журнал:
+    // событие, записанное отдельно от денег, рано или поздно с ними разойдётся.
+    let outgoing = bus_envelopes(st, user, before_bus, &snap, &kinds, &sealed).await;
+
+    if let Err(e) = st
+        .store
+        .save_account(user, &snap, &sealed, &outgoing)
+        .await
+    {
         st.broker.lock().await.restore(user, before);
         eprintln!("[gateway] запись состояния не удалась, счёт откачен: {e}");
         return Err(err(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable"));
@@ -987,6 +1242,20 @@ struct HealthDto {
     feed_fresh: bool,
     feed_age_secs: Option<i64>,
     priced_instruments: usize,
+    /// Включена ли публикация на шину (TRM-40): есть ли у релея адрес.
+    bus: bool,
+    /// Сколько конвертов ждёт отправки. Непустая очередь при молчащей шине —
+    /// видимое состояние, а не тишина: по этому числу отличают «нечего слать»
+    /// от «слать некуда». `None` — очередь не прочиталась, и это тоже ответ.
+    outbox_pending: Option<i64>,
+    /// **Все запросы идут на ОДИН общий счёт** — режим без SSO.
+    ///
+    /// Поле отдельное от `sso`, хотя выводится из него, и это не дублирование:
+    /// `sso` описывает настройку, это — её последствие, и читает их разный
+    /// человек. Режим обязан называть себя — то же решение штаба, что для
+    /// хранилища (КОНТРАКТЫ §5в), и по той же причине: снаружи общий счёт
+    /// неотличим от своего, пока на нём не окажется чужая сделка.
+    shared_account: bool,
 }
 
 /// Насколько старым может быть последнее сообщение Binance, чтобы фид считался живым.
@@ -1004,6 +1273,9 @@ async fn health(State(st): State<AppState>) -> Json<HealthDto> {
         feed_fresh: age.is_some_and(|a| a <= FEED_STALE_AFTER_SECS),
         feed_age_secs: age,
         priced_instruments: st.tickers.lock().await.len(),
+        bus: st.bus_enabled,
+        outbox_pending: st.store.outbox_backlog().await.ok(),
+        shared_account: !st.sso_enabled,
     })
 }
 
@@ -1716,11 +1988,17 @@ pub async fn monitor_tick(st: &AppState) {
             }
             continue; // испорченное не записываем и не чиним
         }
-        let sealed = {
+        let (sealed, before_bus) = {
             let mut js = st.journals.lock().await;
             let j = js
                 .entry(user)
                 .or_insert_with(|| Journal::new(lev, start_balance));
+            // «До» — по свёртке журнала (TRM-40). Слепка «до» здесь нет и быть не
+            // может: монитор узнаёт о затронутых счетах уже после мутации.
+            let before_bus = bus::Before {
+                closed: j.state().closed.len(),
+                balance: j.state().balance,
+            };
             let sealed = j.seal(now_ms(), &Origin::System, &kinds);
             let diverged = journal::reconcile(&j.preview(&sealed), &snap);
             if !diverged.is_empty() {
@@ -1734,9 +2012,17 @@ pub async fn monitor_tick(st: &AppState) {
                 }
                 continue; // цену уже не отыграть назад, но и чинить молча нельзя
             }
-            sealed
+            (sealed, before_bus)
         };
-        if let Err(e) = st.store.save_account(user, &snap, &sealed).await {
+        // Сработавший стоп — такая же сделка, как нажатая кнопка, и наружу обязан
+        // уходить так же. Путь, на котором событие собирается только у ручных
+        // операций, молчит ровно про то, о чём спорят с клиентом.
+        let outgoing = bus_envelopes(st, user, before_bus, &snap, &kinds, &sealed).await;
+        if let Err(e) = st
+            .store
+            .save_account(user, &snap, &sealed, &outgoing)
+            .await
+        {
             eprintln!("[monitor] не удалось сохранить счёт {}: {e}", user.0);
             continue; // в память журнал не принимаем: в хранилище его нет
         }
@@ -2241,6 +2527,7 @@ mod invariant_wiring_tests {
             _u: UserId,
             _s: &broker::AccountSnapshot,
             _e: &[journal::AccountEvent],
+            _out: &[persistence::OutboxRecord],
         ) -> Result<(), persistence::StoreError> {
             Ok(())
         }
@@ -2744,6 +3031,7 @@ mod journal_wiring_tests {
                 _u: UserId,
                 _s: &broker::AccountSnapshot,
                 _e: &[journal::AccountEvent],
+                _out: &[persistence::OutboxRecord],
             ) -> Result<(), persistence::StoreError> {
                 Ok(())
             }
@@ -2785,6 +3073,7 @@ mod journal_wiring_tests {
                 _u: UserId,
                 _s: &broker::AccountSnapshot,
                 _e: &[journal::AccountEvent],
+                _out: &[persistence::OutboxRecord],
             ) -> Result<(), persistence::StoreError> {
                 Ok(())
             }
@@ -2844,8 +3133,9 @@ mod journal_wiring_tests {
                 u: UserId,
                 s: &broker::AccountSnapshot,
                 e: &[journal::AccountEvent],
+                out: &[persistence::OutboxRecord],
             ) -> Result<(), persistence::StoreError> {
-                self.0.save_account(u, s, e).await
+                self.0.save_account(u, s, e, out).await
             }
         }
         let st2 = build_state_with(Arc::new(Tampered(store.clone())));
@@ -2894,6 +3184,7 @@ mod journal_wiring_tests {
                 _u: UserId,
                 _s: &broker::AccountSnapshot,
                 _e: &[journal::AccountEvent],
+                _out: &[persistence::OutboxRecord],
             ) -> Result<(), persistence::StoreError> {
                 Err(persistence::StoreError("диск горит".into()))
             }
@@ -2911,6 +3202,473 @@ mod journal_wiring_tests {
         assert!(
             events_of(&st).await.is_empty(),
             "незаписанного в хранилище в журнале быть не должно"
+        );
+    }
+
+    // ================= Заведение счёта не теряется (TRM-46) =================
+    //
+    // Проверяется СВОЙСТВО, а не один сценарий: счёт заводится до операции и
+    // независимо от её исхода. Поэтому случаев три — по одному на каждую
+    // операцию, которая умеет завести счёт и тут же отказать. Один сценарий
+    // закрыл бы один путь и оставил два, а завтра появился бы четвёртый.
+
+    /// Первая операция отказала — запись о заведении счёта **в журнале есть**.
+    ///
+    /// Это тот самый случай, увиденный живьём 24.10: открытие не прошло по марже,
+    /// счёт при этом остался, а `account_opened` уехал в никуда вместе с
+    /// событиями несостоявшейся операции.
+    #[tokio::test]
+    async fn a_rejected_first_operation_still_records_the_account_opening() {
+        let st = build_state();
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+
+        // Объём заведомо больше свободной маржи: операция обязана отказать.
+        let huge = serde_json::json!({"instrument": 1, "side": "buy", "qty": 100_000_000});
+        let (status, body) = send(&app, "POST", "/deals", Some(huge)).await;
+        assert_ne!(status, StatusCode::OK, "операция обязана отказать: {body}");
+        assert_eq!(
+            body["error"], "insufficient_margin",
+            "отказ обязан быть деловым, а не посторонним: {body}"
+        );
+
+        let kinds = events_of(&st).await;
+        assert_eq!(
+            kinds.len(),
+            1,
+            "в журнале обязана быть ровно одна запись — о заведении: {kinds:?}"
+        );
+        assert!(
+            kinds[0].starts_with("account_opened"),
+            "первые деньги на счёте обязаны иметь происхождение: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().all(|k| !k.starts_with("position_opened")),
+            "несостоявшаяся операция в журнал попасть не должна: {kinds:?}"
+        );
+    }
+
+    /// То же для закрытия несуществующей позиции: счёт заводится и этой операцией.
+    #[tokio::test]
+    async fn a_rejected_close_still_records_the_account_opening() {
+        let st = build_state();
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+
+        let (status, _) = send(&app, "POST", "/deals/777/close", None).await;
+        assert_ne!(status, StatusCode::OK, "позиции нет — закрывать нечего");
+
+        let kinds = events_of(&st).await;
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+        assert!(kinds[0].starts_with("account_opened"), "{kinds:?}");
+    }
+
+    /// И для снятия несуществующего ордера.
+    #[tokio::test]
+    async fn a_rejected_cancel_still_records_the_account_opening() {
+        let st = build_state();
+        let app = router(st.clone());
+
+        let (status, _) = send(&app, "DELETE", "/pending/777", None).await;
+        assert_ne!(status, StatusCode::OK, "ордера нет — снимать нечего");
+
+        let kinds = events_of(&st).await;
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+        assert!(kinds[0].starts_with("account_opened"), "{kinds:?}");
+    }
+
+    /// Заведение — ОТДЕЛЬНАЯ запись, а не часть первой удачной операции.
+    ///
+    /// Проверяется номерами: `account_opened` обязан быть первым и один, а
+    /// операция обязана идти следом. Склеенные в одну запись, они снова стали бы
+    /// неразделимы при отказе.
+    #[tokio::test]
+    async fn the_opening_is_its_own_entry_and_comes_first() {
+        let st = build_state();
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+        let (status, _) = send(&app, "POST", "/deals", Some(deal_body())).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let kinds = events_of(&st).await;
+        assert!(kinds[0].starts_with("account_opened"), "{kinds:?}");
+        assert_eq!(
+            kinds.iter().filter(|k| k.starts_with("account_opened")).count(),
+            1,
+            "счёт заводится один раз: {kinds:?}"
+        );
+        assert!(kinds[1].starts_with("position_opened"), "{kinds:?}");
+    }
+
+    /// Счёт, который не удалось записать, **не остаётся заведённым в памяти**.
+    ///
+    /// Иначе следующая попытка нашла бы существующий счёт, `AccountOpened` второй
+    /// раз не написался бы, и мы получили бы ровно тот дефект, от которого ушли, —
+    /// только теперь после моргнувшего хранилища.
+    #[tokio::test]
+    async fn an_account_whose_opening_was_not_written_does_not_stay_in_memory() {
+        struct FailOnce(std::sync::atomic::AtomicBool);
+        #[async_trait::async_trait]
+        impl persistence::Persistence for FailOnce {
+            async fn init(&self) -> Result<(), persistence::StoreError> {
+                Ok(())
+            }
+            async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
+                Ok(persistence::LoadedState::default())
+            }
+            async fn save_account(
+                &self,
+                _u: UserId,
+                _s: &broker::AccountSnapshot,
+                _e: &[journal::AccountEvent],
+                _o: &[persistence::OutboxRecord],
+            ) -> Result<(), persistence::StoreError> {
+                if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    return Err(persistence::StoreError("диск моргнул".into()));
+                }
+                Ok(())
+            }
+        }
+
+        let st = build_state_with(Arc::new(FailOnce(
+            std::sync::atomic::AtomicBool::new(true),
+        )));
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+
+        let (status, _) = send(&app, "POST", "/deals", Some(deal_body())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "запись не прошла");
+        assert!(
+            !st.broker.lock().await.has_account(DEFAULT_USER),
+            "незаписанный счёт обязан исчезнуть и из памяти"
+        );
+
+        // Вторая попытка: хранилище уже отвечает, и происхождение обязано
+        // появиться — то есть откат действительно вернул возможность его написать.
+        let (status, _) = send(&app, "POST", "/deals", Some(deal_body())).await;
+        assert_eq!(status, StatusCode::OK);
+        let kinds = events_of(&st).await;
+        assert!(
+            kinds.first().is_some_and(|k| k.starts_with("account_opened")),
+            "после отката происхождение обязано записаться: {kinds:?}"
+        );
+    }
+}
+
+/// Сделка из терминала доезжает до исходящей очереди (TRM-40).
+///
+/// Проверка идёт **через роутер и через монитор**, а не по `bus::envelopes_for`
+/// напрямую. Сборка конверта проверена отдельно и в вакууме; здесь проверяется
+/// другое — что барьер стоит на своём месте, на обоих путях мутации счёта. Путь,
+/// собирающий событие только у ручных операций, молчит ровно про сработавший стоп,
+/// а спорят с клиентом как раз о нём (урок BUG-013, он же TRM-13).
+#[cfg(test)]
+mod bus_wiring_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    const TENANT: &str = "apex-ru";
+    const SUB: &str = "sub-777";
+
+    /// Хранилище, у которого счёт привязан к сайту.
+    ///
+    /// `MemoryStore` личностей не знает и честно отвечает `None` — а без адресата
+    /// события не собираются вовсе. Поэтому для проверки публикации нужна привязка,
+    /// и она здесь настоящая, а не «всегда да»: чужой счёт остаётся без личности,
+    /// и это проверяется отдельным случаем.
+    struct Tenanted {
+        inner: persistence::MemoryStore,
+        linked: UserId,
+    }
+
+    #[async_trait::async_trait]
+    impl Persistence for Tenanted {
+        async fn init(&self) -> Result<(), persistence::StoreError> {
+            self.inner.init().await
+        }
+        async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
+            self.inner.load_all().await
+        }
+        async fn save_account(
+            &self,
+            u: UserId,
+            s: &broker::AccountSnapshot,
+            e: &[journal::AccountEvent],
+            o: &[persistence::OutboxRecord],
+        ) -> Result<(), persistence::StoreError> {
+            self.inner.save_account(u, s, e, o).await
+        }
+        async fn claim_outbox(
+            &self,
+            limit: i64,
+            lease_ms: i64,
+        ) -> Result<Vec<persistence::OutboxClaim>, persistence::StoreError> {
+            self.inner.claim_outbox(limit, lease_ms).await
+        }
+        async fn mark_published(&self, id: i64) -> Result<(), persistence::StoreError> {
+            self.inner.mark_published(id).await
+        }
+        async fn outbox_backlog(&self) -> Result<i64, persistence::StoreError> {
+            self.inner.outbox_backlog().await
+        }
+        async fn identity_of(
+            &self,
+            u: UserId,
+        ) -> Result<Option<(String, String)>, persistence::StoreError> {
+            Ok((u == self.linked).then(|| (TENANT.to_string(), SUB.to_string())))
+        }
+    }
+
+    fn tenanted(linked: UserId) -> Arc<Tenanted> {
+        Arc::new(Tenanted {
+            inner: persistence::MemoryStore::new(),
+            linked,
+        })
+    }
+
+    async fn send(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> StatusCode {
+        let b = Request::builder().method(method).uri(uri);
+        let req = match body {
+            Some(v) => b
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&v).unwrap()))
+                .unwrap(),
+            None => b.body(Body::empty()).unwrap(),
+        };
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let _ = resp.into_body().collect().await.unwrap();
+        status
+    }
+
+    async fn with_price(st: &AppState, instrument: u32, px: i64) {
+        st.tickers.lock().await.insert(
+            instrument,
+            feed::Ticker {
+                last: px,
+                change: 0.0,
+                high: px,
+                bid: px,
+                ask: px,
+            },
+        );
+    }
+
+    /// Все конверты, лежащие в очереди, разобранные обратно в JSON.
+    async fn queued(st: &AppState) -> Vec<serde_json::Value> {
+        st.store
+            .claim_outbox(100, 0)
+            .await
+            .expect("очередь обязана читаться")
+            .iter()
+            .map(|c| serde_json::from_str(&c.payload).expect("конверт — валидный JSON"))
+            .collect()
+    }
+
+    fn of_kind<'a>(
+        all: &'a [serde_json::Value],
+        name: &str,
+    ) -> Vec<&'a serde_json::Value> {
+        all.iter().filter(|e| e["event"] == name).collect()
+    }
+
+    /// Сработавший стоп уезжает на шину — с ценой исполнения, уровнем и разрывом.
+    #[tokio::test]
+    async fn a_stop_loss_reaches_the_outgoing_queue() {
+        let st = build_state_with(tenanted(DEFAULT_USER));
+        restore_state(&st).await.unwrap();
+        with_price(&st, 1, 5_000_000).await; // BTCUSD, pd = 2 → 50 000.00
+        let app = router(st.clone());
+
+        let body = serde_json::json!({
+            "instrument": 1, "side": "buy", "qty": 100_000, "sl": 4_900_000
+        });
+        assert_eq!(send(&app, "POST", "/deals", Some(body)).await, StatusCode::OK);
+
+        // Рынок перепрыгнул стоп: исполнение по 48 000.00, уровень был 49 000.00.
+        with_price(&st, 1, 4_800_000).await;
+        monitor_tick(&st).await;
+
+        let all = queued(&st).await;
+        let trades = of_kind(&all, bus::EV_TRADE_EXECUTED);
+        assert_eq!(trades.len(), 1, "сделка обязана уйти наружу: {all:?}");
+        let d = &trades[0]["data"];
+        assert_eq!(d["tenant"], TENANT);
+        assert_eq!(d["userId"], SUB);
+        assert_eq!(d["symbol"], "BTCUSD");
+        assert_eq!(d["price"], serde_json::json!(48_000.0), "цена ИСПОЛНЕНИЯ");
+        assert_eq!(
+            d["level"],
+            serde_json::json!(49_000.0),
+            "и поставленный уровень — без него проскальзывание не посчитать"
+        );
+        assert_eq!(d["acrossGap"], serde_json::json!(false));
+        assert_eq!(trades[0]["source"], bus::SOURCE);
+        assert_eq!(trades[0]["version"], bus::EVENT_VERSION);
+
+        // Остаток изменился — об этом отдельное событие, и в нём новый остаток.
+        let balances = of_kind(&all, bus::EV_BALANCE_CHANGED);
+        assert_eq!(balances.len(), 1, "изменение остатка обязано уехать");
+        assert_eq!(balances[0]["data"]["reason"], "trade");
+    }
+
+    /// Заведение счёта ручным открытием — тоже событие, и оно первое.
+    #[tokio::test]
+    async fn opening_an_account_reaches_the_queue_before_the_trade() {
+        let st = build_state_with(tenanted(DEFAULT_USER));
+        restore_state(&st).await.unwrap();
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+        assert_eq!(
+            send(
+                &app,
+                "POST",
+                "/deals",
+                Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 100_000}))
+            )
+            .await,
+            StatusCode::OK
+        );
+
+        let all = queued(&st).await;
+        assert_eq!(
+            all.first().map(|e| e["event"].clone()),
+            Some(serde_json::json!(bus::EV_ACCOUNT_OPENED)),
+            "счёт заводится раньше, чем по нему торгуют: {all:?}"
+        );
+    }
+
+    /// **Отказ записи — нет события.** 503 клиенту и пустая очередь: наружу не
+    /// должна уехать сделка, которой нет в хранилище.
+    #[tokio::test]
+    async fn a_failed_write_publishes_nothing() {
+        struct Burning(persistence::MemoryStore);
+        #[async_trait::async_trait]
+        impl Persistence for Burning {
+            async fn init(&self) -> Result<(), persistence::StoreError> {
+                Ok(())
+            }
+            async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
+                Ok(Default::default())
+            }
+            async fn save_account(
+                &self,
+                _u: UserId,
+                _s: &broker::AccountSnapshot,
+                _e: &[journal::AccountEvent],
+                _o: &[persistence::OutboxRecord],
+            ) -> Result<(), persistence::StoreError> {
+                Err(persistence::StoreError("диск горит".into()))
+            }
+            async fn claim_outbox(
+                &self,
+                limit: i64,
+                lease_ms: i64,
+            ) -> Result<Vec<persistence::OutboxClaim>, persistence::StoreError> {
+                self.0.claim_outbox(limit, lease_ms).await
+            }
+            async fn outbox_backlog(&self) -> Result<i64, persistence::StoreError> {
+                self.0.outbox_backlog().await
+            }
+            async fn identity_of(
+                &self,
+                _u: UserId,
+            ) -> Result<Option<(String, String)>, persistence::StoreError> {
+                Ok(Some((TENANT.to_string(), SUB.to_string())))
+            }
+        }
+
+        let st = build_state_with(Arc::new(Burning(persistence::MemoryStore::new())));
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+        assert_eq!(
+            send(
+                &app,
+                "POST",
+                "/deals",
+                Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 100_000}))
+            )
+            .await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            st.store.outbox_backlog().await.unwrap(),
+            0,
+            "события не существует отдельно от денег"
+        );
+    }
+
+    /// Счёт без привязки к сайту (standalone) — адресата нет, и событий нет.
+    ///
+    /// Не ошибка: адресовать их некому, а «кому-нибудь» мы не шлём. Это же
+    /// свойство — причина, по которой публикация НЕ разнесёт находку штаба от
+    /// 24.10 по второй зоне: пока на сервере `sso: false` и все работают на
+    /// общем счёте #1, у этого счёта нет строки в `identities`, и на шину не
+    /// уйдёт ничего. Неверная личность наружу не попадёт — но и показа не
+    /// будет, пока личность не починят.
+    #[tokio::test]
+    async fn an_unlinked_account_publishes_nothing() {
+        let st = build_state_with(tenanted(UserId(999))); // привязан ДРУГОЙ счёт
+        restore_state(&st).await.unwrap();
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+        assert_eq!(
+            send(
+                &app,
+                "POST",
+                "/deals",
+                Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 100_000}))
+            )
+            .await,
+            StatusCode::OK,
+            "торговля не зависит от того, доедет ли событие"
+        );
+        assert_eq!(st.store.outbox_backlog().await.unwrap(), 0);
+    }
+
+    /// `/health` называет и состояние шины, и длину очереди: «копится» и
+    /// «копится, потому что слать некуда» — разные беды и разные люди.
+    #[tokio::test]
+    async fn health_tells_whether_the_bus_is_configured_and_how_much_waits() {
+        let st = build_state_with(tenanted(DEFAULT_USER));
+        restore_state(&st).await.unwrap();
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+        let _ = send(
+            &app,
+            "POST",
+            "/deals",
+            Some(serde_json::json!({"instrument": 1, "side": "buy", "qty": 100_000})),
+        )
+        .await;
+
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["bus"], false, "в тестах шина не настроена, и это видно");
+        assert_eq!(
+            v["outbox_pending"], 1,
+            "и видно, сколько ждёт отправки: {v}"
+        );
+        // Режим счёта обязан называть себя. Без SSO все запросы идут на один
+        // общий счёт, и снаружи это неотличимо от своего — пока на нём не
+        // окажется чужая сделка. На проде это уже случилось: `/health` отдаёт
+        // `sso: false`, и весь оборот лежит на счёте #1 (находка штаба 24.10).
+        assert_eq!(
+            v["shared_account"], true,
+            "общий счёт обязан быть виден машине, а не только по симптому: {v}"
         );
     }
 }

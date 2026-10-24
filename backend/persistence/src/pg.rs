@@ -16,7 +16,7 @@ use broker::{AccountSnapshot, ClosedDeal, PendingOrder, PosSide, Position};
 use domain::account::UserId;
 
 use crate::money::{from_numeric, to_numeric};
-use crate::{LoadedState, Persistence, StoreError};
+use crate::{LoadedState, OutboxClaim, OutboxRecord, Persistence, StoreError};
 
 fn db(e: sqlx::Error) -> StoreError {
     StoreError(e.to_string())
@@ -189,6 +189,35 @@ DROP TRIGGER IF EXISTS account_events_no_update ON account_events;
 CREATE TRIGGER account_events_no_update
   BEFORE UPDATE OR DELETE ON account_events
   FOR EACH ROW EXECUTE FUNCTION account_events_append_only();
+
+-- =============== Исходящая очередь шины (TRM-40, transactional outbox) ======
+-- Лежит рядом со слепком и журналом и наполняется ТОЙ ЖЕ транзакцией: событие о
+-- сделке, потерянное на перезапуске, — это деньги. До этой таблицы исходящей
+-- очередью звался массив в памяти процесса (Р-204).
+--
+-- Схема — зеркало `outbox` релея платформы (их `db/init/001_init.sql`), имена
+-- столбцов те же намеренно: два разных имени для одного смысла однажды разойдутся,
+-- а эксплуатирует их один человек.
+--
+-- `payload` — конверт ЦЕЛИКОМ, собранный в момент сделки. Релей его не
+-- пересобирает: иначе форма события зависела бы от версии кода в момент отправки,
+-- а не в момент сделки, и строка, пролежавшая через выкатку, уехала бы в чужом виде.
+CREATE TABLE IF NOT EXISTS bus_outbox (
+  id              BIGSERIAL PRIMARY KEY,
+  event_id        TEXT NOT NULL UNIQUE,
+  routing_key     TEXT NOT NULL,
+  payload         JSONB NOT NULL,
+  occurred_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  published_at    TIMESTAMPTZ,
+  attempts        INT NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_error      TEXT
+);
+-- Частичный индекс: выборка релея смотрит только на неотправленные, и расти она
+-- не должна вместе с историей отправленных.
+CREATE INDEX IF NOT EXISTS bus_outbox_unpublished_idx
+  ON bus_outbox (next_attempt_at)
+  WHERE published_at IS NULL;
 "#;
 
 /// Отпечаток ↔ БД: 32 hex-символа. Число в тексте, а не `NUMERIC`, потому что по нему
@@ -380,6 +409,7 @@ impl Persistence for PgStore {
         user: UserId,
         snap: &AccountSnapshot,
         events: &[AccountEvent],
+        outgoing: &[OutboxRecord],
     ) -> Result<(), StoreError> {
         let id_db = user.0 as i64;
         let mut tx = self.pool.begin().await.map_err(db)?;
@@ -489,8 +519,129 @@ impl Persistence for PgStore {
             .map_err(db)?;
         }
 
+        // Исходящая очередь — в той же транзакции (TRM-40). Не отдельным заходом
+        // «после сохранения»: тогда между деньгами и событием появилась бы щель, и
+        // падение в ней дало бы либо сделку без события, либо событие без сделки.
+        //
+        // `ON CONFLICT DO NOTHING` по `event_id`: идентификатор выведен из факта
+        // (счёт + номер записи журнала), поэтому повтор означает повторную запись
+        // того же факта, а не новое событие. Здесь это противоположно журналу, где
+        // повтор номера обязан падать: там номер — позиция в ленте, и запись «поверх»
+        // означала бы потерю. Разница намеренная.
+        for rec in outgoing {
+            sqlx::query(
+                "INSERT INTO bus_outbox (event_id, routing_key, payload)
+                 VALUES ($1, $2, $3::jsonb) ON CONFLICT (event_id) DO NOTHING",
+            )
+            .bind(&rec.event_id)
+            .bind(&rec.routing_key)
+            .bind(&rec.payload)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        }
+
         tx.commit().await.map_err(db)?;
         Ok(())
+    }
+
+    async fn claim_outbox(&self, limit: i64, lease_ms: i64) -> Result<Vec<OutboxClaim>, StoreError> {
+        // `FOR UPDATE SKIP LOCKED` + сдвиг `next_attempt_at` = аренда: второй
+        // экземпляр не возьмёт те же строки, пока первый с ними работает. Аренда
+        // НЕ трогает `attempts`: счётчик обязан считать отказы шины, а не заходы
+        // релея — иначе по нему нельзя отличить «шина лежит» от «релей бодр».
+        let rows = sqlx::query(
+            "UPDATE bus_outbox SET next_attempt_at = now() + make_interval(secs => $2 / 1000.0)
+              WHERE id IN (
+                SELECT id FROM bus_outbox
+                 WHERE published_at IS NULL AND next_attempt_at <= now()
+                 ORDER BY id LIMIT $1
+                 FOR UPDATE SKIP LOCKED
+              )
+              RETURNING id, event_id, routing_key, payload::text AS payload, attempts",
+        )
+        .bind(limit)
+        .bind(lease_ms as f64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        // Порядок отправки — порядок записи. `UPDATE ... RETURNING` его не обещает,
+        // а для баланса он значим: событие «новый остаток» перезаписывает прежний,
+        // и переставленные местами два события оставили бы в проекции старое число.
+        let mut out: Vec<OutboxClaim> = rows
+            .iter()
+            .map(|r: &PgRow| OutboxClaim {
+                id: r.get::<i64, _>("id"),
+                event_id: r.get::<String, _>("event_id"),
+                routing_key: r.get::<String, _>("routing_key"),
+                payload: r.get::<String, _>("payload"),
+                attempts: r.get::<i32, _>("attempts"),
+            })
+            .collect();
+        out.sort_by_key(|c| c.id);
+        Ok(out)
+    }
+
+    async fn mark_published(&self, id: i64) -> Result<(), StoreError> {
+        let done = sqlx::query("UPDATE bus_outbox SET published_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
+        if done.rows_affected() == 0 {
+            return Err(StoreError(format!(
+                "исходящая очередь: строки №{id} нет, пометить отправленной нечего"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn mark_failed(
+        &self,
+        id: i64,
+        attempts: i32,
+        retry_in_ms: i64,
+        error: &str,
+    ) -> Result<(), StoreError> {
+        let text: String = error.chars().take(500).collect();
+        let done = sqlx::query(
+            "UPDATE bus_outbox
+                SET attempts = $2,
+                    next_attempt_at = now() + make_interval(secs => $3 / 1000.0),
+                    last_error = $4
+              WHERE id = $1",
+        )
+        .bind(id)
+        .bind(attempts)
+        .bind(retry_in_ms as f64)
+        .bind(&text)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        if done.rows_affected() == 0 {
+            return Err(StoreError(format!(
+                "исходящая очередь: строки №{id} нет, записать отказ некуда"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn outbox_backlog(&self) -> Result<i64, StoreError> {
+        let n: i64 = sqlx::query("SELECT count(*) AS n FROM bus_outbox WHERE published_at IS NULL")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(db)?
+            .get("n");
+        Ok(n)
+    }
+
+    async fn identity_of(&self, user: UserId) -> Result<Option<(String, String)>, StoreError> {
+        let row = sqlx::query("SELECT tenant, sub FROM identities WHERE user_id = $1")
+            .bind(user.0 as i64)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db)?;
+        Ok(row.map(|r| (r.get::<String, _>("tenant"), r.get::<String, _>("sub"))))
     }
 
     fn durable(&self) -> bool {
