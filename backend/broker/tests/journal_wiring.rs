@@ -58,6 +58,14 @@ impl Rig {
         );
     }
 
+    /// Завести счёт **отдельной записью** — ровно то, что теперь делает шлюз
+    /// перед любой операцией (TRM-46). До этой правки счёт заводился внутри
+    /// первой операции, и её отказ уносил запись о заведении с собой.
+    fn open_account(&mut self) {
+        self.b.open_account(U);
+        self.record(Origin::System);
+    }
+
     fn kinds(&self) -> Vec<&EventKind> {
         self.j.events().iter().map(|e| e.kind()).collect()
     }
@@ -341,7 +349,11 @@ fn an_operation_that_was_not_recorded_is_detected() {
 #[test]
 fn events_of_a_failed_operation_do_not_leak_into_the_next_one() {
     let mut r = Rig::new();
-    r.record(Origin::Client); // счёта ещё нет — записи тоже
+    // Счёт заводится СВОЕЙ записью и до операции (TRM-46). Прежде этот тест
+    // заводил его отказавшим открытием и тут же выбрасывал запись о заведении
+    // вместе с событиями отказа — то есть сам воспроизводил дефект, из-за
+    // которого первые деньги оставались без происхождения.
+    r.open_account();
     assert!(
         r.b.open(
             U,
@@ -363,6 +375,12 @@ fn events_of_a_failed_operation_do_not_leak_into_the_next_one() {
             .iter()
             .all(|k| !matches!(k, EventKind::PositionOpened { .. })),
         "отказавшее открытие не должно порождать запись об открытии"
+    );
+    assert!(
+        after_failure
+            .iter()
+            .all(|k| !matches!(k, EventKind::AccountOpened { .. })),
+        "заведение счёта уже записано своей записью и во вторую очередь не попадает"
     );
 
     r.b.open(U, 1, PosSide::Long, 100, 50_000, PD, QD, None, None)
@@ -414,4 +432,72 @@ fn a_long_mixed_sequence_replays_to_the_same_account() {
         r.j.len() > 6,
         "лента обязана содержать все шаги, а не последний"
     );
+}
+
+// ---- Деньги без происхождения (TRM-47) -------------------------------------
+
+/// Потерянная запись о заведении счёта **видна сверке**, хотя деньги сходятся.
+///
+/// Это и есть причина, по которой дефект прожил незамеченным: свёртка начинается
+/// со стартового баланса, поэтому журнал без записи о заведении даёт ТОТ ЖЕ
+/// остаток, что и журнал с ней. Проверка, сравнивавшая суммы, сравнивала
+/// совпадающие числа и честно отвечала «сходится».
+#[test]
+fn money_without_provenance_is_not_called_reconciled() {
+    let mut r = Rig::new();
+    // Заводим счёт и ВЫБРАСЫВАЕМ запись о заведении — ровно то, что делала
+    // прежняя ленивая схема при отказе первой операции.
+    r.b.open_account(U);
+    let dropped = r.b.take_events(U);
+    assert!(
+        matches!(dropped.as_slice(), [EventKind::AccountOpened { .. }]),
+        "выбрасываем именно запись о заведении: {dropped:?}"
+    );
+
+    // Дальше счёт живёт обычной жизнью, и деньги считаются верно.
+    r.b.open(U, 1, PosSide::Long, 100, 50_000, PD, QD, None, None)
+        .unwrap();
+    r.record(Origin::Client);
+
+    let snap = r.b.snapshot(U);
+    assert_eq!(
+        r.j.replay().balance,
+        snap.balance,
+        "деньги обязаны сходиться — иначе проверялось бы не то"
+    );
+
+    let status = audit(&r.j, &snap);
+    assert_eq!(status.tag(), "no_provenance", "диагноз обязан называться своим именем: {status}");
+    assert!(!status.ok(), "«деньги без происхождения» — не «в порядке»");
+}
+
+/// Неполная история и неверные деньги — РАЗНЫЕ диагнозы, и второй старше.
+///
+/// Иначе счёт с испорченным остатком отчитывался бы как «нет происхождения», и
+/// разбираться пошли бы не туда.
+#[test]
+fn wrong_money_outranks_missing_provenance() {
+    let mut r = Rig::new();
+    r.b.open_account(U);
+    let _dropped = r.b.take_events(U);
+    r.b.open(U, 1, PosSide::Long, 100, 50_000, PD, QD, None, None)
+        .unwrap();
+    r.record(Origin::Client);
+
+    let mut snap = r.b.snapshot(U);
+    snap.balance += 1; // деньги разъехались
+    let status = audit(&r.j, &snap);
+    assert_eq!(status.tag(), "diverged", "неверные деньги срочнее неполной истории: {status}");
+}
+
+/// Счёт, заведённый по правилам, остаётся «в порядке»: проверка не красит всех
+/// подряд. Без этого случая предыдущие два ничего не доказывают.
+#[test]
+fn a_properly_opened_account_still_reconciles() {
+    let mut r = Rig::new();
+    r.open_account();
+    r.b.open(U, 1, PosSide::Long, 100, 50_000, PD, QD, None, None)
+        .unwrap();
+    r.record(Origin::Client);
+    r.must_reconcile("счёт с происхождением");
 }

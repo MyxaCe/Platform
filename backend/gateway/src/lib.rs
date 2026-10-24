@@ -385,6 +385,116 @@ async fn account_lock(st: &AppState, user: UserId) -> Arc<Mutex<()>> {
         .clone()
 }
 
+/// Завести счёт отдельной записью журнала — **до** первой операции и
+/// независимо от её исхода (TRM-46).
+///
+/// ## Почему отдельным шагом, а не вместе с операцией
+///
+/// Счёт заводился лениво, внутри первой же операции, и запись о заведении
+/// попадала в общую очередь её событий. Очередь сливается **всегда, в том числе
+/// на отказе** — и это правильно для событий операции: несостоявшееся не должно
+/// уехать в журнал прицепом к следующему.
+///
+/// Но рождение счёта — не событие операции. Операция откатывается, счёт
+/// **остаётся**: он уже в памяти, и второй раз `AccountOpened` никто не напишет,
+/// потому что счёт существует. Запись уезжала в никуда, журнал начинался сразу с
+/// `position_opened`, и первые деньги на счёте оставались без происхождения.
+///
+/// Найдено 24.10 живым прогоном: первая операция отказала по марже, вторая
+/// прошла — и сверка сказала «сходится», потому что свёртка начинается со
+/// стартового баланса и недостачу записи по сумме не видно.
+///
+/// Чинить это на путях отказа было нельзя: отказать может **любая** из операций,
+/// заводящих счёт (открытие — по марже, закрытие — неизвестной позицией, снятие
+/// ордера — неизвестным ордером), и завтра появится ещё одна. Поэтому разделены
+/// не исходы, а факты: рождение счёта пишется своей записью, раньше всего
+/// остального, и ничья неудача его не уносит.
+///
+/// ## Откат
+///
+/// Если запись не прошла, счёт **убирается из памяти**. Оставить его значило бы
+/// получить заведённый счёт без журнала, который при следующей попытке уже не
+/// напишет `AccountOpened`, — ровно тот дефект, от которого уходим.
+async fn ensure_account_opened(st: &AppState, user: UserId) -> Result<(), ApiErr> {
+    // Быстрый путь: счёт уже есть — ни записи, ни блокировок.
+    if st.broker.lock().await.has_account(user) {
+        return Ok(());
+    }
+
+    let (kinds, snap, lev, start_balance) = {
+        let mut b = st.broker.lock().await;
+        // Повторная проверка под локом: между быстрым путём и этим местом счёт мог
+        // завести соседний запрос. `open_account` отдаёт `false` — уходим, запись
+        // уже сделана тем, кто успел первым.
+        if !b.open_account(user) {
+            return Ok(());
+        }
+        (
+            b.take_events(user),
+            b.snapshot(user),
+            b.leverage(),
+            b.start_balance(),
+        )
+    };
+
+    // Откат заведения: счёт обязан исчезнуть из памяти вместе с несостоявшейся
+    // записью. Отдельной функцией, чтобы все три выхода делали ровно одно и то же.
+    async fn undo(st: &AppState, user: UserId) {
+        st.broker.lock().await.forget(user);
+    }
+
+    let sealed = {
+        let mut js = st.journals.lock().await;
+        let j = js
+            .entry(user)
+            .or_insert_with(|| Journal::new(lev, start_balance));
+        let sealed = j.seal(now_ms(), &Origin::System, &kinds);
+        let diverged = journal::reconcile(&j.preview(&sealed), &snap);
+        if !diverged.is_empty() {
+            drop(js);
+            undo(st, user).await;
+            for d in &diverged {
+                eprintln!(
+                    "[gateway] ЗАВЕДЕНИЕ СЧЁТА {} НЕ СХОДИТСЯ, счёт не заведён: {d}",
+                    user.0
+                );
+            }
+            return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "journal_divergence"));
+        }
+        sealed
+    };
+
+    // Событие на шину — тем же порядком, что у операций: собрать до записи,
+    // отправить после. `account.opened` обязан уехать раньше первой сделки, иначе
+    // в проекции кабинета нет строки счёта и сделка падает по внешнему ключу
+    // (найдено сквозным прогоном TRM-40).
+    let outgoing = bus_envelopes(
+        st,
+        user,
+        bus::Before {
+            closed: 0,
+            balance: start_balance,
+        },
+        &snap,
+        &kinds,
+        &sealed,
+    )
+    .await;
+
+    if let Err(e) = st
+        .store
+        .save_account(user, &snap, &sealed, &outgoing)
+        .await
+    {
+        undo(st, user).await;
+        eprintln!("[gateway] счёт {} не заведён, запись не удалась: {e}", user.0);
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable"));
+    }
+
+    commit_journal(st, user, sealed).await;
+    Ok(())
+}
+
 /// Мутация счёта с сохранением (ADR-016) и записью в журнал (TRM-13).
 ///
 /// Порядок жёсткий, и каждый шаг стоит на своём месте:
@@ -413,6 +523,11 @@ async fn with_account<T>(
 
     let lock = account_lock(st, user).await;
     let _guard = lock.lock().await;
+
+    // Счёт заводится ДО операции и своей записью (TRM-46). После этого ни одна
+    // операция уже не может родить счёт, а значит и уронить его рождение своим
+    // отказом: `f` ниже работает по заведомо существующему счёту.
+    ensure_account_opened(st, user).await?;
 
     let (out, before, snap, kinds, lev, start_balance) = {
         let mut b = st.broker.lock().await;
@@ -3087,6 +3202,155 @@ mod journal_wiring_tests {
         assert!(
             events_of(&st).await.is_empty(),
             "незаписанного в хранилище в журнале быть не должно"
+        );
+    }
+
+    // ================= Заведение счёта не теряется (TRM-46) =================
+    //
+    // Проверяется СВОЙСТВО, а не один сценарий: счёт заводится до операции и
+    // независимо от её исхода. Поэтому случаев три — по одному на каждую
+    // операцию, которая умеет завести счёт и тут же отказать. Один сценарий
+    // закрыл бы один путь и оставил два, а завтра появился бы четвёртый.
+
+    /// Первая операция отказала — запись о заведении счёта **в журнале есть**.
+    ///
+    /// Это тот самый случай, увиденный живьём 24.10: открытие не прошло по марже,
+    /// счёт при этом остался, а `account_opened` уехал в никуда вместе с
+    /// событиями несостоявшейся операции.
+    #[tokio::test]
+    async fn a_rejected_first_operation_still_records_the_account_opening() {
+        let st = build_state();
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+
+        // Объём заведомо больше свободной маржи: операция обязана отказать.
+        let huge = serde_json::json!({"instrument": 1, "side": "buy", "qty": 100_000_000});
+        let (status, body) = send(&app, "POST", "/deals", Some(huge)).await;
+        assert_ne!(status, StatusCode::OK, "операция обязана отказать: {body}");
+        assert_eq!(
+            body["error"], "insufficient_margin",
+            "отказ обязан быть деловым, а не посторонним: {body}"
+        );
+
+        let kinds = events_of(&st).await;
+        assert_eq!(
+            kinds.len(),
+            1,
+            "в журнале обязана быть ровно одна запись — о заведении: {kinds:?}"
+        );
+        assert!(
+            kinds[0].starts_with("account_opened"),
+            "первые деньги на счёте обязаны иметь происхождение: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().all(|k| !k.starts_with("position_opened")),
+            "несостоявшаяся операция в журнал попасть не должна: {kinds:?}"
+        );
+    }
+
+    /// То же для закрытия несуществующей позиции: счёт заводится и этой операцией.
+    #[tokio::test]
+    async fn a_rejected_close_still_records_the_account_opening() {
+        let st = build_state();
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+
+        let (status, _) = send(&app, "POST", "/deals/777/close", None).await;
+        assert_ne!(status, StatusCode::OK, "позиции нет — закрывать нечего");
+
+        let kinds = events_of(&st).await;
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+        assert!(kinds[0].starts_with("account_opened"), "{kinds:?}");
+    }
+
+    /// И для снятия несуществующего ордера.
+    #[tokio::test]
+    async fn a_rejected_cancel_still_records_the_account_opening() {
+        let st = build_state();
+        let app = router(st.clone());
+
+        let (status, _) = send(&app, "DELETE", "/pending/777", None).await;
+        assert_ne!(status, StatusCode::OK, "ордера нет — снимать нечего");
+
+        let kinds = events_of(&st).await;
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+        assert!(kinds[0].starts_with("account_opened"), "{kinds:?}");
+    }
+
+    /// Заведение — ОТДЕЛЬНАЯ запись, а не часть первой удачной операции.
+    ///
+    /// Проверяется номерами: `account_opened` обязан быть первым и один, а
+    /// операция обязана идти следом. Склеенные в одну запись, они снова стали бы
+    /// неразделимы при отказе.
+    #[tokio::test]
+    async fn the_opening_is_its_own_entry_and_comes_first() {
+        let st = build_state();
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+        let (status, _) = send(&app, "POST", "/deals", Some(deal_body())).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let kinds = events_of(&st).await;
+        assert!(kinds[0].starts_with("account_opened"), "{kinds:?}");
+        assert_eq!(
+            kinds.iter().filter(|k| k.starts_with("account_opened")).count(),
+            1,
+            "счёт заводится один раз: {kinds:?}"
+        );
+        assert!(kinds[1].starts_with("position_opened"), "{kinds:?}");
+    }
+
+    /// Счёт, который не удалось записать, **не остаётся заведённым в памяти**.
+    ///
+    /// Иначе следующая попытка нашла бы существующий счёт, `AccountOpened` второй
+    /// раз не написался бы, и мы получили бы ровно тот дефект, от которого ушли, —
+    /// только теперь после моргнувшего хранилища.
+    #[tokio::test]
+    async fn an_account_whose_opening_was_not_written_does_not_stay_in_memory() {
+        struct FailOnce(std::sync::atomic::AtomicBool);
+        #[async_trait::async_trait]
+        impl persistence::Persistence for FailOnce {
+            async fn init(&self) -> Result<(), persistence::StoreError> {
+                Ok(())
+            }
+            async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
+                Ok(persistence::LoadedState::default())
+            }
+            async fn save_account(
+                &self,
+                _u: UserId,
+                _s: &broker::AccountSnapshot,
+                _e: &[journal::AccountEvent],
+                _o: &[persistence::OutboxRecord],
+            ) -> Result<(), persistence::StoreError> {
+                if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    return Err(persistence::StoreError("диск моргнул".into()));
+                }
+                Ok(())
+            }
+        }
+
+        let st = build_state_with(Arc::new(FailOnce(
+            std::sync::atomic::AtomicBool::new(true),
+        )));
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+
+        let (status, _) = send(&app, "POST", "/deals", Some(deal_body())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "запись не прошла");
+        assert!(
+            !st.broker.lock().await.has_account(DEFAULT_USER),
+            "незаписанный счёт обязан исчезнуть и из памяти"
+        );
+
+        // Вторая попытка: хранилище уже отвечает, и происхождение обязано
+        // появиться — то есть откат действительно вернул возможность его написать.
+        let (status, _) = send(&app, "POST", "/deals", Some(deal_body())).await;
+        assert_eq!(status, StatusCode::OK);
+        let kinds = events_of(&st).await;
+        assert!(
+            kinds.first().is_some_and(|k| k.starts_with("account_opened")),
+            "после отката происхождение обязано записаться: {kinds:?}"
         );
     }
 }
