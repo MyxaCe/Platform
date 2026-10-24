@@ -195,6 +195,38 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         .ok()
         .and_then(|s| s.trim().parse::<i128>().ok())
         .filter(|p| *p > 0);
+    // Полоса возврата: насколько выше уровня счёт обязан подняться, чтобы его
+    // предупредили снова. **Наш выбор, а не требование регулятора** — и
+    // различие здесь принципиальное. У порога закрытия внешняя правда есть
+    // (регулятор, практика отрасли), и выдуманное у нас число разошлось бы с
+    // ней молча. У ширины полосы внешней правды НЕТ: это чистое гашение
+    // дребезга, наш выбор и ничей больше. Поэтому у неё умолчание есть, а у
+    // порога — нет, и это не непоследовательность.
+    //
+    // 10 пунктов: рынок, ходящий 99↔101 %, будить перестаёт, а выход на 110 %
+    // означает, что человек действительно вышел из зоны, а не качнулся.
+    // Меняется настройкой, без релиза. Имя — будущее поле профиля.
+    // Защита от отрицательного остатка (TRM-42) — **флаг, а не вшитое
+    // поведение**. Сейшелы её не требуют; мы её даём по своему выбору, и
+    // выбор обязан быть переключаемым: иначе при второй юрисдикции нечем будет
+    // ответить, почему там так же. Умолчание — выключено: доплачивать за
+    // клиента по умолчанию, не будучи обязанными, нельзя «само собой».
+    let protect_negative = matches!(
+        std::env::var("NEGATIVE_BALANCE_PROTECTION").ok().as_deref(),
+        Some("1") | Some("true")
+    );
+    if protect_negative {
+        println!(
+            "[gateway] защита от отрицательного остатка: включена (наш выбор, Сейшелы не требуют)"
+        );
+    } else {
+        eprintln!("[gateway] защита от отрицательного остатка ВЫКЛЮЧЕНА — остаток клиента может остаться отрицательным");
+    }
+    let rearm_band_pct = std::env::var("MARGIN_CALL_REARM_BAND_PERCENT")
+        .ok()
+        .and_then(|s| s.trim().parse::<i128>().ok())
+        .filter(|p| *p >= 0)
+        .unwrap_or(10);
     match margin_call_pct {
         Some(p) => println!("[gateway] предупреждение о марже: на уровне {p}%"),
         None => eprintln!(
@@ -234,7 +266,9 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         broker: Arc::new(Mutex::new(
             Broker::new(start_cents, 1)
                 .with_stop_out_pct(stop_out_pct)
-                .with_margin_call_pct(margin_call_pct),
+                .with_margin_call_pct(margin_call_pct)
+                .with_margin_call_rearm_band_pct(rearm_band_pct)
+                .with_negative_balance_protection(protect_negative),
         )), // старт из env, leverage 1
         store,
         acct_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -1248,6 +1282,10 @@ struct AccountDto {
     /// Уровень предупреждения (TRM-50). `null` — предупреждения нет.
     #[serde(skip_serializing_if = "Option::is_none")]
     margin_call_level_pct: Option<i128>,
+    /// Гасим ли отрицательный остаток за свой счёт (TRM-42). **Не требование
+    /// регулятора, а наш выбор**, поэтому виден отдельным полем: клиент вправе
+    /// знать, рискует ли он остаться должным.
+    negative_balance_protection: bool,
     open_pnl: i128,
 }
 #[derive(Serialize)]
@@ -1882,6 +1920,7 @@ async fn account(
         margin_level_pct: b.margin_level_pct(user, &m),
         stop_out_level_pct: b.stop_out_pct(),
         margin_call_level_pct: b.margin_call_pct(),
+        negative_balance_protection: b.negative_balance_protection(),
         open_pnl,
     }))
 }
@@ -3293,12 +3332,14 @@ mod journal_wiring_tests {
                         v.seq(),
                         v.at_ms(),
                         v.origin().clone(),
-                        journal::EventKind::AccountOpened {
+                        &journal::EventKind::AccountOpened {
                             balance: 99_000_000,
-                        },
+                        }
+                        .encode(),
                         v.prev(),
                         v.hash(),
-                    );
+                    )
+                    .expect("подделанная строка обязана разбираться");
                 }
                 Ok(loaded)
             }

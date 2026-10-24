@@ -245,19 +245,35 @@ impl Account {
     /// Объявить или снять маржин-колл. `Some(уровень)` — предупреждение надо
     /// отправить **сейчас**, то есть уровень только что пересёк порог сверху вниз.
     ///
-    /// Снимается строго выше порога. Колебание ровно вокруг порога вызовет
-    /// повторные предупреждения — риск назван, а не закрыт: гасить его нужно
-    /// полосой возврата, а ширина полосы — такое же решение юрисдикции, как сам
-    /// порог, и выдумывать её здесь нельзя (то же правило §5г).
-    fn note_margin_call(&mut self, marks: &HashMap<u32, i64>, call_pct: i128) -> Option<i128> {
+    /// Снимается не на самом пороге, а **выше полосы возврата**: иначе рынок,
+    /// ходящий вокруг уровня, будил бы клиента на каждом переходе.
+    ///
+    /// **Полосу мы выдумали сами, и это законно — в отличие от самого порога.**
+    /// Различие назвал штаб: у порога закрытия есть внешняя правда (регулятор,
+    /// практика отрасли), и выдуманное у нас число молча разошлось бы с ней. У
+    /// полосы внешней правды нет — это чистое гашение дребезга, наш выбор и
+    /// ничей больше. Поэтому её можно выбрать, но она обязана быть настраиваемой
+    /// и названной нашим выбором, а не требованием.
+    fn note_margin_call(
+        &mut self,
+        marks: &HashMap<u32, i64>,
+        call_pct: i128,
+        rearm_band_pct: i128,
+    ) -> Option<i128> {
         let Some(level) = self.margin_level_pct(marks) else {
             // Позиций нет — опасности нет, и защёлка обязана сняться: иначе
             // счёт, закрывший всё и открывший заново, не предупредят.
             self.margin_called = false;
             return None;
         };
-        if level > call_pct {
+        if level > call_pct + rearm_band_pct {
+            // Вышел за полосу — значит действительно выбрался, а не качнулся.
             self.margin_called = false;
+            return None;
+        }
+        if level > call_pct {
+            // В полосе: ещё не предупреждаем заново, но и не предупреждаем
+            // повторно. Защёлка как была.
             return None;
         }
         if self.margin_called {
@@ -541,6 +557,7 @@ impl Account {
         marks: &HashMap<u32, i64>,
         across_gap: bool,
         stop_out_pct: Option<i128>,
+        protect_negative: bool,
     ) -> bool {
         // Сработавшие лимитные ордера → открыть позицию.
         let mut fire: Vec<PendingOrder> = Vec::new();
@@ -625,13 +642,48 @@ impl Account {
             self.close_pos(id, exec, Some(level), across_gap, cause);
         }
 
+        // Защита от отрицательного остатка идёт ПОСЛЕ закрытия (TRM-42): она
+        // страхует там, где закрытие не успело — на разрыве цена перепрыгивает
+        // порог, и позиция закрывается хуже, чем хватает средств.
+        //
+        // Порядок важен и в обратную сторону: страховка без закрытия означала
+        // бы оплачивать каждый провал без ограничения сверху. Поэтому они и
+        // делались одним заходом, а не по очереди.
+        //
         // Принудительное закрытие по марже — ПОСЛЕ собственных стопов клиента
         // (TRM-41). Порядок не стилистический: если стоп человека сработал на
         // этом же тике, закрыть обязан он, а не мы. Иначе брокер отбирает у
         // клиента исполнение его же распоряжения и ставит себе причину закрытия.
         let stopped_out = self.run_stop_out(marks, across_gap, stop_out_pct);
+        let compensated = self.cover_negative_balance(protect_negative);
 
-        fired_any || closed_any || stopped_out
+        fired_any || closed_any || stopped_out || compensated
+    }
+
+    /// Погасить отрицательный остаток за счёт брокера (TRM-42).
+    ///
+    /// **Это включённый флаг, а не вшитое поведение.** Сейшелы защиты от
+    /// отрицательного баланса не требуют — мы её даём всё равно, и именно
+    /// поэтому она обязана быть переключателем: иначе при второй юрисдикции
+    /// нечем будет ответить, почему там так же. Поведение, вшитое в код,
+    /// невозможно объяснить как выбор.
+    ///
+    /// **Только когда позиций не осталось.** Пока они открыты, отрицательный
+    /// остаток — промежуточное состояние: нереализованная прибыль ещё может его
+    /// вернуть, и гасить его значило бы дарить деньги тому, кто выйдет в плюс.
+    /// Гасим то, из чего уже нельзя выбраться.
+    ///
+    /// **Именованной проводкой с суммой, а не записью нуля.** «Стало ноль» не
+    /// отвечает на вопрос, сколько мы доплатили, — а это наши деньги, и их надо
+    /// уметь сложить за период (решение владельца, ADM-07).
+    fn cover_negative_balance(&mut self, enabled: bool) -> bool {
+        if !enabled || self.balance >= 0 || !self.positions.is_empty() {
+            return false;
+        }
+        let amount = -self.balance;
+        self.balance += amount;
+        self.log(EventKind::NegativeBalanceCompensated { amount });
+        true
     }
 
     /// Закрывать, пока уровень маржи не поднимется выше порога.
@@ -706,10 +758,18 @@ pub struct Broker {
     /// забытая настройка: порог задаёт юрисдикция, и выдумать его здесь значило
     /// бы подменить её решение своим.
     stop_out_pct: Option<i128>,
+    /// Гасим ли отрицательный остаток за свой счёт (TRM-42).
+    ///
+    /// **Флаг, а не вшитое поведение**: Сейшелы такой защиты не требуют, мы её
+    /// даём по своему выбору, и этот выбор обязан быть виден и переключаем.
+    protect_negative_balance: bool,
     /// Уровень маржи, при достижении которого клиента **предупреждают** (TRM-50).
     /// Выше порога закрытия: предупреждение без запаса не оставляет времени
     /// отреагировать, а закрытие без предупреждения — срабатывание без шанса.
     margin_call_pct: Option<i128>,
+    /// Насколько выше уровня предупреждения счёт обязан подняться, чтобы его
+    /// предупредили снова. **Наш выбор, не требование** — гашение дребезга.
+    margin_call_rearm_band_pct: i128,
 }
 
 impl Broker {
@@ -720,6 +780,8 @@ impl Broker {
             accounts: HashMap::new(),
             stop_out_pct: None,
             margin_call_pct: None,
+            margin_call_rearm_band_pct: 0,
+            protect_negative_balance: false,
         }
     }
 
@@ -748,6 +810,28 @@ impl Broker {
         self.margin_call_pct
     }
 
+    /// Полоса возврата для повторного предупреждения (TRM-50). **Наш выбор, а
+    /// не требование регулятора:** у ширины полосы внешней правды нет, это
+    /// гашение дребезга. Меняется настройкой, без релиза.
+    pub fn with_margin_call_rearm_band_pct(mut self, pct: i128) -> Self {
+        self.margin_call_rearm_band_pct = pct.max(0);
+        self
+    }
+
+    pub fn margin_call_rearm_band_pct(&self) -> i128 {
+        self.margin_call_rearm_band_pct
+    }
+
+    /// Включить защиту от отрицательного остатка (TRM-42).
+    pub fn with_negative_balance_protection(mut self, on: bool) -> Self {
+        self.protect_negative_balance = on;
+        self
+    }
+
+    pub fn negative_balance_protection(&self) -> bool {
+        self.protect_negative_balance
+    }
+
     /// Счета, которые **сейчас** пересекли уровень предупреждения сверху вниз.
     ///
     /// Вызывать **до** [`Self::check`]: закрытие поднимает уровень, и после него
@@ -758,9 +842,10 @@ impl Broker {
         let Some(call) = self.margin_call_pct else {
             return Vec::new();
         };
+        let band = self.margin_call_rearm_band_pct;
         let mut out = Vec::new();
         for (user, a) in self.accounts.iter_mut() {
-            if let Some(level) = a.note_margin_call(marks, call) {
+            if let Some(level) = a.note_margin_call(marks, call, band) {
                 out.push((*user, level));
             }
         }
@@ -1035,9 +1120,10 @@ impl Broker {
     pub fn check(&mut self, marks: &HashMap<u32, i64>, across_gap: bool) -> Vec<UserId> {
         let lev = self.leverage;
         let stop_out = self.stop_out_pct;
+        let protect = self.protect_negative_balance;
         let mut changed = Vec::new();
         for (user, a) in self.accounts.iter_mut() {
-            if a.run_triggers(lev, marks, across_gap, stop_out) {
+            if a.run_triggers(lev, marks, across_gap, stop_out, protect) {
                 changed.push(*user);
             }
         }
