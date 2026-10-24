@@ -25,6 +25,8 @@ interface Window {
   Theming?: any;
   Sso?: any;
   Diag?: any;
+  /** Тексты отказов границы (TRM-43). */
+  Rejection?: any;
   Indicators?: any;
   OrderBook?: any;
   AssetStats?: any;
@@ -47,6 +49,7 @@ declare const Api: any;
 declare const Theming: any;
 declare const Sso: any;
 declare const Diag: any;
+declare const Rejection: any;
 declare const Indicators: any;
 declare const OrderBook: any;
 declare const AssetStats: any;
