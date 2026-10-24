@@ -143,7 +143,18 @@ pub enum CloseCause {
     TakeProfit,
     /// Свёрнута встречной сделкой целиком (неттинг, ADR-025).
     Netting,
-    /// **Закрыта принудительно: уровень маржи упал ниже порога** (TRM-41).
+    // ЗАПИСИ О МАРЖИН-КОЛЛЕ ЗДЕСЬ НЕТ, И ЭТО РЕШЕНИЕ, А НЕ ЗАБЫВЧИВОСТЬ
+    // (TRM-50, подтверждено штабом 24.10).
+    //
+    // Журнал — лента, из которой выводится состояние; предупреждение состояния
+    // не меняет, и запись о нём пришлось бы пропускать при свёртке. Такой вид
+    // уже есть ровно один (`SandboxDeclared`), и условие штаба — второй это
+    // новое решение, а не добавление строки.
+    //
+    // След у предупреждения есть, и он БОГАЧЕ журнального: строка `bus_outbox`
+    // хранит и момент, и отметку отправки, то есть отвечает ещё и на «дошло
+    // ли» — чего запись в журнале не умеет. Искать предупреждения надо там.
+    /// **Закрыта принудительно: уровень маржи упал ниже порога** (TRM-49).
     ///
     /// Своя причина, а не `Command`: закрыл не человек и не его распоряжение, а
     /// риск-контроль. На претензию «почему мою позицию закрыли» это разные
@@ -242,6 +253,18 @@ pub enum EventKind {
         exec: Option<i64>,
         across_gap: bool,
     },
+    /// **Отрицательный остаток погашен за счёт брокера** (TRM-42).
+    ///
+    /// `amount` — сумма компенсации, ровно столько, сколько не хватало до нуля.
+    /// Отдельной статьёй, а не записью нуля в баланс: «стало ноль» не отвечает
+    /// на вопрос, **сколько мы доплатили**, а это наши деньги и их надо уметь
+    /// сложить за период. Обнуление без суммы уничтожает единственную цифру,
+    /// ради которой защита вообще считается (решение владельца, ADM-07).
+    ///
+    /// Состояние она МЕНЯЕТ — это движение денег, и свёртка его применяет. С
+    /// `SandboxDeclared` её роднит только то, что обе появились недавно; к
+    /// правилу «один вид, не меняющий состояние» эта запись отношения не имеет.
+    NegativeBalanceCompensated { amount: Cents },
     /// История счёта с первой записи по `through_seq` объявлена **песочницей**
     /// (TRM-48): в реальные балансы и отчётность она не входит.
     ///
@@ -284,7 +307,8 @@ impl EventKind {
             | EventKind::PositionClosed { .. }
             | EventKind::PendingPlaced { .. }
             | EventKind::PendingCancelled { .. }
-            | EventKind::PendingTriggered { .. } => true,
+            | EventKind::PendingTriggered { .. }
+            | EventKind::NegativeBalanceCompensated { .. } => true,
             EventKind::SandboxDeclared { .. } => false,
         }
     }
@@ -448,6 +472,9 @@ impl EventKind {
             EventKind::SandboxDeclared { through_seq } => {
                 format!("sandbox_declared through_seq={through_seq}")
             }
+            EventKind::NegativeBalanceCompensated { amount } => {
+                format!("negative_balance_compensated amount={amount}")
+            }
         }
     }
 
@@ -529,6 +556,9 @@ impl EventKind {
             },
             "sandbox_declared" => EventKind::SandboxDeclared {
                 through_seq: num(&f, "through_seq")?,
+            },
+            "negative_balance_compensated" => EventKind::NegativeBalanceCompensated {
+                amount: num(&f, "amount")?,
             },
             _ => return Err(BadRecord("неизвестный вид события")),
         })
@@ -711,6 +741,11 @@ impl ReplayState {
             }
             EventKind::ModelAdopted { model } => self.model = *model,
             EventKind::Deposited { amount } => self.balance += *amount,
+            // Компенсация поднимает остаток ровно на записанную сумму. Не «в
+            // ноль»: свёртка обязана получать результат из проводок, а не
+            // подгонять его к ожидаемому — иначе испорченная сумма молча
+            // исправится при подъёме и расхождения никто не увидит.
+            EventKind::NegativeBalanceCompensated { amount } => self.balance += *amount,
             EventKind::Withdrawn { amount } => self.balance -= *amount,
             EventKind::PositionOpened {
                 id,

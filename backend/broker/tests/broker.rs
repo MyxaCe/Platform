@@ -909,6 +909,44 @@ fn a_margin_call_fires_once_per_episode() {
     );
 }
 
+/// **Полоса возврата гасит дребезг.** Подъём внутри полосы защёлку не снимает:
+/// рынок, качнувшийся на пункт выше уровня, не повод будить клиента заново.
+///
+/// Полосу выбрали мы — у её ширины, в отличие от самого порога, внешней правды
+/// нет. Поэтому здесь умолчание законно, а у порога его нет.
+#[test]
+fn the_rearm_band_absorbs_jitter() {
+    let mut b = Broker::new(20_000, 10)
+        .with_margin_call_pct(Some(100))
+        .with_margin_call_rearm_band_pct(10);
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10);
+
+    assert_eq!(
+        b.margin_calls(&marks(1, 9_000)).len(),
+        1,
+        "уровень 100% — предупредили"
+    );
+    // 105% — внутри полосы: не снимаем защёлку и не предупреждаем повторно.
+    assert!(
+        b.margin_calls(&marks(1, 9_050)).is_empty(),
+        "105% ещё в полосе"
+    );
+    assert!(
+        b.margin_calls(&marks(1, 9_000)).is_empty(),
+        "и обратно вниз — без повтора"
+    );
+    // 111% — выше полосы: человек вышел из зоны.
+    assert!(
+        b.margin_calls(&marks(1, 9_110)).is_empty(),
+        "выход не предупреждение"
+    );
+    assert_eq!(
+        b.margin_calls(&marks(1, 9_000)).len(),
+        1,
+        "вышел за полосу и вернулся — предупреждаем снова"
+    );
+}
+
 /// Выбрался — защёлка снимается, и следующее попадание снова предупредят.
 #[test]
 fn recovering_re_arms_the_warning() {
@@ -989,4 +1027,107 @@ fn the_warning_is_visible_even_when_the_stop_out_happens_on_the_same_tick() {
         b.margin_calls(&crash).is_empty(),
         "после закрытия предупреждать уже не о чем — потому оно и идёт первым"
     );
+}
+
+// ---- Защита от отрицательного остатка (TRM-42) ----------------------------
+
+/// Стенд провала: позиция и разрыв, уносящий счёт ниже нуля.
+///
+/// Закрытие по марже тут **не успевает** — в этом вся суть страховки: порог
+/// проверяется по приходящим ценам, а цена пришла сразу ниже него.
+fn blown_account(protect: bool) -> Broker {
+    let mut b = Broker::new(20_000, 10)
+        .with_stop_out_pct(Some(50))
+        .with_negative_balance_protection(protect);
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10); // нотионал $1000, маржа $100
+    b
+}
+
+/// **Остаток не остаётся отрицательным, и компенсация названа суммой.**
+#[test]
+fn a_blown_account_is_brought_back_to_zero_by_a_named_posting() {
+    let mut b = blown_account(true);
+    // Разрыв: цена рухнула так, что убыток больше всего остатка.
+    b.check(&marks(1, 5_000), false);
+
+    assert!(b.positions(ALICE).is_empty(), "позицию закрыли");
+    assert_eq!(b.balance(ALICE), 0, "остаток обязан вернуться к нулю");
+
+    let ev = b.take_events(ALICE);
+    let amount = ev
+        .iter()
+        .find_map(|e| match e {
+            EventKind::NegativeBalanceCompensated { amount } => Some(*amount),
+            _ => None,
+        })
+        .expect("компенсация обязана быть записана отдельной статьёй");
+    assert!(
+        amount > 0,
+        "сумма компенсации — это наши деньги, и она обязана быть в записи, а не выводиться из нуля"
+    );
+}
+
+/// **Флаг выключен — остаток остаётся отрицательным.** Сейшелы защиты не
+/// требуют, и поведение обязано быть переключаемым: вшитое в код, оно не
+/// объясняется как выбор при второй юрисдикции.
+#[test]
+fn without_the_flag_the_balance_stays_negative() {
+    let mut b = blown_account(false);
+    b.check(&marks(1, 5_000), false);
+
+    assert!(b.positions(ALICE).is_empty());
+    assert!(b.balance(ALICE) < 0, "защиты нет — долг остаётся");
+    let ev = b.take_events(ALICE);
+    assert!(
+        !ev.iter()
+            .any(|e| matches!(e, EventKind::NegativeBalanceCompensated { .. })),
+        "и проводки компенсации быть не должно"
+    );
+}
+
+/// **Пока позиции открыты, отрицательный остаток не гасится.** Это
+/// промежуточное состояние: нереализованная прибыль ещё может его вернуть, и
+/// гасить его значило бы дарить деньги тому, кто выйдет в плюс.
+#[test]
+fn an_open_position_is_not_compensated_early() {
+    let mut b = Broker::new(20_000, 10)
+        .with_negative_balance_protection(true)
+        .with_stop_out_pct(None); // закрытия нет — позиция остаётся открытой
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10);
+    // Реализуем убыток частью, но позицию оставляем: открываем вторую и
+    // закрываем её в минус, уводя остаток ниже нуля при живой первой.
+    let id2 = open_t(&mut b, 2, PosSide::Long, 10_000, 10);
+    b.close(ALICE, id2, 7_000).expect("закрытие второй");
+
+    assert!(b.balance(ALICE) < 0, "остаток ушёл в минус");
+    assert!(!b.positions(ALICE).is_empty(), "но позиция ещё открыта");
+
+    b.check(&marks(1, 10_000), false);
+    assert!(
+        b.balance(ALICE) < 0,
+        "пока есть из чего выбраться, не гасим"
+    );
+}
+
+/// Свёртка журнала обязана давать тот же ноль: компенсация поднимает остаток
+/// **на записанную сумму**, а не «к нулю». Иначе испорченная сумма молча
+/// исправилась бы при подъёме, и расхождения никто бы не увидел.
+#[test]
+fn the_compensation_replays_from_its_own_amount() {
+    let mut b = blown_account(true);
+    b.check(&marks(1, 5_000), false);
+    let kinds = b.take_events(ALICE);
+
+    // Переигрываем НАСТОЯЩИМ журналом, как это делает шлюз, а не синтетикой:
+    // проверять надо тот путь, которым счёт поднимается после перезапуска.
+    let mut j = broker::journal::Journal::new(10, 20_000);
+    for e in j.seal(1, &broker::journal::Origin::System, &kinds) {
+        j.commit(e).expect("лента");
+    }
+    assert_eq!(
+        j.replay().balance,
+        b.balance(ALICE),
+        "свёртка обязана сойтись со счётом"
+    );
+    assert_eq!(j.replay().balance, 0, "и это ноль, выведенный из проводок");
 }

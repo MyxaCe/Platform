@@ -77,6 +77,13 @@ services:
       # Закрытие без предупреждения — срабатывание без шанса отреагировать,
       # поэтому эти две настройки включаются вместе и одной выкаткой.
       MARGIN_CALL_LEVEL_PERCENT: ${MARGIN_CALL_LEVEL_PERCENT:-100}
+      # Полоса возврата для повторного предупреждения: НАШ ВЫБОР, а не
+      # требование. У ширины полосы внешней правды нет — это гашение дребезга.
+      MARGIN_CALL_REARM_BAND_PERCENT: ${MARGIN_CALL_REARM_BAND_PERCENT:-10}
+      # Защита от отрицательного остатка (TRM-42) — ФЛАГ, а не вшитое
+      # поведение: Сейшелы её не требуют, мы её даём по своему выбору, и выбор
+      # обязан быть переключаемым. Умолчание в коде — выключено.
+      NEGATIVE_BALANCE_PROTECTION: ${NEGATIVE_BALANCE_PROTECTION:-1}
       BUS_URL: ${BUS_URL:-}
       BUS_EXCHANGE: ${BUS_EXCHANGE:-platform.events}
     extra_hosts:
