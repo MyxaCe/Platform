@@ -143,6 +143,12 @@ pub enum CloseCause {
     TakeProfit,
     /// Свёрнута встречной сделкой целиком (неттинг, ADR-025).
     Netting,
+    /// **Закрыта принудительно: уровень маржи упал ниже порога** (TRM-41).
+    ///
+    /// Своя причина, а не `Command`: закрыл не человек и не его распоряжение, а
+    /// риск-контроль. На претензию «почему мою позицию закрыли» это разные
+    /// ответы, и склеенные они отправляют разбираться не туда.
+    StopOut,
 }
 
 /// Изменение состояния счёта.
@@ -425,6 +431,7 @@ impl EventKind {
                     CloseCause::StopLoss => "stop_loss",
                     CloseCause::TakeProfit => "take_profit",
                     CloseCause::Netting => "netting",
+                    CloseCause::StopOut => "stop_out",
                 };
                 format!("position_closed id={id} exit={exit} cause={c} level={} gap={}", opt(*level), flag(*across_gap))
             }
@@ -496,6 +503,7 @@ impl EventKind {
                     "stop_loss" => CloseCause::StopLoss,
                     "take_profit" => CloseCause::TakeProfit,
                     "netting" => CloseCause::Netting,
+                    "stop_out" => CloseCause::StopOut,
                     _ => return Err(BadRecord("неизвестная причина закрытия")),
                 },
                 level: num_opt_added_later(&f, "level")?,

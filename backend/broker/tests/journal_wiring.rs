@@ -15,6 +15,13 @@ use domain::account::UserId;
 
 use std::collections::HashMap;
 
+/// Пустой справочник цен: без цен нереализованный результат равен нулю, то есть
+/// `equity == balance`, и проверки продолжают проверять ровно то, что проверяли
+/// до появления единого определения свободной маржи (TRM-41).
+fn no_marks() -> std::collections::HashMap<u32, i64> {
+    std::collections::HashMap::new()
+}
+
 const PD: u8 = 2;
 const QD: u8 = 3;
 const START: i128 = 10_000_000;
@@ -77,8 +84,19 @@ impl Rig {
 fn opening_and_closing_are_recorded_and_replay_to_the_same_account() {
     let mut r = Rig::new();
     let id =
-        r.b.open(U, 1, PosSide::Long, 1000, 50_000, PD, QD, None, None)
-            .unwrap();
+        r.b.open(
+            U,
+            &no_marks(),
+            1,
+            PosSide::Long,
+            1000,
+            50_000,
+            PD,
+            QD,
+            None,
+            None,
+        )
+        .unwrap();
     r.record(Origin::Client);
     r.must_reconcile("после открытия");
 
@@ -109,13 +127,35 @@ fn netting_add_partial_and_flip_are_each_recorded() {
     assert!(r.b.adopt_model(U, PositionModel::Netting));
     r.record(Origin::Client);
 
-    r.b.open(U, 1, PosSide::Long, 100, 5000, PD, QD, None, None)
-        .unwrap();
+    r.b.open(
+        U,
+        &no_marks(),
+        1,
+        PosSide::Long,
+        100,
+        5000,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
     r.record(Origin::Client);
     r.must_reconcile("после открытия");
 
-    r.b.open(U, 1, PosSide::Long, 300, 5400, PD, QD, None, None)
-        .unwrap();
+    r.b.open(
+        U,
+        &no_marks(),
+        1,
+        PosSide::Long,
+        300,
+        5400,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
     r.record(Origin::Client);
     r.must_reconcile("после доливки");
     assert!(matches!(
@@ -123,8 +163,19 @@ fn netting_add_partial_and_flip_are_each_recorded() {
         EventKind::PositionIncreased { add_qty: 300, .. }
     ));
 
-    r.b.open(U, 1, PosSide::Short, 150, 5600, PD, QD, None, None)
-        .unwrap();
+    r.b.open(
+        U,
+        &no_marks(),
+        1,
+        PosSide::Short,
+        150,
+        5600,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
     r.record(Origin::Client);
     r.must_reconcile("после частичного сворачивания");
     assert!(matches!(
@@ -136,8 +187,19 @@ fn netting_add_partial_and_flip_are_each_recorded() {
         }
     ));
 
-    r.b.open(U, 1, PosSide::Short, 500, 5100, PD, QD, None, None)
-        .unwrap();
+    r.b.open(
+        U,
+        &no_marks(),
+        1,
+        PosSide::Short,
+        500,
+        5100,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
     r.record(Origin::Client);
     r.must_reconcile("после переворота");
     // Переворот — это две записи: свёрнутая позиция и открытая в новую сторону.
@@ -168,6 +230,7 @@ fn stop_loss_is_recorded_with_its_cause_and_the_balance_replays() {
     let mut r = Rig::new();
     r.b.open(
         U,
+        &no_marks(),
         1,
         PosSide::Long,
         1000,
@@ -216,6 +279,7 @@ fn take_profit_is_recorded_separately_from_stop_loss() {
     let mut r = Rig::new();
     r.b.open(
         U,
+        &no_marks(),
         1,
         PosSide::Long,
         1000,
@@ -279,7 +343,7 @@ fn deposit_and_withdrawal_replay_into_the_same_balance() {
     r.b.deposit(U, 500_000);
     r.record(Origin::Client);
     r.must_reconcile("после пополнения");
-    r.b.withdraw(U, 200_000).unwrap();
+    r.b.withdraw(U, 200_000, &no_marks()).unwrap();
     r.record(Origin::Client);
     r.must_reconcile("после вывода");
     assert_eq!(r.j.replay().balance, START + 300_000);
@@ -324,8 +388,19 @@ fn manual_posting_goes_through_the_same_path_and_is_distinguishable() {
 #[test]
 fn an_operation_that_was_not_recorded_is_detected() {
     let mut r = Rig::new();
-    r.b.open(U, 1, PosSide::Long, 1000, 50_000, PD, QD, None, None)
-        .unwrap();
+    r.b.open(
+        U,
+        &no_marks(),
+        1,
+        PosSide::Long,
+        1000,
+        50_000,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
     r.record(Origin::Client);
     r.must_reconcile("контроль: пока всё сходится");
 
@@ -357,6 +432,7 @@ fn events_of_a_failed_operation_do_not_leak_into_the_next_one() {
     assert!(
         r.b.open(
             U,
+            &no_marks(),
             1,
             PosSide::Long,
             i64::MAX / 2,
@@ -383,8 +459,19 @@ fn events_of_a_failed_operation_do_not_leak_into_the_next_one() {
         "заведение счёта уже записано своей записью и во вторую очередь не попадает"
     );
 
-    r.b.open(U, 1, PosSide::Long, 100, 50_000, PD, QD, None, None)
-        .unwrap();
+    r.b.open(
+        U,
+        &no_marks(),
+        1,
+        PosSide::Long,
+        100,
+        50_000,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
     r.record(Origin::Client);
     r.must_reconcile("после удавшейся операции");
     assert_eq!(r.b.pending_events(U), 0, "очередь обязана быть пустой");
@@ -400,6 +487,7 @@ fn a_long_mixed_sequence_replays_to_the_same_account() {
     let a =
         r.b.open(
             U,
+            &no_marks(),
             1,
             PosSide::Long,
             1000,
@@ -411,14 +499,25 @@ fn a_long_mixed_sequence_replays_to_the_same_account() {
         )
         .unwrap();
     r.record(Origin::Client);
-    r.b.open(U, 2, PosSide::Short, 300, 20_000, PD, QD, None, None)
-        .unwrap();
+    r.b.open(
+        U,
+        &no_marks(),
+        2,
+        PosSide::Short,
+        300,
+        20_000,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
     r.record(Origin::Client);
     r.b.place_pending(U, 3, PosSide::Long, 50, 1_000, PD, QD, None, None);
     r.record(Origin::Client);
     r.b.check(&HashMap::from([(1, 48_000), (3, 900)]), false);
     r.record(Origin::System);
-    r.b.withdraw(U, 10_000).unwrap();
+    r.b.withdraw(U, 10_000, &no_marks()).unwrap();
     r.record(Origin::Client);
     let _ = a;
     r.must_reconcile("после смешанной последовательности");
@@ -455,8 +554,19 @@ fn money_without_provenance_is_not_called_reconciled() {
     );
 
     // Дальше счёт живёт обычной жизнью, и деньги считаются верно.
-    r.b.open(U, 1, PosSide::Long, 100, 50_000, PD, QD, None, None)
-        .unwrap();
+    r.b.open(
+        U,
+        &no_marks(),
+        1,
+        PosSide::Long,
+        100,
+        50_000,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
     r.record(Origin::Client);
 
     let snap = r.b.snapshot(U);
@@ -484,8 +594,19 @@ fn wrong_money_outranks_missing_provenance() {
     let mut r = Rig::new();
     r.b.open_account(U);
     let _dropped = r.b.take_events(U);
-    r.b.open(U, 1, PosSide::Long, 100, 50_000, PD, QD, None, None)
-        .unwrap();
+    r.b.open(
+        U,
+        &no_marks(),
+        1,
+        PosSide::Long,
+        100,
+        50_000,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
     r.record(Origin::Client);
 
     let mut snap = r.b.snapshot(U);
@@ -504,8 +625,19 @@ fn wrong_money_outranks_missing_provenance() {
 fn a_properly_opened_account_still_reconciles() {
     let mut r = Rig::new();
     r.open_account();
-    r.b.open(U, 1, PosSide::Long, 100, 50_000, PD, QD, None, None)
-        .unwrap();
+    r.b.open(
+        U,
+        &no_marks(),
+        1,
+        PosSide::Long,
+        100,
+        50_000,
+        PD,
+        QD,
+        None,
+        None,
+    )
+    .unwrap();
     r.record(Origin::Client);
     r.must_reconcile("счёт с происхождением");
 }
