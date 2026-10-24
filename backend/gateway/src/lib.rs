@@ -3332,12 +3332,14 @@ mod journal_wiring_tests {
                         v.seq(),
                         v.at_ms(),
                         v.origin().clone(),
-                        journal::EventKind::AccountOpened {
+                        &journal::EventKind::AccountOpened {
                             balance: 99_000_000,
-                        },
+                        }
+                        .encode(),
                         v.prev(),
                         v.hash(),
-                    );
+                    )
+                    .expect("подделанная строка обязана разбираться");
                 }
                 Ok(loaded)
             }

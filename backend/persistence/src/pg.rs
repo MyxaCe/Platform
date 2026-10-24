@@ -11,7 +11,7 @@ use bigdecimal::BigDecimal;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{Pool, Postgres, Row};
 
-use broker::journal::{AccountEvent, EventKind, Operator, Origin};
+use broker::journal::{AccountEvent, Operator, Origin};
 use broker::{AccountSnapshot, ClosedDeal, PendingOrder, PosSide, Position};
 use domain::account::UserId;
 
@@ -253,17 +253,14 @@ fn event_from_row(r: &PgRow) -> Result<AccountEvent, StoreError> {
         }
         other => return Err(bad(&format!("неизвестный источник «{other}»"))),
     };
-    let kind = EventKind::decode(&r.get::<String, _>("kind")).map_err(|e| bad(&e.to_string()))?;
+    // Каноническая строка отдаётся КАК ЕСТЬ: по ней считался отпечаток, и
+    // пересобирать её из разобранного вида нельзя — расширение записи новыми
+    // полями тогда меняло бы подпись у всех прежних (TRM-44).
+    let canon = r.get::<String, _>("kind");
     let prev = hash_from_db(&r.get::<String, _>("prev_hash"))?;
     let hash = hash_from_db(&r.get::<String, _>("hash"))?;
-    Ok(AccountEvent::from_storage(
-        seq,
-        r.get::<i64, _>("at_ms"),
-        origin,
-        kind,
-        prev,
-        hash,
-    ))
+    AccountEvent::from_storage(seq, r.get::<i64, _>("at_ms"), origin, &canon, prev, hash)
+        .map_err(|e| bad(&e.to_string()))
 }
 
 #[async_trait]
@@ -511,7 +508,17 @@ impl Persistence for PgStore {
             .bind(who)
             .bind(reason)
             .bind(incident)
-            .bind(e.kind().encode())
+            // Пишем СОХРАНЁННЫЙ канон записи, а не пересобранный из вида:
+            // именно по нему посчитан отпечаток в соседнем столбце (TRM-44).
+            //
+            // ⚠️ Подмена на `e.kind().encode()` сегодня НИЧЕГО НЕ МЕНЯЕТ и не
+            // красит ни одного теста — проверено мутацией. Сюда попадают только
+            // свежезапечатанные записи, у которых канон и есть текущий вид.
+            // Это не пропуск в проверках, а граница: вызов защищает тот день,
+            // когда в запись попадёт лента, поднятая из базы. Тогда
+            // пересборка молча перепишет историю чужим видом, и отпечаток
+            // перестанет ей соответствовать.
+            .bind(e.canon())
             .bind(hash_to_db(e.prev()))
             .bind(hash_to_db(e.hash()))
             .execute(&mut *tx)

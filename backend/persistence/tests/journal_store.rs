@@ -224,3 +224,94 @@ async fn postgres_journal_is_append_only_at_the_database_level() {
         "журнал обязан остаться ровно таким, каким записан"
     );
 }
+
+/// **Запись СТАРОГО вида, лежащая в базе, поднимается новым кодом** (TRM-44).
+///
+/// Это закрывающий критерий миграции в исполнимом виде: «сверка существующих
+/// счетов после выкатки проходит». Проверить его можно только так — положив в
+/// базу строку в том виде, в каком её писал прежний код, и подняв сегодняшним.
+///
+/// Обычные проверки этого не ловят **по построению**: они пишут через
+/// `save_account`, то есть всегда текущим видом, и расхождения между «что
+/// записано» и «что пересобирается» там не возникает. Локально база пустая, и
+/// первый счёт заводится уже новым кодом — поэтому дефект невидим до миграции.
+///
+/// Отпечаток — литерал, посчитанный сторонней реализацией FNV-1a, а не нашим
+/// `digest`: иначе проверка сравнивала бы подпись с собой.
+#[tokio::test]
+#[ignore = "нужна живая БД: TEST_DATABASE_URL"]
+async fn a_row_written_in_the_old_shape_still_loads() {
+    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+        panic!("TEST_DATABASE_URL не задан — живой прогон НЕ выполнен, это не «зелено»");
+    };
+    const OLD: &str = "position_closed id=1 exit=240053 cause=command";
+    const AT: i64 = 1_700_000_000_000;
+    const SIGNED_BACK_THEN: &str = "cb7a4435a2bf0a5f9c3f3b48cca93ae0";
+    let legacy = UserId(4242);
+
+    let store = persistence::PgStore::connect(&url)
+        .await
+        .expect("связь с БД");
+    store.init().await.expect("схема");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect(&url)
+        .await
+        .expect("пул");
+
+    // Чистим прошлый прогон. Лента неизменяема триггером — снимаем его на время,
+    // как это делает соседний тест: убираем СВОЙ мусор, а не чужую историю.
+    sqlx::query("ALTER TABLE account_events DISABLE TRIGGER account_events_no_update")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM account_events WHERE user_id = $1")
+        .bind(legacy.0 as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE account_events ENABLE TRIGGER account_events_no_update")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM accounts WHERE user_id = $1")
+        .bind(legacy.0 as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Пишем строку МИМО save_account — ровно так, как её положил бы прежний код.
+    sqlx::query("INSERT INTO accounts (user_id, balance, next_id, model) VALUES ($1, 0, 0, 0)")
+        .bind(legacy.0 as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO account_events (user_id, seq, at_ms, origin, kind, prev_hash, hash)
+         VALUES ($1, 1, $2, 'client', $3, repeat('0', 32), $4)",
+    )
+    .bind(legacy.0 as i64)
+    .bind(AT)
+    .bind(OLD)
+    .bind(SIGNED_BACK_THEN)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let loaded = store.load_all().await.expect("подъём");
+    let lane = loaded
+        .journals
+        .into_iter()
+        .find(|(u, _)| *u == legacy)
+        .expect("лента старого счёта обязана подняться")
+        .1;
+    assert_eq!(lane.len(), 1);
+    assert_eq!(
+        lane[0].canon(),
+        OLD,
+        "канон обязан приехать из базы как есть, а не пересобраться"
+    );
+
+    Journal::load(1, 0, lane).expect(
+        "журнал со старой записью обязан сойтись: иначе выкатка отправит в карантин все счета",
+    );
+}
