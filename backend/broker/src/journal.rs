@@ -236,6 +236,52 @@ pub enum EventKind {
         exec: Option<i64>,
         across_gap: bool,
     },
+    /// История счёта с первой записи по `through_seq` объявлена **песочницей**
+    /// (TRM-48): в реальные балансы и отчётность она не входит.
+    ///
+    /// **Это первая и единственная запись, которая говорит о САМОЙ ЛЕНТЕ, а не о
+    /// деньгах.** Денег она не трогает: свёртка её не применяет. Решение штаба от
+    /// 24.10, принятое с названным условием — пропуск при свёртке делается по
+    /// одному объявленному виду, а не списком исключений, который дорастёт.
+    ///
+    /// Форма продиктована нашими же замками: `account_events` неизменяема
+    /// триггером БД, а записи сцеплены отпечатками. Удалить или переписать
+    /// прошлое нельзя **физически** — разорвалась бы цепочка, то есть счёт
+    /// испортился бы сильнее того, что мы исправляем. Поэтому судьба уже
+    /// записанного решается **новой записью о природе старых**.
+    ///
+    /// `through_seq` обязателен и обязан быть **границей**: заявление без границы
+    /// завтра нечем проверить, и оно тихо распространится на то, чего мы не имели
+    /// в виду. Значение равно номеру предыдущей записи ленты.
+    SandboxDeclared { through_seq: u64 },
+}
+
+impl EventKind {
+    /// Меняет ли запись состояние счёта.
+    ///
+    /// **Единственное место, где объявлен пропуск при свёртке.** Условие штаба:
+    /// не «список исключений», а один названный вид; появится второй — это новое
+    /// решение, а не добавление строки сюда.
+    ///
+    /// Написано исчерпывающим `match`, а не `matches!`, намеренно: новый вид
+    /// записи **не скомпилируется**, пока кто-то не ответит здесь на вопрос
+    /// «меняет ли он деньги». Умолчания у этого вопроса нет.
+    pub fn changes_state(&self) -> bool {
+        match self {
+            EventKind::AccountOpened { .. }
+            | EventKind::ModelAdopted { .. }
+            | EventKind::Deposited { .. }
+            | EventKind::Withdrawn { .. }
+            | EventKind::PositionOpened { .. }
+            | EventKind::PositionIncreased { .. }
+            | EventKind::PositionReduced { .. }
+            | EventKind::PositionClosed { .. }
+            | EventKind::PendingPlaced { .. }
+            | EventKind::PendingCancelled { .. }
+            | EventKind::PendingTriggered { .. } => true,
+            EventKind::SandboxDeclared { .. } => false,
+        }
+    }
 }
 
 // ------------------------- Каноническая запись -------------------------------
@@ -392,6 +438,9 @@ impl EventKind {
             EventKind::PendingTriggered { id, price, exec, across_gap } => {
                 format!("pending_triggered id={id} price={price} exec={} gap={}", opt(*exec), flag(*across_gap))
             }
+            EventKind::SandboxDeclared { through_seq } => {
+                format!("sandbox_declared through_seq={through_seq}")
+            }
         }
     }
 
@@ -469,6 +518,9 @@ impl EventKind {
                 price: num(&f, "price")?,
                 exec: num_opt_added_later(&f, "exec")?,
                 across_gap: flag_added_later(&f, "gap")?,
+            },
+            "sandbox_declared" => EventKind::SandboxDeclared {
+                through_seq: num(&f, "through_seq")?,
             },
             _ => return Err(BadRecord("неизвестный вид события")),
         })
@@ -599,6 +651,10 @@ pub struct ReplayState {
     /// События, которые свёртке не к чему применить (позиции с таким id нет).
     /// Молча пропускать их нельзя: это уже расхождение, просто обнаруженное раньше.
     pub orphans: Vec<u64>,
+    /// До какой записи история объявлена песочницей (TRM-48). `None` — заявления
+    /// не было. Это **не** состояние счёта и в сверку денег не входит: свёртка
+    /// держит его, чтобы читателю было где увидеть заявление.
+    pub sandbox_through: Option<u64>,
 }
 
 impl ReplayState {
@@ -612,6 +668,7 @@ impl ReplayState {
             closed: Vec::new(),
             model: PositionModel::default(),
             orphans: Vec::new(),
+            sandbox_through: None,
         }
     }
 
@@ -626,6 +683,19 @@ impl ReplayState {
     /// Применить одно событие. Деньги считаются теми же функциями, что и в торговом
     /// ядре; независимо здесь воспроизводится **ветвление операции**.
     fn apply(&mut self, kind: &EventKind, lev: i128) {
+        // Записи, не меняющие состояние, свёртка не применяет. Какие именно —
+        // объявлено в ОДНОМ месте, `EventKind::changes_state`, и список там не
+        // растёт по надобности: второй такой вид будет новым решением штаба.
+        //
+        // Проверка стоит здесь, до разбора, а не отдельной веткой внутри: ветка
+        // «ничего не делаем» выглядела бы как забытая реализация, и следующий
+        // дописал бы в неё логику.
+        if !kind.changes_state() {
+            if let EventKind::SandboxDeclared { through_seq } = kind {
+                self.sandbox_through = Some(*through_seq);
+            }
+            return;
+        }
         match kind {
             EventKind::AccountOpened { balance } => {
                 self.opened = true;
@@ -775,6 +845,10 @@ impl ReplayState {
                     self.orphans.push(*id);
                 }
             }
+            // Сюда не доходит: отсечено выше по `changes_state`. Ветка нужна
+            // только ради исчерпывающего `match` — он и есть то, что заставит
+            // следующего ответить, меняет ли деньги его новый вид записи.
+            EventKind::SandboxDeclared { .. } => {}
         }
     }
 }
@@ -1276,6 +1350,7 @@ mod tests {
                 exec: Some(3990),
                 across_gap: false,
             },
+            EventKind::SandboxDeclared { through_seq: 11 },
         ]
     }
 
@@ -1293,6 +1368,53 @@ mod tests {
                 "не пережило round-trip: {text}"
             );
         }
+    }
+
+    /// **Пропускается при свёртке РОВНО один вид записи** (TRM-48, условие штаба).
+    ///
+    /// Не «список исключений, который дорастёт», а один названный вид. Этот тест
+    /// и есть замок: появится второй — он покраснеет, и его придётся не
+    /// дописывать, а обсуждать.
+    ///
+    /// `ops()` перечисляет все виды записей; `changes_state` написан исчерпывающим
+    /// `match`, поэтому новый вид не скомпилируется, пока о нём не ответят, — а
+    /// попав в `ops()`, он попадёт и сюда.
+    #[test]
+    fn exactly_one_kind_is_skipped_by_the_fold() {
+        let all = ops();
+        let skipped: Vec<&EventKind> = all.iter().filter(|k| !k.changes_state()).collect();
+        assert_eq!(
+            skipped.len(),
+            1,
+            "пропускаться обязан ровно один вид записи, а не список: {skipped:?}"
+        );
+        assert!(
+            matches!(skipped[0], EventKind::SandboxDeclared { .. }),
+            "и это объявление песочницы, а не что-то ещё: {:?}",
+            skipped[0]
+        );
+    }
+
+    /// Объявление песочницы **не трогает деньги**: свёртка его не применяет.
+    /// Проверяется сравнением состояния до и после — всё, кроме самого заявления.
+    #[test]
+    fn the_sandbox_declaration_moves_nothing() {
+        let mut s = ReplayState::new(1_000_000);
+        s.apply(&EventKind::AccountOpened { balance: 1_000_000 }, 1);
+        s.apply(&EventKind::Deposited { amount: 7 }, 1);
+        let before = s.clone();
+
+        s.apply(&EventKind::SandboxDeclared { through_seq: 2 }, 1);
+
+        assert_eq!(s.balance, before.balance);
+        assert_eq!(s.positions, before.positions);
+        assert_eq!(s.pendings, before.pendings);
+        assert_eq!(s.closed, before.closed);
+        assert_eq!(s.next_id, before.next_id);
+        assert_eq!(s.model, before.model);
+        assert_eq!(s.opened, before.opened);
+        assert_eq!(s.orphans, before.orphans);
+        assert_eq!(s.sandbox_through, Some(2), "изменилось ровно заявление");
     }
 
     /// Все причины закрытия различимы в тексте: «закрыл человек» и «сработал стоп» —

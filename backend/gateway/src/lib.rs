@@ -14,6 +14,8 @@ pub mod feed;
 /// вызывается сегодня только из тестов: он участник сверки реализаций между
 /// репозиториями, и прятать его значило бы прятать сам факт сверки.
 pub mod jurisdiction;
+/// Объявление истории счёта песочницей (TRM-48).
+pub mod sandbox;
 mod sso;
 
 use std::collections::HashMap;
@@ -1812,8 +1814,9 @@ struct JournalEntryDto {
 
 #[derive(Serialize)]
 struct JournalDto {
-    /// `reconciled` · `no_entries` · `faulted` · `diverged`. Коды разные не из
-    /// аккуратности: «записи нет» и «журнал испорчен» требуют разных действий.
+    /// `reconciled` · `no_entries` · `faulted` · `diverged` · `no_provenance`.
+    /// Коды разные не из аккуратности: «записи нет», «журнал испорчен» и «деньги
+    /// без происхождения» требуют разных действий (TRM-47).
     status: &'static str,
     /// Человекочитаемая причина, когда сверка не сошлась.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1821,6 +1824,14 @@ struct JournalDto {
     /// Баланс, восстановленный **из журнала** (а не взятый из слепка).
     replayed_balance: broker::Cents,
     balance: broker::Cents,
+    /// До какой записи история объявлена **песочницей** (TRM-48): в реальные
+    /// балансы и отчётность она не входит. Поля нет — заявления не было.
+    ///
+    /// Отдаётся здесь, а не на шине: читателя у пометки сегодня ровно один —
+    /// тот, кто смотрит журнал счёта. Поле в контракте событий заводить не стали,
+    /// пока его некому читать.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sandbox_through: Option<u64>,
     entries: Vec<JournalEntryDto>,
 }
 
@@ -1861,6 +1872,7 @@ async fn account_journal(
         },
         replayed_balance: j.replay().balance,
         balance: snap.balance,
+        sandbox_through: j.state().sandbox_through,
         entries,
     }))
 }
