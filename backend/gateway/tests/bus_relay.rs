@@ -65,6 +65,7 @@ fn opening(j: &Journal) -> Vec<broker::journal::AccountEvent> {
         &Origin::Client,
         &[EventKind::AccountOpened {
             balance: 10_000_000,
+            profile: Default::default(),
         }],
     )
 }

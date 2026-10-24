@@ -31,7 +31,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
 
-use domain::account::UserId;
+use domain::account::{AccountKind, AccountProfile, UserId};
 
 use broker::journal::{self, Journal, Origin};
 use broker::{Broker, PosSide};
@@ -483,6 +483,31 @@ async fn account_lock(st: &AppState, user: UserId) -> Arc<Mutex<()>> {
         .clone()
 }
 
+/// Профиль нового счёта (TRM-44).
+///
+/// # Откуда берутся поля — и чего сегодня взять неоткуда
+///
+/// Терминал **не открывает реальных счетов**: пути к ним нет ни в одной ручке,
+/// и рода, кроме демо, здесь не возникает. Поэтому `demo` тут не умолчание «на
+/// всякий случай», а единственный достижимый род.
+///
+/// Остальное названо по источникам, которых пока нет, и это надо читать как
+/// список недостающего, а не как готовые значения:
+///
+/// - **род** придёт вместе с путём открытия реального счёта, которого нет;
+/// - **категория клиента** живёт у клиента, то есть в кабинете. Транспорта нет:
+///   в handoff-токене её нет, отдельной ручки нет. До появления — розничная,
+///   как было у всех счетов до сегодня, и это **консервативная** сторона:
+///   розничному положено больше защиты;
+/// - **происхождение** — регистрация: другого способа завести счёт здесь нет;
+/// - **валюта** — доллар, единственная в терминале.
+///
+/// Владелец — сам `user`: счёт у человека один. Поле существует затем, чтобы
+/// перестать совпадать с ключом без миграции.
+fn profile_for_new_account(user: UserId) -> AccountProfile {
+    AccountProfile::legacy_demo(user)
+}
+
 /// Завести счёт отдельной записью журнала — **до** первой операции и
 /// независимо от её исхода (TRM-46).
 ///
@@ -524,7 +549,7 @@ async fn ensure_account_opened(st: &AppState, user: UserId) -> Result<(), ApiErr
         // Повторная проверка под локом: между быстрым путём и этим местом счёт мог
         // завести соседний запрос. `open_account` отдаёт `false` — уходим, запись
         // уже сделана тем, кто успел первым.
-        if !b.open_account(user) {
+        if !b.open_account_with(user, profile_for_new_account(user)) {
             return Ok(());
         }
         (
@@ -1066,6 +1091,23 @@ struct Principal {
 /// превращаться в разрешение. Отличаем «списка нет» от «в списке нет»: обе ветки
 /// запрещают, но чинятся по-разному, и человек должен видеть причину.
 async fn ensure_can_open(st: &AppState, who: &Principal, instrument: u32) -> Result<(), ApiErr> {
+    // Реальными средствами торговать нельзя, пока личность не проверена
+    // (критерий владельца, TRM-44). Состояние проверки живёт у клиента, то есть
+    // в кабинете, и транспорта у него сюда **нет**: ни в handoff-токене, ни
+    // отдельной ручкой.
+    //
+    // Поэтому ворота стоят закрытыми, а не открытыми. Прочитать состояние мы не
+    // можем — значит не можем и утверждать, что оно выставлено; пустить при
+    // этом к настоящим деньгам значило бы превратить отсутствие транспорта в
+    // разрешение. Это то же решение, что для недоступного allow-list (§4б):
+    // отказ инфраструктуры не становится разрешением.
+    //
+    // Сегодня ветка недостижима — реальных счетов терминал не открывает. Она
+    // стоит здесь затем, чтобы путь к ним нельзя было открыть, не увидев её.
+    if st.broker.lock().await.snapshot(who.user).profile.kind == AccountKind::Real {
+        return Err(err(StatusCode::FORBIDDEN, "identity_not_verified"));
+    }
+
     let Some(tenant) = who.tenant.as_deref() else {
         return Ok(()); // standalone: сайта нет, ограничивать нечем и не от чьего имени
     };
@@ -2702,6 +2744,7 @@ mod invariant_wiring_tests {
     /// Слепок с нарушенным инвариантом: позиция с нулевым объёмом.
     fn corrupt_snapshot() -> broker::AccountSnapshot {
         broker::AccountSnapshot {
+            profile: Default::default(),
             balance: 1_000_000,
             next_id: 1,
             positions: vec![broker::Position {
@@ -3230,6 +3273,7 @@ mod journal_wiring_tests {
             async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
                 // Инварианты в порядке: расходится именно история, а не состояние.
                 let snap = broker::AccountSnapshot {
+                    profile: Default::default(),
                     balance: 42_000_000,
                     next_id: 0,
                     ..Default::default()
@@ -3334,6 +3378,7 @@ mod journal_wiring_tests {
                         v.origin().clone(),
                         &journal::EventKind::AccountOpened {
                             balance: 99_000_000,
+                            profile: Default::default(),
                         }
                         .encode(),
                         v.prev(),
@@ -3417,6 +3462,67 @@ mod journal_wiring_tests {
         assert!(
             events_of(&st).await.is_empty(),
             "незаписанного в хранилище в журнале быть не должно"
+        );
+    }
+
+    /// **Реальный счёт не торгует, пока личность не проверена** (TRM-44).
+    ///
+    /// Проверяется отказом через роутер, а не чтением кода: критерий владельца
+    /// требует именно этого. Состояние проверки живёт в кабинете и транспорта
+    /// сюда не имеет — значит ворота стоят закрытыми, и отсутствие транспорта
+    /// не превращается в разрешение.
+    #[tokio::test]
+    async fn a_real_account_cannot_open_a_position() {
+        let st = build_state();
+        {
+            let mut b = st.broker.lock().await;
+            b.open_account_with(
+                DEFAULT_USER,
+                broker::AccountProfile {
+                    owner: DEFAULT_USER,
+                    kind: broker::AccountKind::Real,
+                    ..Default::default()
+                },
+            );
+        }
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+
+        let (status, body) = send(&app, "POST", "/deals", Some(deal_body())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"], "identity_not_verified", "{body}");
+    }
+
+    /// А демо — торгует: ворота закрывают реальные деньги, а не всех подряд.
+    /// Без этого случая предыдущий ничего не доказывает.
+    #[tokio::test]
+    async fn a_demo_account_still_trades() {
+        let st = build_state();
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+        let (status, _) = send(&app, "POST", "/deals", Some(deal_body())).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// Профиль нового счёта доезжает до журнала и до слепка.
+    #[tokio::test]
+    async fn a_new_account_is_opened_with_its_profile() {
+        let st = build_state();
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+        assert_eq!(
+            send(&app, "POST", "/deals", Some(deal_body())).await.0,
+            StatusCode::OK
+        );
+
+        let kinds = events_of(&st).await;
+        assert!(
+            kinds[0].starts_with("account_opened")
+                && kinds[0].contains("kind=demo")
+                && kinds[0].contains("origin=registration")
+                && kinds[0].contains("category_at_open=retail")
+                && kinds[0].contains("currency=USD"),
+            "профиль обязан быть в записи о заведении: {kinds:?}"
         );
     }
 

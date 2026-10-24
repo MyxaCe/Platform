@@ -42,6 +42,10 @@
 
 use std::fmt::Write as _;
 
+use domain::account::{
+    AccountKind, AccountOrigin, AccountProfile, CategoryAtOpen, ClientCategory, Currency, UserId,
+};
+
 use crate::{
     margin_for, merged_entry, realized_on_close, AccountSnapshot, Cents, ClosedDeal, PendingOrder,
     PosSide, Position, PositionModel,
@@ -169,8 +173,27 @@ pub enum CloseCause {
 /// с самим собой — тавтология, которая уже один раз прошла у нас за проверку маржи.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventKind {
-    /// Счёт заведён со стартовым балансом.
-    AccountOpened { balance: Cents },
+    /// Счёт заведён: стартовый баланс и **неизменная часть профиля** (TRM-44).
+    ///
+    /// Профиль едет здесь, потому что заведение — единственный момент, когда он
+    /// устанавливается, и журнал обязан объяснять не только «сколько денег
+    /// появилось», но и **на каком счёте**.
+    ///
+    /// # Старые записи
+    ///
+    /// Поля добавлены 24.10, и записи, написанные раньше, их не несут. Они
+    /// разбираются с [`AccountProfile::legacy_demo`] — демо, розничный, доллар,
+    /// происхождение «регистрация». Это **не умолчание на всякий случай, а факт
+    /// их истории**: другого в терминале не существовало.
+    ///
+    /// И главное: **их канон не меняется**. Запись подписана своим текстом и
+    /// хранит его (см. `AccountEvent::canon`), поэтому расширение вида не
+    /// трогает отпечатки прежних записей. Без этого добавление полей сюда
+    /// отправило бы в карантин все существующие счета.
+    AccountOpened {
+        balance: Cents,
+        profile: AccountProfile,
+    },
     /// Счёт перешёл на модель ведения позиций (ADR-025).
     ModelAdopted { model: PositionModel },
     /// Пополнение. Ручное начисление центра управления — это оно же с [`Origin::Operator`].
@@ -414,6 +437,49 @@ fn flag_added_later(fs: &[(&str, &str)], key: &str) -> Result<bool, BadRecord> {
     }
 }
 
+/// Профиль счёта из полей записи — или профиль счетов, заведённых до TRM-44.
+///
+/// Отсутствие полей читается как «тогда о них не знали», и подставляется
+/// **история**, а не удобство: демо, розничный, доллар, регистрация. Другого
+/// рода счетов в терминале не было.
+///
+/// А вот поле, которое ЕСТЬ, но с неизвестным значением, — **отказ**. Разница
+/// принципиальная: «не знали» и «написано непонятное» требуют разного. Второе
+/// значит, что запись испорчена или пришла из будущего, и читать её как
+/// демо-счёт значило бы угадывать род чужих денег.
+fn profile_added_later(fs: &[(&str, &str)]) -> Result<AccountProfile, BadRecord> {
+    let owner = match fs.iter().find(|(k, _)| *k == "owner") {
+        None => UserId(0),
+        Some((_, v)) => UserId(v.parse().map_err(|_| BadRecord("owner не число"))?),
+    };
+    let pick_enum = |key: &str| fs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
+    let kind = match pick_enum("kind") {
+        None => AccountKind::Demo,
+        Some(v) => AccountKind::parse(v).ok_or(BadRecord("неизвестный род счёта"))?,
+    };
+    let origin = match pick_enum("origin") {
+        None => AccountOrigin::Registration,
+        Some(v) => AccountOrigin::parse(v).ok_or(BadRecord("неизвестное происхождение счёта"))?,
+    };
+    let category_at_open = match pick_enum("category_at_open") {
+        None => CategoryAtOpen(ClientCategory::Retail),
+        Some(v) => CategoryAtOpen(
+            ClientCategory::parse(v).ok_or(BadRecord("неизвестная категория клиента"))?,
+        ),
+    };
+    let currency = match pick_enum("currency") {
+        None => Currency::USD,
+        Some(v) => Currency::parse(v).ok_or(BadRecord("не код валюты"))?,
+    };
+    Ok(AccountProfile {
+        owner,
+        kind,
+        origin,
+        category_at_open,
+        currency,
+    })
+}
+
 fn side_of(fs: &[(&str, &str)], key: &str) -> Result<PosSide, BadRecord> {
     match pick(fs, key)? {
         "long" => Ok(PosSide::Long),
@@ -437,7 +503,14 @@ impl EventKind {
     /// Каноническая строка события: то же, что ложится в хранилище и в отпечаток.
     pub fn encode(&self) -> String {
         match self {
-            EventKind::AccountOpened { balance } => format!("account_opened balance={balance}"),
+            EventKind::AccountOpened { balance, profile } => format!(
+                "account_opened balance={balance} owner={} kind={} origin={} category_at_open={} currency={}",
+                profile.owner.0,
+                profile.kind.tag(),
+                profile.origin.tag(),
+                profile.category_at_open.0.tag(),
+                profile.currency.code()
+            ),
             EventKind::ModelAdopted { model } => {
                 let m = match model {
                     PositionModel::Hedging => "hedging",
@@ -493,9 +566,13 @@ impl EventKind {
         let (tag, rest) = s.split_once(' ').unwrap_or((s, ""));
         let f = fields(rest)?;
         Ok(match tag {
-            "account_opened" => EventKind::AccountOpened {
-                balance: num(&f, "balance")?,
-            },
+            "account_opened" => {
+                let balance = num(&f, "balance")?;
+                EventKind::AccountOpened {
+                    balance,
+                    profile: profile_added_later(&f)?,
+                }
+            }
             "model_adopted" => EventKind::ModelAdopted {
                 model: match pick(&f, "model")? {
                     "hedging" => PositionModel::Hedging,
@@ -748,6 +825,8 @@ pub struct ReplayState {
     /// События, которые свёртке не к чему применить (позиции с таким id нет).
     /// Молча пропускать их нельзя: это уже расхождение, просто обнаруженное раньше.
     pub orphans: Vec<u64>,
+    /// Неизменная часть счёта, как её объявила запись о заведении (TRM-44).
+    pub profile: AccountProfile,
     /// До какой записи история исключена из реальных балансов и отчётности
     /// (TRM-48). `None` — заявления не было. Это **не** состояние счёта и в
     /// сверку денег не входит: свёртка держит его, чтобы читателю было где
@@ -766,6 +845,7 @@ impl ReplayState {
             closed: Vec::new(),
             model: PositionModel::default(),
             orphans: Vec::new(),
+            profile: AccountProfile::default(),
             excluded_from_reporting_through: None,
         }
     }
@@ -795,9 +875,10 @@ impl ReplayState {
             return;
         }
         match kind {
-            EventKind::AccountOpened { balance } => {
+            EventKind::AccountOpened { balance, profile } => {
                 self.opened = true;
                 self.balance = *balance;
+                self.profile = *profile;
             }
             EventKind::ModelAdopted { model } => self.model = *model,
             EventKind::Deposited { amount } => self.balance += *amount,
@@ -1402,6 +1483,7 @@ mod tests {
         vec![
             EventKind::AccountOpened {
                 balance: 10_000_000,
+                profile: Default::default(),
             },
             EventKind::ModelAdopted {
                 model: PositionModel::Netting,
@@ -1475,33 +1557,82 @@ mod tests {
             );
         }
     }
-
-    /// **Старая запись обязана переигрываться в ТОТ ЖЕ канонический текст.**
+    /// **Настоящие записи с контура поднимаются и сверяются.**
     ///
-    /// Это условие задачи TRM-44, а не стилистика. Отпечаток записи считается по
-    /// канонической строке (`digest` зовёт `kind.encode()`), записи сцеплены
-    /// отпечатками, и `verify` сверяет хранимый отпечаток с пересчитанным. Если
-    /// запись, прочитанная из базы, кодируется обратно иначе, чем была записана,
-    /// её отпечаток не сойдётся — и `restore_state` отправит счёт в карантин.
+    /// Строки сняты с журнала счёта на сервере (`GET /account/journal`), а не
+    /// сгенерированы текущим кодом: генератор и проверяющий не должны быть
+    /// одним кодом. Отпечатки — литералы, посчитанные сторонней реализацией
+    /// FNV-1a по этим же строкам.
     ///
-    /// Строки ниже — **настоящие**, снятые с журнала счёта на контуре
-    /// (`GET /account/journal`), а не сгенерированные текущим кодом. В этом весь
-    /// смысл: генератор и проверяющий не должны быть одним и тем же кодом.
+    /// # Что эта проверка утверждала раньше и почему изменилась
+    ///
+    /// Прежняя редакция требовала, чтобы `decode(строка).encode()` давал ту же
+    /// строку побайтно. Это было **достаточным** условием безопасности, пока
+    /// отпечаток пересчитывался из разобранного вида. После того как запись
+    /// стала хранить свой канон, условие перестало быть необходимым — и, хуже
+    /// того, запрещало бы **любое** расширение записи навсегда.
+    ///
+    /// Проверяется теперь то, ради чего всё делалось: старая запись
+    /// **сверяется**. Это строго сильнее — смотрит на цепочку отпечатков, а не
+    /// на совпадение текста, — и не запрещает добавлять поля.
     #[test]
-    fn historical_records_re_encode_byte_for_byte() {
-        const LIVE: &[&str] = &[
-            "account_opened balance=1000000",
-            "position_opened id=1 instrument=2 side=long qty=1000 entry=239883 pd=2 qd=4 sl=- tp=-",
-            "position_closed id=1 exit=240053 cause=command level=- gap=0",
+    fn historical_records_from_production_still_verify() {
+        const LIVE: [(&str, u128); 3] = [
+            (
+                "account_opened balance=1000000",
+                0xbf80fb04e1805c85c4822be3f2d413f6,
+            ),
+            (
+                "position_opened id=1 instrument=2 side=long qty=1000 entry=239883 pd=2 qd=4 sl=- tp=-",
+                0xc97803856631f06eff21501ca384bdb1,
+            ),
+            (
+                "position_closed id=1 exit=240053 cause=command level=- gap=0",
+                0xc669479698096e277e5cbcaaebee2367,
+            ),
         ];
-        for text in LIVE {
-            let kind = EventKind::decode(text).unwrap_or_else(|e| panic!("{text}: {e}"));
-            assert_eq!(
-                &kind.encode(),
-                text,
-                "запись перекодировалась иначе — её отпечаток больше не сойдётся"
-            );
+        for (text, hash) in LIVE {
+            let e = AccountEvent::from_storage(1, 1_700_000_000_000, Origin::Client, text, 0, hash)
+                .unwrap_or_else(|err| panic!("{text}: {err}"));
+            assert_eq!(e.canon(), text, "канон приезжает как есть");
+            Journal::load(1, 10_000_000, vec![e])
+                .unwrap_or_else(|f| panic!("{text}: запись с контура обязана сверяться, а не {f}"));
         }
+    }
+
+    /// И запись о заведении счёта — **с профилем, которого в ней не было**
+    /// (TRM-44). Расширение этой записи и есть то, ради чего канон хранится:
+    /// она первая в ленте каждого счёта, и её отпечаток держит всю цепочку.
+    #[test]
+    fn a_pre_profile_account_opened_reads_as_a_legacy_demo_account() {
+        let e = AccountEvent::from_storage(
+            1,
+            1_700_000_000_000,
+            Origin::Client,
+            "account_opened balance=1000000",
+            0,
+            0xbf80fb04e1805c85c4822be3f2d413f6,
+        )
+        .expect("разбор");
+        match e.kind() {
+            EventKind::AccountOpened { balance, profile } => {
+                assert_eq!(*balance, 1_000_000);
+                assert_eq!(
+                    profile.kind,
+                    AccountKind::Demo,
+                    "другого рода тогда не было"
+                );
+                assert_eq!(profile.origin, AccountOrigin::Registration);
+                assert_eq!(profile.currency, Currency::USD);
+                assert_eq!(
+                    profile.category_at_open,
+                    CategoryAtOpen(ClientCategory::Retail),
+                    "и все клиенты считались розничными"
+                );
+            }
+            other => panic!("не та запись: {other:?}"),
+        }
+        Journal::load(1, 10_000_000, vec![e]).expect("и сверяется прежним отпечатком");
     }
 
     /// **Запись, написанная ДО расширения вида, поднимается и сверяется.**
@@ -1625,7 +1756,13 @@ mod tests {
     #[test]
     fn the_sandbox_declaration_moves_nothing() {
         let mut s = ReplayState::new(1_000_000);
-        s.apply(&EventKind::AccountOpened { balance: 1_000_000 }, 1);
+        s.apply(
+            &EventKind::AccountOpened {
+                balance: 1_000_000,
+                profile: Default::default(),
+            },
+            1,
+        );
         s.apply(&EventKind::Deposited { amount: 7 }, 1);
         let before = s.clone();
 
@@ -1811,6 +1948,7 @@ mod tests {
             &Origin::Client,
             &[EventKind::AccountOpened {
                 balance: 10_000_000,
+                profile: Default::default(),
             }],
         ) {
             j.commit(e).unwrap();
@@ -1866,6 +2004,7 @@ mod tests {
         let kinds = [
             EventKind::AccountOpened {
                 balance: 10_000_000,
+                profile: Default::default(),
             },
             EventKind::Deposited { amount: 500 },
             EventKind::PositionOpened {
@@ -2028,6 +2167,7 @@ mod tests {
     fn snap_of(j: &Journal) -> AccountSnapshot {
         let s = j.replay();
         AccountSnapshot {
+            profile: s.profile,
             balance: s.balance,
             next_id: s.next_id,
             positions: s.positions.clone(),
@@ -2096,6 +2236,7 @@ mod tests {
     fn empty_journal_over_a_live_account_says_no_entries() {
         let j = Journal::new(1, 10_000_000);
         let live = AccountSnapshot {
+            profile: Default::default(),
             balance: 10_000_500,
             next_id: 1,
             positions: vec![],

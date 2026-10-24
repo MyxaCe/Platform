@@ -105,7 +105,7 @@ fn opening_and_closing_are_recorded_and_replay_to_the_same_account() {
     r.must_reconcile("после закрытия");
 
     // Первая запись — заведение счёта: стартовый баланс обязан иметь происхождение.
-    assert!(matches!(r.kinds()[0], EventKind::AccountOpened { balance } if *balance == START));
+    assert!(matches!(r.kinds()[0], EventKind::AccountOpened { balance, .. } if *balance == START));
     assert!(matches!(r.kinds()[1], EventKind::PositionOpened { .. }));
     assert!(
         matches!(
