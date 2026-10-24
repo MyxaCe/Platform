@@ -882,3 +882,111 @@ fn a_position_without_a_price_is_not_force_closed() {
         "позиция без цены обязана остаться: закрывать её нечем по какой цене"
     );
 }
+
+// ---- Маржин-колл: предупреждение, а не шум (TRM-50) -----------------------
+
+/// Предупреждение объявляется **один раз на попадание в опасность**.
+///
+/// Монитор идёт каждые 500 мс. Без защёлки клиент получал бы по два уведомления
+/// в секунду всё время, пока счёт в опасности, — а предупреждение, приходящее
+/// дважды в секунду, перестают читать. Тогда оно не предупреждение ровно по той
+/// же причине, по которой им не является недошедшее.
+#[test]
+fn a_margin_call_fires_once_per_episode() {
+    let mut b = Broker::new(20_000, 10).with_margin_call_pct(Some(100));
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10);
+
+    let danger = marks(1, 9_000); // уровень ровно 100%
+    assert_eq!(
+        b.margin_calls(&danger),
+        vec![(ALICE, 100)],
+        "первое пересечение"
+    );
+    assert!(b.margin_calls(&danger).is_empty(), "повтора быть не должно");
+    assert!(
+        b.margin_calls(&marks(1, 8_900)).is_empty(),
+        "и при углублении тоже"
+    );
+}
+
+/// Выбрался — защёлка снимается, и следующее попадание снова предупредят.
+#[test]
+fn recovering_re_arms_the_warning() {
+    let mut b = Broker::new(20_000, 10).with_margin_call_pct(Some(100));
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10);
+
+    assert_eq!(b.margin_calls(&marks(1, 9_000)).len(), 1);
+    assert!(
+        b.margin_calls(&marks(1, 10_000)).is_empty(),
+        "вышел наверх — не предупреждаем"
+    );
+    assert_eq!(
+        b.margin_calls(&marks(1, 9_000)).len(),
+        1,
+        "вернулся в опасность — предупреждаем снова"
+    );
+}
+
+/// Счёт без позиций опасности не представляет, и защёлка обязана сняться:
+/// иначе закрывший всё и открывший заново не будет предупреждён.
+#[test]
+fn closing_everything_re_arms_the_warning() {
+    let mut b = Broker::new(20_000, 10).with_margin_call_pct(Some(100));
+    let id = open_t(&mut b, 1, PosSide::Long, 10_000, 10);
+    assert_eq!(b.margin_calls(&marks(1, 9_000)).len(), 1);
+
+    b.close(ALICE, id, 9_000).expect("закрытие");
+    assert!(
+        b.margin_calls(&marks(1, 9_000)).is_empty(),
+        "позиций нет — опасности нет"
+    );
+
+    open_t(&mut b, 1, PosSide::Long, 9_000, 10);
+    assert_eq!(
+        b.margin_calls(&marks(1, 8_100)).len(),
+        1,
+        "новая опасность — новое предупреждение"
+    );
+}
+
+/// **Порога нет — предупреждения нет.** Как и у закрытия: уровень задаёт
+/// юрисдикция, выдумывать его здесь нельзя.
+#[test]
+fn without_a_call_level_nothing_is_warned() {
+    let mut b = Broker::new(20_000, 10);
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10);
+    assert!(b.margin_calls(&marks(1, 1_000)).is_empty());
+}
+
+/// **Предупреждение видно даже тогда, когда закрытие случилось тем же тиком.**
+///
+/// Это и есть «закрытие без предупреждения — срабатывание без шанса»: если
+/// спросить о пересечении ПОСЛЕ прогона триггеров, уровень уже поднят закрытием,
+/// и предупреждения не будет никогда.
+#[test]
+fn the_warning_is_visible_even_when_the_stop_out_happens_on_the_same_tick() {
+    let mut b = Broker::new(20_000, 10)
+        .with_margin_call_pct(Some(100))
+        .with_stop_out_pct(Some(50));
+    open_t(&mut b, 1, PosSide::Long, 10_000, 10);
+
+    // Цена сразу ниже уровня закрытия: на этом тике произойдёт и то, и другое.
+    let crash = marks(1, 8_500);
+
+    let called = b.margin_calls(&crash);
+    assert_eq!(
+        called,
+        vec![(ALICE, 50)],
+        "предупреждение обязано быть видно"
+    );
+
+    b.check(&crash, false);
+    assert!(b.positions(ALICE).is_empty(), "и закрытие тоже произошло");
+
+    // Порядок проверяется тем, что обратный порядок даёт пустоту: после
+    // закрытия позиций нет, уровень не определён, пересечения не видно.
+    assert!(
+        b.margin_calls(&crash).is_empty(),
+        "после закрытия предупреждать уже не о чем — потому оно и идёт первым"
+    );
+}

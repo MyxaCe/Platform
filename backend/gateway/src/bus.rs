@@ -61,6 +61,20 @@ pub const EVENT_VERSION: u32 = 1;
 pub const EV_ACCOUNT_OPENED: &str = "terminal.account.opened";
 pub const EV_BALANCE_CHANGED: &str = "terminal.balance.changed";
 pub const EV_TRADE_EXECUTED: &str = "terminal.trade.executed";
+/// Маржин-колл: уровень маржи дошёл до предупредительного (TRM-50).
+///
+/// **Имени ещё нет в контракте платформы.** Потребитель в кабинете его не
+/// знает: его `TERMINAL_EVENT_SCHEMAS` перечисляет три события, и неизвестное
+/// он классифицирует как `foreign` и **молча пропускает** — так у него
+/// задумано, чтобы стороны выкатывались порознь.
+///
+/// Значит до правки на той стороне уведомление до клиента НЕ ДОЙДЁТ, а по
+/// критерию владельца недошедшее предупреждение — **дефект, а не «клиент не
+/// заметил»**. Это зеркало Р-204: тогда потребитель был построен, а
+/// публикующего не было; здесь наоборот. Имя и состав полей согласуются со
+/// штабом и site-platform, и до этого события уедут в пустоту — видимо, но
+/// впустую.
+pub const EV_MARGIN_CALLED: &str = "terminal.margin.called";
 
 /// Валюта демо-счёта. Единственная: деньги терминала — центы доллара во всех
 /// расчётах, и поле существует потому, что его требует схема потребителя, а не
@@ -445,6 +459,46 @@ fn trade_executed(
         occurred_at: occurred_at.to_string(),
         source: SOURCE,
         subject: Some(format!("{}:{}", who.user, idx)),
+        data,
+    }
+}
+
+/// Конверт `terminal.margin.called` (TRM-50).
+///
+/// Несёт **оба уровня** — достигнутый и тот, на котором закрывают. Одного мало:
+/// «ваш уровень 97 %» ничего не говорит человеку, который не помнит, где порог,
+/// а предупреждение, из которого не видно, сколько осталось, не помогает
+/// решить, вносить деньги или закрывать позицию.
+///
+/// Суммы — целые центы, как и везде в деньгах. Уровни — целые проценты: дробная
+/// часть уровня маржи не несёт смысла, по которому человек принимает решение.
+pub fn margin_called(
+    who: &Addressee<'_>,
+    level_pct: i128,
+    stop_out_pct: Option<i128>,
+    equity: Cents,
+    used_margin: Cents,
+) -> Envelope {
+    let mut data = serde_json::json!({
+        "tenant": who.tenant,
+        "userId": who.sub,
+        "marginLevelPct": cents(level_pct),
+        "equityCents": cents(equity),
+        "usedMarginCents": cents(used_margin),
+    });
+    if let Some(so) = stop_out_pct {
+        data["stopOutLevelPct"] = cents(so);
+    }
+    Envelope {
+        // Ключ — счёт и момент. Защёлка на стороне брокера уже не даёт
+        // повторяться, пока счёт не выбрался; одинаковый идентификатор здесь
+        // склеил бы ДВА РАЗНЫХ попадания в опасность в одно событие.
+        event_id: event_id(EV_MARGIN_CALLED, &format!("{}:{}", who.user, who.at_ms)),
+        event: EV_MARGIN_CALLED.to_string(),
+        version: EVENT_VERSION,
+        occurred_at: iso_millis(who.at_ms),
+        source: SOURCE,
+        subject: Some(who.sub.to_string()),
         data,
     }
 }

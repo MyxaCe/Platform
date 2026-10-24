@@ -174,15 +174,43 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
     // защищённым ровно до первого разрыва.
     //
     // Действующее значение — **50 %, и это политика брокера, а не требование
-    // регулятора**: Сейшелы порога не задают (проверяли штаб и владелец
-    // независимо), у брокеров под этой лицензией практика от 10 до 50 %. Число
-    // выбрали мы и вправе менять. Довод за 50: отрицательный баланс оплачиваем
-    // мы, и чем ниже порог, тем чаще счёт успевает уйти в минус до закрытия.
+    // регулятора**. Число выбрали мы и вправе менять. Довод за 50:
+    // отрицательный баланс оплачиваем мы, и чем ниже порог, тем чаще счёт
+    // успевает уйти в минус до закрытия.
+    //
+    // **Где это проверять:** Securities Act (Сейшелы, 2007) и циркуляры FSA
+    // Seychelles — fsaseychelles.sc, раздел Securities. Мы искали там
+    // требование к уровню стоп-аута и НЕ НАШЛИ. «Не нашли» — это «не нашли», а
+    // не «не требует»: проверять юристу, и ссылка стоит затем, чтобы он
+    // проверял, а не искал заново.
+    //
     // Задаётся в `docker-compose.yml`, здесь умолчания нет намеренно.
     let stop_out_pct = std::env::var("MARGIN_STOP_OUT_LEVEL_PERCENT")
         .ok()
         .and_then(|s| s.trim().parse::<i128>().ok())
         .filter(|p| *p > 0);
+    // Уровень предупреждения (TRM-50). Выше порога закрытия: предупреждение без
+    // запаса не оставляет времени отреагировать. Умолчания, как и у порога, нет.
+    let margin_call_pct = std::env::var("MARGIN_CALL_LEVEL_PERCENT")
+        .ok()
+        .and_then(|s| s.trim().parse::<i128>().ok())
+        .filter(|p| *p > 0);
+    match margin_call_pct {
+        Some(p) => println!("[gateway] предупреждение о марже: на уровне {p}%"),
+        None => eprintln!(
+            "[gateway] ВНИМАНИЕ: MARGIN_CALL_LEVEL_PERCENT не задан — предупреждения о марже НЕТ. Закрытие по марже без предупреждения — срабатывание без шанса отреагировать."
+        ),
+    }
+    if let (Some(call), Some(stop)) = (margin_call_pct, stop_out_pct) {
+        if call <= stop {
+            // Предупреждение ниже закрытия — это предупреждение после события.
+            // Падать не станем (стоп сервиса у нас не применяется), но молчать
+            // об этом нельзя: настройка бессмысленна и выглядит рабочей.
+            eprintln!(
+                "[gateway] ВНИМАНИЕ: уровень предупреждения {call}% не выше порога закрытия {stop}% — предупредить раньше закрытия невозможно."
+            );
+        }
+    }
     match stop_out_pct {
         Some(p) => println!("[gateway] принудительное закрытие по марже: ниже {p}%"),
         None => eprintln!(
@@ -204,7 +232,9 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         stats_cache: Arc::new(Mutex::new(HashMap::new())),
         tenant_instruments: Arc::new(tenant_instruments),
         broker: Arc::new(Mutex::new(
-            Broker::new(start_cents, 1).with_stop_out_pct(stop_out_pct),
+            Broker::new(start_cents, 1)
+                .with_stop_out_pct(stop_out_pct)
+                .with_margin_call_pct(margin_call_pct),
         )), // старт из env, leverage 1
         store,
         acct_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -1212,9 +1242,12 @@ struct AccountDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     margin_level_pct: Option<i128>,
     /// Порог принудительного закрытия в процентах. `null` — **закрытия нет**:
-    /// порог не задан, и счёт ничем не ограничен снизу (TRM-41).
+    /// порог не задан, и счёт ничем не ограничен снизу (TRM-49).
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_out_level_pct: Option<i128>,
+    /// Уровень предупреждения (TRM-50). `null` — предупреждения нет.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    margin_call_level_pct: Option<i128>,
     open_pnl: i128,
 }
 #[derive(Serialize)]
@@ -1848,6 +1881,7 @@ async fn account(
         free_margin: free,
         margin_level_pct: b.margin_level_pct(user, &m),
         stop_out_level_pct: b.stop_out_pct(),
+        margin_call_level_pct: b.margin_call_pct(),
         open_pnl,
     }))
 }
@@ -2024,6 +2058,15 @@ pub async fn monitor_tick(st: &AppState) {
     if m.is_empty() {
         return;
     }
+    // Предупреждение о марже — ДО прогона триггеров (TRM-50). Закрытие поднимает
+    // уровень, и после него пересечения уже не видно: клиент остался бы закрыт
+    // без предупреждения, хотя мы его за мгновение до этого видели.
+    //
+    // Владелец сформулировал критерий так: недошедшее предупреждение — НАШ
+    // ОТКАЗ, а не «клиент не заметил». Поэтому путь у него тот же, что у
+    // исполненной сделки: устойчивая очередь, шина, уведомление в кабинете.
+    send_margin_calls(st, &m).await;
+
     // Разрыв ряда определяет тот, кто принимает цены (Р-073, TRM-19).
     // Молчание дольше порога взводит признак; первый же прогон по
     // свежим ценам его СНИМАЕТ и помечает свои записи — дальше ряд
@@ -2093,6 +2136,71 @@ pub async fn monitor_tick(st: &AppState) {
             continue; // в память журнал не принимаем: в хранилище его нет
         }
         commit_journal(st, user, sealed).await;
+    }
+}
+
+/// Объявить маржин-колл тем счетам, что только что пересекли уровень (TRM-50).
+///
+/// **Запись без движения денег.** Слепок не меняется, записей журнала нет —
+/// уезжает только конверт в исходящую очередь. Это сознательно: журнал счёта —
+/// лента, из которой выводится состояние, а предупреждение состояния не
+/// меняет. Класть в денежную ленту запись, которая сворачивается в ничто,
+/// значило бы заводить второй такой вид после `sandbox_declared`, а штаб
+/// поставил условием, что второй — это новое решение, а не добавление строки.
+///
+/// След при этом остаётся, и даже лучший: строка `bus_outbox` хранит и момент
+/// отправки, и `published_at`. На вопрос «предупреждали ли мы» она отвечает
+/// точнее записи в журнале, потому что говорит ещё и о доставке.
+async fn send_margin_calls(st: &AppState, marks: &HashMap<u32, i64>) {
+    let called = { st.broker.lock().await.margin_calls(marks) };
+    for (user, level) in called {
+        let lock = account_lock(st, user).await;
+        let _guard = lock.lock().await;
+
+        let (snap, equity, used, stop_out) = {
+            let b = st.broker.lock().await;
+            (
+                b.snapshot(user),
+                b.equity(user, marks),
+                b.used_margin(user),
+                b.stop_out_pct(),
+            )
+        };
+        let Some((tenant, sub)) = identity_for_bus(st, user).await else {
+            // Адресата нет — предупреждать некого. Молчим не потому, что
+            // неважно, а потому что отправить некуда: счёт не привязан к сайту.
+            eprintln!(
+                "[margin] счёт {} на уровне {level}% — предупредить некого: счёт не привязан к сайту",
+                user.0
+            );
+            continue;
+        };
+        let who = bus::Addressee {
+            tenant: &tenant,
+            sub: &sub,
+            user: user.0,
+            seq: 0, // записей журнала здесь нет — номер не участвует в ключе
+            at_ms: now_ms(),
+        };
+        let env = bus::margin_called(&who, level, stop_out, equity, used);
+        eprintln!(
+            "[margin] счёт {} на уровне {level}% — предупреждение отправлено (порог закрытия {:?})",
+            user.0, stop_out
+        );
+        if let Err(e) = st
+            .store
+            .save_account(user, &snap, &[], &[env.to_record()])
+            .await
+        {
+            // Не дошло — это отказ, а не мелочь: по критерию владельца
+            // недошедшее предупреждение разбирается как отказ. Защёлку при
+            // этом НЕ снимаем: иначе следующий тик отправил бы повтор, и
+            // лог захлебнулся бы там, где и так беда.
+            eprintln!(
+                "[margin] ПРЕДУПРЕЖДЕНИЕ НЕ ЗАПИСАНО для счёта {}: {e} — клиент его не получит",
+                user.0
+            );
+        }
     }
 }
 
@@ -3701,6 +3809,71 @@ mod bus_wiring_tests {
             "торговля не зависит от того, доедет ли событие"
         );
         assert_eq!(st.store.outbox_backlog().await.unwrap(), 0);
+    }
+
+    /// Маржин-колл доезжает до исходящей очереди — тем же путём, что сделка.
+    ///
+    /// Критерий владельца: **недошедшее предупреждение — наш отказ**, а не
+    /// «клиент не заметил». Поэтому проверка смотрит не на лог и не на флаг в
+    /// памяти, а на то, что конверт лёг в очередь: оттуда его заберёт релей.
+    #[tokio::test]
+    async fn a_margin_call_reaches_the_outgoing_queue() {
+        let st = build_state_with(tenanted(DEFAULT_USER));
+        restore_state(&st).await.unwrap();
+        {
+            // Пороги задаём прямо: в тестах окружения нет, а умолчаний в коде
+            // нет намеренно.
+            let mut b = st.broker.lock().await;
+            *b = broker::Broker::new(100_000, 10)
+                .with_margin_call_pct(Some(100))
+                .with_stop_out_pct(Some(50));
+        }
+        // Числа подобраны так, чтобы уровень дошёл до порога ТОЧНО.
+        // BTC pd=2 qd=5: нотионал = цена × объём / 100 000.
+        // Вход $50 000, объём 0.1 → нотионал $5 000, маржа при плече 10 — $500.
+        // Баланс $1 000 → уровень на входе 200 %.
+        // Нереализованный = (цена − вход) / 10; уровень = equity / 500.
+        // Уровень 100 % ⇒ equity $500 ⇒ убыток $500 ⇒ цена $45 000.
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+        assert_eq!(
+            send(
+                &app,
+                "POST",
+                "/deals",
+                Some(serde_json::json!({"instrument":1,"side":"buy","qty":10_000}))
+            )
+            .await,
+            StatusCode::OK
+        );
+
+        with_price(&st, 1, 4_500_000).await;
+        monitor_tick(&st).await;
+
+        let all = queued(&st).await;
+        let calls = of_kind(&all, bus::EV_MARGIN_CALLED);
+        assert_eq!(calls.len(), 1, "предупреждение обязано уехать: {all:?}");
+        let d = &calls[0]["data"];
+        assert_eq!(d["tenant"], TENANT);
+        assert_eq!(d["userId"], SUB);
+        assert_eq!(
+            d["stopOutLevelPct"], 50,
+            "в предупреждении обязан быть и порог закрытия: без него не видно, сколько осталось"
+        );
+        assert_eq!(
+            d["marginLevelPct"], 100,
+            "достигнутый уровень — ровно порог: {d}"
+        );
+        assert_eq!(d["usedMarginCents"], 50_000, "{d}");
+        assert_eq!(d["equityCents"], 50_000, "{d}");
+        assert_eq!(calls[0]["event"], "terminal.margin.called");
+
+        // Закрытия при этом НЕ произошло: порог закрытия ниже, и предупреждение
+        // пришло раньше — в этом его смысл.
+        assert!(
+            of_kind(&all, bus::EV_TRADE_EXECUTED).is_empty(),
+            "на уровне предупреждения ещё не закрывают: {all:?}"
+        );
     }
 
     /// `/health` называет и состояние шины, и длину очереди: «копится» и
