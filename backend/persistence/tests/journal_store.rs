@@ -393,3 +393,112 @@ async fn an_unreadable_account_kind_is_refused() {
         .await
         .unwrap();
 }
+
+/// **Сменить валюту счёта нельзя — отказывает ХРАНИЛИЩЕ** (TRM-55, требование
+/// владельца).
+///
+/// Отсутствие профиля в `DO UPDATE` защищает только от нашего кода; прямой
+/// `UPDATE` по таблице его обходит. Запрет стоит там, где данные, — как у
+/// журнала, закрытого от правок тем же способом.
+///
+/// Почему это не «не рекомендуется»: смена валюты у живого счёта означает, что
+/// прошлые суммы посчитаны в одной наименьшей единице, а читаются в другой.
+/// Деньги меняются в `10^n` раз, и ни одна проверка этого не заметит — число
+/// осталось прежним.
+#[tokio::test]
+#[ignore = "нужна живая БД: TEST_DATABASE_URL"]
+async fn the_storage_refuses_to_change_the_currency() {
+    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+        panic!("TEST_DATABASE_URL не задан — живой прогон НЕ выполнен, это не «зелено»");
+    };
+    let acc = UserId(4444);
+    let store = persistence::PgStore::connect(&url)
+        .await
+        .expect("связь с БД");
+    store.init().await.expect("схема");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect(&url)
+        .await
+        .expect("пул");
+
+    sqlx::query("DELETE FROM accounts WHERE user_id = $1")
+        .bind(acc.0 as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Владельца задаём СРАЗУ: пустой столбец — это недостроенная строка, и его
+    // заполнение разрешено намеренно (иначе сама миграция стала бы нарушением).
+    // Чтобы проверять запрет на СМЕНУ, начинать надо с заполненного.
+    sqlx::query(
+        "INSERT INTO accounts (user_id, balance, next_id, model, owner_user_id) VALUES ($1, 0, 0, 0, $1)",
+    )
+    .bind(acc.0 as i64)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for (what, sql) in [
+        (
+            "валюта",
+            "UPDATE accounts SET currency = 'JPY' WHERE user_id = $1",
+        ),
+        (
+            "точность",
+            "UPDATE accounts SET currency_minor_units = 0 WHERE user_id = $1",
+        ),
+        (
+            "род",
+            "UPDATE accounts SET kind = 'real' WHERE user_id = $1",
+        ),
+        (
+            "владелец",
+            "UPDATE accounts SET owner_user_id = 1 WHERE user_id = $1",
+        ),
+    ] {
+        let res = sqlx::query(sql).bind(acc.0 as i64).execute(&pool).await;
+        assert!(
+            res.is_err(),
+            "{what}: база обязана ОТКАЗАТЬ, а не тихо поправить"
+        );
+    }
+
+    // А достройка пустого владельца — РАЗРЕШЕНА, и это не поблажка: столбца
+    // раньше не существовало, и `UPDATE … WHERE owner_user_id IS NULL` в самой
+    // схеме — это она и есть. Запрети её — и миграция станет нарушением.
+    let fresh = UserId(4445);
+    sqlx::query("DELETE FROM accounts WHERE user_id = $1")
+        .bind(fresh.0 as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO accounts (user_id, balance, next_id, model) VALUES ($1, 0, 0, 0)")
+        .bind(fresh.0 as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE accounts SET owner_user_id = $1 WHERE user_id = $1 AND owner_user_id IS NULL",
+    )
+    .bind(fresh.0 as i64)
+    .execute(&pool)
+    .await
+    .expect("достройка пустого владельца обязана проходить");
+    sqlx::query("DELETE FROM accounts WHERE user_id = $1")
+        .bind(fresh.0 as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // А деньги меняться обязаны: запрет на профиль не должен запереть счёт.
+    sqlx::query("UPDATE accounts SET balance = 123 WHERE user_id = $1")
+        .bind(acc.0 as i64)
+        .execute(&pool)
+        .await
+        .expect("остаток — не профиль, его менять можно");
+
+    sqlx::query("DELETE FROM accounts WHERE user_id = $1")
+        .bind(acc.0 as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+}

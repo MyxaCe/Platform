@@ -1864,6 +1864,9 @@ async fn list_deals(
     let user = require_user(&st, &headers).await?;
     let m = marks(&st).await;
     let b = st.broker.lock().await;
+    // P&L считается в наименьших единицах валюты ЭТОГО счёта (TRM-55): «цент»
+    // верен только для валют с двумя знаками.
+    let minor = b.snapshot(user).profile.currency.minor_per_unit();
     let out = b
         .positions(user)
         .into_iter()
@@ -1885,7 +1888,7 @@ async fn list_deals(
                 qty: p.qty,
                 entry: p.entry,
                 mark,
-                pnl: p.unrealized(mark),
+                pnl: p.unrealized(mark, minor),
                 sl: p.sl,
                 tp: p.tp,
                 price_decimals: p.pd,

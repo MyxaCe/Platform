@@ -19,7 +19,16 @@ pub mod journal;
 use journal::{CloseCause, EventKind};
 
 /// Деньги в центах (1/100 USD).
-pub type Cents = i128;
+/// Денежная величина — целое в **наименьшей единице валюты счёта** (TRM-55).
+///
+/// Прежнее имя `Cents` сохранено синонимом ради чужих вызовов, но оно лжёт:
+/// «цент» верен только для валют с двумя знаками. Для иены наименьшая единица —
+/// сама иена, для динара Бахрейна — одна тысячная.
+pub type Minor = i128;
+
+/// Прежнее имя [`Minor`]. **Не использовать в новом коде**: оно утверждает
+/// точность, которой у валюты может не быть.
+pub type Cents = Minor;
 
 /// Сторона позиции/ордера.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,8 +38,19 @@ pub enum PosSide {
 }
 
 /// Стоимость `price · qty` в центах: `price_raw · qty_raw · 100 / 10^(pd+qd)`.
-fn value_cents(price_raw: i64, qty_raw: i64, pd: u8, qd: u8) -> Cents {
-    price_raw as i128 * qty_raw as i128 * 100 / 10i128.pow(pd as u32 + qd as u32)
+/// Стоимость объёма в **наименьших единицах валюты счёта** (TRM-55).
+///
+/// # Здесь был зашит цент
+///
+/// Прежняя редакция умножала на `100` — то есть утверждала, что у валюты счёта
+/// ровно два знака. Для счёта в иенах это завысило бы каждую маржу и каждый
+/// P&L **в сто раз**, для динара — занизило бы в десять. Константа выглядела
+/// безобидным переводом «в копейки» ровно потому, что валюта была одна.
+///
+/// Теперь множитель приходит от валюты счёта. «Целое» означает наименьшую
+/// единицу **этой** валюты, а не цент.
+fn value_minor(price_raw: i64, qty_raw: i64, pd: u8, qd: u8, minor_per_unit: i128) -> Minor {
+    price_raw as i128 * qty_raw as i128 * minor_per_unit / 10i128.pow(pd as u32 + qd as u32)
 }
 
 /// Модель ведения позиций счёта (ADR-025).
@@ -79,18 +99,26 @@ pub fn merged_entry(qty_a: i64, entry_a: i64, qty_b: i64, entry_b: i64) -> i64 {
 ///
 /// Отдельно от `Position::unrealized`, потому что объём здесь **частичный**: берётся
 /// не весь объём позиции, а свёрнутая часть.
-pub fn realized_on_close(side: PosSide, entry: i64, exit: i64, qty: i64, pd: u8, qd: u8) -> Cents {
+pub fn realized_on_close(
+    side: PosSide,
+    entry: i64,
+    exit: i64,
+    qty: i64,
+    pd: u8,
+    qd: u8,
+    minor_per_unit: i128,
+) -> Minor {
     let diff = match side {
         PosSide::Long => exit - entry,
         PosSide::Short => entry - exit,
     };
-    value_cents(diff, qty, pd, qd)
+    value_minor(diff, qty, pd, qd, minor_per_unit)
 }
 
 /// Маржа под объём `qty` по цене `entry` при плече `lev` — та же формула, что при
 /// открытии. Отдельной функцией, чтобы неттинг и открытие не разъехались.
-pub fn margin_for(entry: i64, qty: i64, pd: u8, qd: u8, lev: i128) -> Cents {
-    value_cents(entry, qty, pd, qd) / lev.max(1)
+pub fn margin_for(entry: i64, qty: i64, pd: u8, qd: u8, lev: i128, minor_per_unit: i128) -> Minor {
+    value_minor(entry, qty, pd, qd, minor_per_unit) / lev.max(1)
 }
 
 /// Открытая позиция.
@@ -109,13 +137,17 @@ pub struct Position {
 }
 
 impl Position {
-    /// Нереализованный P&L при марк-цене.
-    pub fn unrealized(&self, mark_raw: i64) -> Cents {
+    /// Нереализованный P&L при марк-цене, в наименьших единицах валюты счёта.
+    ///
+    /// Точность приходит аргументом, а не хранится на позиции: валюта — свойство
+    /// **счёта**, и копия её на каждой позиции была бы вторым источником одной
+    /// правды. Позиций у счёта много, валюта одна.
+    pub fn unrealized(&self, mark_raw: i64, minor_per_unit: i128) -> Minor {
         let diff = match self.side {
             PosSide::Long => mark_raw - self.entry,
             PosSide::Short => self.entry - mark_raw,
         };
-        value_cents(diff, self.qty, self.pd, self.qd)
+        value_minor(diff, self.qty, self.pd, self.qd, minor_per_unit)
     }
 }
 
@@ -213,6 +245,15 @@ struct Account {
 }
 
 impl Account {
+    /// Множитель наименьшей единицы валюты ЭТОГО счёта (TRM-55).
+    ///
+    /// Один на счёт, берётся из профиля. Все денежные расчёты счёта обязаны
+    /// идти через него, а не через константу: «цент» верен только для валют с
+    /// двумя знаками.
+    fn minor(&self) -> i128 {
+        self.profile.currency.minor_per_unit()
+    }
+
     fn used_margin(&self) -> Cents {
         self.positions.values().map(|p| p.margin).sum()
     }
@@ -225,7 +266,7 @@ impl Account {
     fn open_pnl(&self, marks: &HashMap<u32, i64>) -> Cents {
         self.positions
             .values()
-            .map(|p| p.unrealized(*marks.get(&p.instrument).unwrap_or(&p.entry)))
+            .map(|p| p.unrealized(*marks.get(&p.instrument).unwrap_or(&p.entry), self.minor()))
             .sum()
     }
 
@@ -348,7 +389,7 @@ impl Account {
         sl: Option<i64>,
         tp: Option<i64>,
     ) -> Result<u64, BrokerError> {
-        let margin = margin_for(entry, qty, pd, qd, lev);
+        let margin = margin_for(entry, qty, pd, qd, lev, self.minor());
         // Свободная маржа считается ОДНИМ способом — через equity (TRM-41).
         if self.free_margin(marks) < margin {
             return Err(BrokerError::InsufficientMargin);
@@ -425,7 +466,7 @@ impl Account {
             // Доливка: объёмы складываются, вход усредняется по объёму.
             let new_qty = cur.qty + qty;
             let new_entry = merged_entry(cur.qty, cur.entry, qty, entry);
-            let new_margin = margin_for(new_entry, new_qty, pd, qd, lev);
+            let new_margin = margin_for(new_entry, new_qty, pd, qd, lev, self.minor());
             // Считаем ДОПОЛНИТЕЛЬНУЮ маржу: часть уже занята этой же позицией.
             let extra = new_margin - cur.margin;
             // Тем же единственным определением, что и обычное открытие (TRM-41):
@@ -457,7 +498,15 @@ impl Account {
 
         // Встречная сделка: сворачиваем меньшую из величин.
         let closing = qty.min(cur.qty);
-        let pnl = realized_on_close(cur.side, cur.entry, entry, closing, cur.pd, cur.qd);
+        let pnl = realized_on_close(
+            cur.side,
+            cur.entry,
+            entry,
+            closing,
+            cur.pd,
+            cur.qd,
+            self.minor(),
+        );
         self.balance += pnl;
         self.closed.push(ClosedDeal {
             instrument: cur.instrument,
@@ -478,9 +527,10 @@ impl Account {
         if left > 0 {
             // Позиция уменьшилась, направление прежнее. Вход не меняется: свёрнута
             // часть, а не перезаключена сделка.
+            let minor = self.minor();
             let p = self.positions.get_mut(&pos_id).expect("позиция на месте");
             p.qty = left;
-            p.margin = margin_for(p.entry, left, p.pd, p.qd, lev);
+            p.margin = margin_for(p.entry, left, p.pd, p.qd, lev, minor);
             self.log(EventKind::PositionReduced {
                 id: pos_id,
                 qty: closing,
@@ -527,8 +577,9 @@ impl Account {
         across_gap: bool,
         cause: CloseCause,
     ) -> Option<Cents> {
+        let minor = self.minor();
         let pos = self.positions.remove(&id)?;
-        let pnl = pos.unrealized(exec);
+        let pnl = pos.unrealized(exec, minor);
         self.balance += pnl;
         self.closed.push(ClosedDeal {
             instrument: pos.instrument,
@@ -725,6 +776,7 @@ impl Account {
         let Some(threshold) = stop_out_pct else {
             return false;
         };
+        let minor = self.minor();
         let mut closed = false;
         loop {
             let used = self.used_margin();
@@ -744,7 +796,7 @@ impl Account {
                 .filter_map(|p| {
                     marks
                         .get(&p.instrument)
-                        .map(|m| (p.id, *m, p.unrealized(*m)))
+                        .map(|m| (p.id, *m, p.unrealized(*m, minor)))
                 })
                 .min_by_key(|(_, _, pnl)| *pnl);
             let Some((id, mark, _)) = worst else {
@@ -1026,7 +1078,12 @@ impl Broker {
             .map(|a| {
                 a.positions
                     .values()
-                    .map(|p| p.unrealized(*marks.get(&p.instrument).unwrap_or(&p.entry)))
+                    .map(|p| {
+                        p.unrealized(
+                            *marks.get(&p.instrument).unwrap_or(&p.entry),
+                            a.profile.currency.minor_per_unit(),
+                        )
+                    })
                     .sum()
             })
             .unwrap_or(0)
@@ -1342,8 +1399,11 @@ pub fn check_snapshot(snap: &AccountSnapshot, leverage: i128) -> Vec<Violation> 
     //    Это единственный способ поймать маржу, приехавшую из хранилища кривой
     //    или посчитанную при другом плече.
     let lev = leverage.max(1);
+    // Пересчёт идёт в валюте ЭТОГО счёта: та же проверка с зашитым центом
+    // объявила бы здоровую маржу иенового счёта неверной в сто раз.
+    let minor = snap.profile.currency.minor_per_unit();
     for p in &snap.positions {
-        let expected = value_cents(p.entry, p.qty, p.pd, p.qd) / lev;
+        let expected = value_minor(p.entry, p.qty, p.pd, p.qd, minor) / lev;
         if p.margin != expected {
             v(
                 &mut out,
@@ -1475,8 +1535,8 @@ mod invariant_tests {
             balance: 1_000_000,
             next_id: 2,
             positions: vec![
-                pos(1, 100, 5000, value_cents(5000, 100, 2, 3)),
-                pos(2, 200, 4000, value_cents(4000, 200, 2, 3)),
+                pos(1, 100, 5000, value_minor(5000, 100, 2, 3, 100)),
+                pos(2, 200, 4000, value_minor(4000, 200, 2, 3, 100)),
             ],
             pendings: vec![],
             closed: vec![],
@@ -1736,16 +1796,16 @@ mod netting_tests {
         // Лонг, вход 5300, выход 5600, сворачиваем 150 из 400:
         // (5600−5300)·150·100 / 10^5 = 45 центов.
         assert_eq!(
-            realized_on_close(PosSide::Long, 5300, 5600, 150, PD, QD),
+            realized_on_close(PosSide::Long, 5300, 5600, 150, PD, QD, 100),
             45
         );
         // Шорт зеркально: прибыль при падении.
         assert_eq!(
-            realized_on_close(PosSide::Short, 5600, 5300, 150, PD, QD),
+            realized_on_close(PosSide::Short, 5600, 5300, 150, PD, QD, 100),
             45
         );
         assert_eq!(
-            realized_on_close(PosSide::Short, 5300, 5600, 150, PD, QD),
+            realized_on_close(PosSide::Short, 5300, 5600, 150, PD, QD, 100),
             -45
         );
     }
