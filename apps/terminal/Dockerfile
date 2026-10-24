@@ -16,7 +16,14 @@ COPY nginx.conf /etc/nginx/templates/default.conf.template
 # Рантайм-конфиг фронта (brand-URL, origin кабинета) рендерится из env при старте
 # (ADR-023). Дефолты пустые — образ окружение-агностичен; dev-значения даёт compose.
 COPY config.js.template /config.js.template
-COPY docker-entrypoint.d/40-terminal-config.sh /docker-entrypoint.d/40-terminal-config.sh
+# `--chmod=0755` ОБЯЗАТЕЛЕН, а не косметика (B-OPS-016). Образ nginx запускает
+# из /docker-entrypoint.d только исполняемые файлы, а неисполняемые ПРОПУСКАЕТ со
+# строкой «Ignoring ..., not executable» — то есть отказ выглядит как обычный лог.
+# Файл лежит в git с режимом 100644, и без этого флага /config.js в образе не
+# появляется вовсе, а `try_files` отдаёт на него index.html: конфиг «есть», но это
+# HTML. Бит режима в сборке задаём здесь, а не надеемся на режим файла в рабочем
+# дереве: checkout на Windows исполняемый бит не переносит в принципе.
+COPY --chmod=0755 docker-entrypoint.d/40-terminal-config.sh /docker-entrypoint.d/40-terminal-config.sh
 ENV FRAME_ANCESTORS="*" \
     NGINX_ENVSUBST_FILTER="FRAME_ANCESTORS" \
     BRAND_URL="" \
