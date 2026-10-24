@@ -119,7 +119,11 @@ async fn an_unavailable_bus_keeps_the_event() {
     );
     let dump = store.outbox_dump();
     assert_eq!(dump[0].1, 1, "попытка записана в строку");
-    assert_eq!(dump[0].3.as_deref(), Some("шина недоступна"), "и причина тоже");
+    assert_eq!(
+        dump[0].3.as_deref(),
+        Some("шина недоступна"),
+        "и причина тоже"
+    );
 }
 
 /// Шина вернулась — событие доходит. Это и есть «обязаны дойти, когда вернётся».
