@@ -121,6 +121,7 @@ mod tests {
                 qd: 4,
                 sl: None,
                 tp: None,
+                lev: 1,
             },
         ];
         for e in j.seal(1_700_000_000_000, &Origin::Client, &kinds) {

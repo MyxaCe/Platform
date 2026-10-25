@@ -2791,6 +2791,7 @@ mod invariant_wiring_tests {
                 margin: 5_000,
                 sl: None,
                 tp: None,
+                leverage: 1,
             }],
             pendings: vec![],
             closed: vec![],

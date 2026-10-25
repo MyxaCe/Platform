@@ -34,6 +34,7 @@ fn trade_events(j: &Journal) -> Vec<broker::journal::AccountEvent> {
                 qd: 3,
                 sl: None,
                 tp: Some(39_000),
+                lev: 1,
             },
         ],
     );

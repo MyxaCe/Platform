@@ -211,6 +211,19 @@ pub enum EventKind {
         qd: u8,
         sl: Option<i64>,
         tp: Option<i64>,
+        /// Плечо, под которым позиция открыта (TRM-53).
+        ///
+        /// **Едет в записи, потому что маржа пересчитывается свёрткой.** Записи
+        /// несут входные данные, а не результат; маржа считается как
+        /// `нотионал / плечо`, значит плечо — такой же вход, как цена и объём.
+        /// Без него свёртка считала бы старые позиции по сегодняшней настройке
+        /// площадки, и смена плеча переписывала бы маржу задним числом у всех
+        /// открытых позиций разом.
+        ///
+        /// У записей, написанных до появления поля, плечо равно **1**: другого
+        /// в терминале не было. Их канон при этом не меняется — запись
+        /// подписана своим текстом (`AccountEvent::canon`).
+        lev: i128,
     },
     /// Доливка: к позиции добавлен объём по своей цене (неттинг).
     PositionIncreased {
@@ -492,6 +505,22 @@ fn profile_added_later(fs: &[(&str, &str)]) -> Result<AccountProfile, BadRecord>
     })
 }
 
+/// Плечо записи об открытии, появившееся позже (TRM-53).
+///
+/// Нет поля — значит **1**: до TRM-53 другого плеча в терминале не было, и это
+/// факт их истории, а не умолчание на всякий случай. Поле, которое есть, но не
+/// читается числом или не больше нуля, — **отказ**: плечо делит нотионал, и
+/// ноль здесь уронил бы расчёт, а отрицательное дало бы отрицательную маржу.
+fn lev_added_later(fs: &[(&str, &str)]) -> Result<i128, BadRecord> {
+    match fs.iter().find(|(k, _)| *k == "lev") {
+        None => Ok(1),
+        Some((_, v)) => match v.parse::<i128>() {
+            Ok(l) if l > 0 => Ok(l),
+            _ => Err(BadRecord("плечо записи не положительное число")),
+        },
+    }
+}
+
 fn side_of(fs: &[(&str, &str)], key: &str) -> Result<PosSide, BadRecord> {
     match pick(fs, key)? {
         "long" => Ok(PosSide::Long),
@@ -532,8 +561,8 @@ impl EventKind {
             }
             EventKind::Deposited { amount } => format!("deposited amount={amount}"),
             EventKind::Withdrawn { amount } => format!("withdrawn amount={amount}"),
-            EventKind::PositionOpened { id, instrument, side, qty, entry, pd, qd, sl, tp } => format!(
-                "position_opened id={id} instrument={instrument} side={} qty={qty} entry={entry} pd={pd} qd={qd} sl={} tp={}",
+            EventKind::PositionOpened { id, instrument, side, qty, entry, pd, qd, sl, tp, lev } => format!(
+                "position_opened id={id} instrument={instrument} side={} qty={qty} entry={entry} pd={pd} qd={qd} sl={} tp={} lev={lev}",
                 side_tag(*side),
                 opt(*sl),
                 opt(*tp)
@@ -611,6 +640,7 @@ impl EventKind {
                 qd: num(&f, "qd")?,
                 sl: num_opt(&f, "sl")?,
                 tp: num_opt(&f, "tp")?,
+                lev: lev_added_later(&f)?,
             },
             "position_increased" => EventKind::PositionIncreased {
                 id: num(&f, "id")?,
@@ -923,9 +953,14 @@ impl ReplayState {
                 qd,
                 sl,
                 tp,
+                lev: rec_lev,
             } => {
                 self.next_id = self.next_id.max(*id);
                 self.positions.push(Position {
+                    // Плечо записи ложится НА ПОЗИЦИЮ уже сейчас, а маржу
+                    // по-прежнему считает плечо свёртки: денежный путь трогаем
+                    // отдельным шагом, после того как канон показан (TRM-53).
+                    leverage: *rec_lev,
                     id: *id,
                     instrument: *instrument,
                     side: *side,
@@ -1525,6 +1560,7 @@ mod tests {
                 qd: 3,
                 sl: Some(4900),
                 tp: None,
+                lev: 1,
             },
             EventKind::PositionIncreased {
                 id: 1,
@@ -1718,6 +1754,56 @@ mod tests {
         let fault = Journal::load(1, 10_000_000, vec![stored])
             .expect_err("чужой отпечаток обязан ловиться — иначе первый тест ничего не значит");
         assert_eq!(fault, JournalFault::Tampered { seq: 1 });
+    }
+
+    /// **Запись об открытии, написанная до появления плеча, переигрывается с
+    /// плечом 1 и даёт ту же маржу** (TRM-53, проверка ДО работы).
+    ///
+    /// Написана прежде, чем в запись добавлено поле плеча, и в этом её смысл:
+    /// она закрепляет поведение, которое добавление обязано **сохранить**.
+    /// Если после правки старая запись перестанет читаться или даст другую
+    /// маржу — это увидит она, а не прод.
+    ///
+    /// Почему именно маржа. Записи журнала несут входные данные, а не
+    /// результат: маржа пересчитывается при свёртке, и делает это **по
+    /// плечу**. Значит плечо — скрытый вход свёртки, и у старых записей он
+    /// обязан остаться единицей: другого в терминале не было.
+    ///
+    /// Строка настоящая, снята с журнала счёта на контуре.
+    #[test]
+    fn a_pre_leverage_opening_replays_at_leverage_one() {
+        const OLD: &str =
+            "position_opened id=1 instrument=2 side=long qty=1000 entry=239883 pd=2 qd=4 sl=- tp=-";
+        // 239883 × 1000 × 100 / 10^(2+4) = 23988 наименьших единиц при плече 1.
+        const MARGIN_AT_LEV_1: Cents = 23_988;
+
+        let kind = EventKind::decode(OLD).expect("старая запись обязана читаться");
+        let mut st = ReplayState::new(1_000_000);
+        st.profile = AccountProfile::legacy_demo(UserId(1));
+        st.apply(&kind, 1);
+
+        let p = st
+            .positions
+            .first()
+            .expect("позиция обязана восстановиться");
+        assert_eq!(
+            p.margin, MARGIN_AT_LEV_1,
+            "маржа старой записи обязана считаться по плечу 1 — другого у неё не было"
+        );
+        // И САМО плечо, восстановленное из записи, — единица.
+        //
+        // Проверяется отдельно от маржи намеренно: пока маржу считает плечо
+        // свёртки, утверждение о марже до поля записи не дотягивается, и
+        // подмена умолчания на ноль осталась бы незамеченной. Нашлось
+        // мутацией «нет поля — значит 0».
+        //
+        // Ноль здесь не абстрактная порча: плечо делит нотионал, и ноль
+        // уронил бы расчёт маржи делением на ноль в тот день, когда маржу
+        // начнёт считать плечо позиции.
+        assert_eq!(
+            p.leverage, 1,
+            "у записи без поля плечо обязано быть единицей, а не нулём и не чем-то ещё"
+        );
     }
 
     /// **Запись под СТАРЫМ именем читается новым видом и сохраняет подпись.**
@@ -2042,6 +2128,7 @@ mod tests {
                 qd: 3,
                 sl: None,
                 tp: None,
+                lev: 1,
             },
         ];
         for (i, k) in kinds.iter().enumerate() {
