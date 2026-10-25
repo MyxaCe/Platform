@@ -201,6 +201,12 @@ pub enum BrokerError {
     UnknownPending,
     /// Вывод больше, чем свободно (за вычетом занятого под маржу).
     InsufficientFunds,
+    /// Счёта нет. Отличается от «счёт пуст»: пустой счёт существует.
+    UnknownAccount,
+    /// Операция только для демо-счёта (TRM-54).
+    NotADemoAccount,
+    /// На счёте есть открытые позиции или ордера, а операция требует плоского.
+    AccountNotFlat,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1281,6 +1287,45 @@ impl Broker {
             outbox: Vec::new(),
         };
         self.accounts.insert(user, a);
+    }
+
+    /// Сбросить демо-счёт к стартовому остатку (TRM-54).
+    ///
+    /// **Владелец денежного числа — терминал.** Кабинет отражает, а не пишет:
+    /// до этой ручки он правил свою копию у себя, и следующее же событие о
+    /// балансе возвращало прежнюю сумму — сброс отменялся сам.
+    ///
+    /// Отказывает в двух случаях, и оба названы:
+    ///
+    /// - **счёт не демо.** Сбрасывать настоящие деньги к «стартовой сумме»
+    ///   нечему: её там нет, реальный счёт открывается нулём;
+    /// - **счёт не плоский.** Сброс при открытых позициях оставил бы остаток
+    ///   от одной жизни счёта и позиции от другой. Закрывать их самим значило
+    ///   бы провести денежную операцию, которой никто не просил, — а закрытие
+    ///   позиции это сделка с ценой и результатом.
+    ///
+    /// Записывается **движением со знаком**, а не стартовой суммой: по журналу
+    /// должно восстанавливаться, сколько списали или добавили.
+    pub fn reset_demo(&mut self, user: UserId) -> Result<Cents, BrokerError> {
+        let start = self.start_balance;
+        let a = self
+            .accounts
+            .get_mut(&user)
+            .ok_or(BrokerError::UnknownAccount)?;
+        if a.profile.kind != AccountKind::Demo {
+            return Err(BrokerError::NotADemoAccount);
+        }
+        if !a.positions.is_empty() || !a.pendings.is_empty() {
+            return Err(BrokerError::AccountNotFlat);
+        }
+        let target = start_balance_for(a.profile.kind, start);
+        let adjustment = target - a.balance;
+        if adjustment == 0 {
+            return Ok(a.balance); // уже на стартовом: проводка без движения не нужна
+        }
+        a.balance += adjustment;
+        a.log(EventKind::DemoAccountReset { adjustment });
+        Ok(a.balance)
     }
 
     /// Применить модель тенанта к счёту (ADR-025, вариант A): смена принимается

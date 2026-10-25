@@ -30,6 +30,13 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Хуки репозитория — здесь, а не в чьей-то памяти (QA-08).
+#
+# `.git/hooks` не версионируется, поэтому хук, который каждый ставит руками,
+# стоит у того, кто и так помнит. Прогон запускают все, значит установка живёт
+# в нём: одна строка, идемпотентная, без вывода при успехе.
+git -C "${ROOT}" config core.hooksPath scripts/hooks 2>/dev/null || true
+
 if ! docker info >/dev/null 2>&1; then
   echo "[test.sh] Docker не отвечает — проверки НЕ выполнены (это не 'зелено')." >&2
   echo "[test.sh] Запустите Docker Desktop и повторите." >&2

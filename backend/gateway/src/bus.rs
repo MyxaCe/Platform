@@ -41,7 +41,7 @@
 use std::sync::Arc;
 
 use broker::journal::EventKind;
-use broker::{AccountSnapshot, Cents, ClosedDeal, PosSide};
+use broker::{AccountSnapshot, Cents, ClosedDeal, Currency, PosSide};
 use persistence::{OutboxRecord, Persistence};
 use serde::Serialize;
 
@@ -188,6 +188,36 @@ fn num(dec: &str) -> serde_json::Value {
     serde_json::from_str(dec).unwrap_or(serde_json::Value::Null)
 }
 
+/// Денежная величина на проводе — **тройкой** (Р-293, шаг 1).
+///
+/// # Почему тройкой, а не переименованием
+///
+/// `balanceCents` для счёта не в долларах врёт. Но `balanceMinor` оставил бы
+/// получателя там же, где были мы до `TRM-55`: **целое без единицы**. Угадать
+/// точность он может только одним способом — «наверное, сотые», — и мы бы
+/// перенесли дефект через границу вместо того, чтобы его закрыть.
+///
+/// Поэтому сумма, код валюты и число знаков стоят **вместе**: порознь они
+/// бессмысленны.
+///
+/// # Порядок перехода, и сокращать его нельзя
+///
+/// Шаг 1 (здесь): шлём **и старое поле, и тройку**, с тем же числом. Лишнее
+/// поле потребитель срезает молча — это безопасно, в отличие от нового
+/// значения перечня.
+/// Шаги 2–3 у потребителя: принять необязательной, затем обязательной.
+/// Шаг 4: перестать слать старое поле. **Снятое раньше четвёртого шага
+/// уронит разбор, и вместе с суммой потеряется всё событие.**
+///
+/// Ловушка названа заранее: пока валюта одна, числа совпадают и шаги кажутся
+/// лишними. Расхождение появится ровно тогда, когда заведут счёт в другой
+/// валюте, — то есть когда проверять уже никто не будет.
+fn money(data: &mut serde_json::Value, prefix: &str, amount: Cents, currency: Currency) {
+    data[format!("{prefix}Minor")] = cents(amount);
+    data["currency"] = serde_json::Value::from(currency.code());
+    data["currencyMinorUnits"] = serde_json::Value::from(currency.minor_units());
+}
+
 /// Центы → JSON-число. Деньги целые и остаются целыми.
 fn cents(v: i128) -> serde_json::Value {
     // За i64 центы не выйдут: это $92 квадриллиона. Насыщение вместо паники —
@@ -294,6 +324,13 @@ pub fn envelopes_for(
         .iter()
         .find(|k| matches!(k, EventKind::AccountOpened { .. }))
     {
+        let mut data = serde_json::json!({
+            "tenant": who.tenant,
+            "userId": who.sub,
+            "currency": after.profile.currency.code(),
+            "balanceCents": cents(*balance),
+        });
+        money(&mut data, "balance", *balance, after.profile.currency);
         out.push(Envelope {
             event_id: event_id(EV_ACCOUNT_OPENED, &format!("{}:{}", who.tenant, who.sub)),
             event: EV_ACCOUNT_OPENED.to_string(),
@@ -301,12 +338,7 @@ pub fn envelopes_for(
             occurred_at: occurred_at.clone(),
             source: SOURCE,
             subject: Some(who.sub.to_string()),
-            data: serde_json::json!({
-                "tenant": who.tenant,
-                "userId": who.sub,
-                "currency": CURRENCY,
-                "balanceCents": cents(*balance),
-            }),
+            data,
         });
     }
 
@@ -323,7 +355,14 @@ pub fn envelopes_for(
             );
             continue;
         };
-        out.push(trade_executed(who, &occurred_at, idx, deal, &f));
+        out.push(trade_executed(
+            who,
+            &occurred_at,
+            idx,
+            deal,
+            &f,
+            after.profile.currency,
+        ));
     }
 
     // --- terminal.balance.changed -------------------------------------------
@@ -338,6 +377,7 @@ pub fn envelopes_for(
             "balanceCents": cents(after.balance),
             "positions": positions_json(after, instrument),
         });
+        money(&mut data, "balance", after.balance, after.profile.currency);
         if let Some(r) = reason {
             // Предохранитель, а не вежливость: значение, которого нет в перечне
             // потребителя, роняет разбор ВСЕГО события, и остаток счёта в
@@ -418,6 +458,14 @@ fn balance_reason(
     {
         return Some("deposit");
     }
+    // Сброс демо-счёта (TRM-54). `reset` уже есть в перечне потребителя, так
+    // что причина доедет и ничего не сломает.
+    if kinds
+        .iter()
+        .any(|k| matches!(k, EventKind::DemoAccountReset { .. }))
+    {
+        return Some("reset");
+    }
     None
 }
 
@@ -467,6 +515,7 @@ fn trade_executed(
     idx: usize,
     deal: &ClosedDeal,
     f: &FeedInstrument,
+    currency: Currency,
 ) -> Envelope {
     // `price` — цена ИСПОЛНЕНИЯ (`exit`). Переименований нет: у потребителя это
     // поле уже значит исполнение, у нас зовётся иначе и означает то же (Р-193).
@@ -483,6 +532,7 @@ fn trade_executed(
         "executedAt": occurred_at,
         "realizedPnlCents": cents(deal.pnl),
     });
+    money(&mut data, "realizedPnl", deal.pnl, currency);
     if let Some(level) = deal.level {
         data["level"] = num(&decimal(level, deal.pd));
     }
@@ -1185,6 +1235,87 @@ mod tests {
             readable_reason("TRADE"),
             None,
             "перечень точный, а не похожий"
+        );
+    }
+
+    /// **Тройка едет рядом со старым полем и несёт то же число** (Р-293, шаг 1).
+    ///
+    /// Проверяется именно совпадение: пока валюта одна, оно обязано быть, и
+    /// расхождение здесь означало бы, что одна из двух дорог врёт уже сейчас.
+    #[test]
+    fn money_travels_as_amount_currency_and_precision() {
+        let evs = envelopes_for(
+            &who(5),
+            &before_empty(),
+            &after_one_deal(None, Some(false)),
+            &[],
+            &known,
+        );
+        let b = evs
+            .iter()
+            .find(|e| e.event == EV_BALANCE_CHANGED)
+            .expect("событие об остатке");
+        assert_eq!(
+            b.data["balanceMinor"], b.data["balanceCents"],
+            "то же число"
+        );
+        assert_eq!(b.data["currency"], "USD");
+        assert_eq!(b.data["currencyMinorUnits"], 2);
+
+        let t = trade_of(&evs);
+        assert_eq!(t.data["realizedPnlMinor"], t.data["realizedPnlCents"]);
+        assert_eq!(t.data["currencyMinorUnits"], 2);
+    }
+
+    /// **Старое поле остаётся на месте.** Снять его раньше, чем потребитель
+    /// перейдёт на тройку, значит уронить разбор — и потерять вместе с суммой
+    /// всё событие.
+    #[test]
+    fn the_old_field_is_still_sent() {
+        let evs = envelopes_for(
+            &who(1),
+            &before_empty(),
+            &empty_snap(),
+            &[EventKind::AccountOpened {
+                balance: 1_000_000,
+                profile: Default::default(),
+            }],
+            &known,
+        );
+        let e = evs
+            .iter()
+            .find(|e| e.event == EV_ACCOUNT_OPENED)
+            .expect("заведение счёта");
+        assert_eq!(e.data["balanceCents"], serde_json::json!(1_000_000));
+        assert_eq!(e.data["balanceMinor"], serde_json::json!(1_000_000));
+    }
+
+    /// Сброс демо-счёта называет себя причиной `reset` — она уже есть в
+    /// перечне потребителя, значит доедет и ничего не уронит.
+    #[test]
+    fn a_demo_reset_is_reported_as_reset() {
+        let mut after = empty_snap();
+        after.balance = 1_000_000;
+        let evs = envelopes_for(
+            &who(7),
+            &Before {
+                closed: 0,
+                balance: 900_000,
+            },
+            &after,
+            &[EventKind::DemoAccountReset {
+                adjustment: 100_000,
+            }],
+            &known,
+        );
+        let e = evs
+            .iter()
+            .find(|e| e.event == EV_BALANCE_CHANGED)
+            .expect("остаток изменился");
+        assert_eq!(e.data["reason"], "reset");
+        assert!(
+            CONSUMER_KNOWN_REASONS.contains(&"reset"),
+            "и эта причина потребителю известна"
         );
     }
 
