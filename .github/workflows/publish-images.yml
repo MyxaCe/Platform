@@ -443,10 +443,18 @@ jobs:
           # Вывод в файл, а НЕ в трубу: `cmd | head` отдаёт код `head`, и
           # код контейнера теряется. Я на этом ошибся в тот же день, когда
           # писал этот шаг.
+          # ИМЯ КОНТЕЙНЕРУ И СНЯТИЕ ПО ИМЕНИ — НЕ ПЕДАНТИЗМ.
+          # `timeout` убивает КЛИЕНТА `docker run`, а не контейнер: по
+          # истечении срока клиент уходит, а контейнер продолжает
+          # работать. Поймано на себе 25.10 — замер оставил на машине
+          # висеть лишний контейнер, и нашёлся он случайно.
+          imja="proba-${{ matrix.image }}-$GITHUB_RUN_ID"
+          docker rm -f "$imja" >/dev/null 2>&1 || true
           set +e
-          timeout 60 docker run --rm "$IMAGE_REF:$IMAGE_TAG" > vyhod.txt 2>&1
+          timeout 60 docker run --rm --name "$imja" "$IMAGE_REF:$IMAGE_TAG" > vyhod.txt 2>&1
           kod=$?
           set -e
+          docker rm -f "$imja" >/dev/null 2>&1 || true
           echo "код выхода: $kod, строк вывода: $(wc -l < vyhod.txt)"
           echo '--- вывод образа ---'
           head -30 vyhod.txt
