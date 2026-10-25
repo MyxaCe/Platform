@@ -151,9 +151,18 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         .unwrap_or_default();
     let sso = Arc::new(sso::Sso::new(jwks_url));
     let sso_enabled = sso.enabled() && std::env::var("SSO_DISABLED").ok().as_deref() != Some("1");
-    // Стартовый баланс демо-счёта. Дефолт $100k; в интеграции с платформой выравнивается
-    // под сайт (env DEMO_START_BALANCE_CENTS; целевое — per-tenant demoStartBalanceCents из
-    // CMS, когда появится server-side ключ, ADR-023).
+    // Стартовый баланс демо-счёта. Дефолт $100k; сегодня задаётся окружением
+    // (env DEMO_START_BALANCE_CENTS), то есть **меняется только выпуском** —
+    // а это настройка площадки, и правило владельца требует админку.
+    //
+    // Целевое — читать его из CMS в момент открытия счёта, как `TenantSource`
+    // читает allow-list: `GET {CMS_BASE_URL}/cms/sites/{slug}` под `X-API-Key`.
+    // **Server-side ключ уже есть** и в проде настроен — прежняя редакция
+    // этого комментария говорила «когда появится», и это было неправдой
+    // полгода. Осталось одно: несёт ли ответ площадки такое поле. Пока не
+    // несёт — умолчание здесь не выдумываем (то же правило, что у порога
+    // принудительного закрытия: придуманное у нас число молча разошлось бы с
+    // тем, по которому считает источник, и обе стороны были бы «правы»).
     let start_cents = std::env::var("DEMO_START_BALANCE_CENTS")
         .ok()
         .and_then(|s| s.parse::<i128>().ok())
