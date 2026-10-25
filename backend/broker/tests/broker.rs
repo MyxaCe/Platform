@@ -1120,7 +1120,7 @@ fn the_compensation_replays_from_its_own_amount() {
 
     // Переигрываем НАСТОЯЩИМ журналом, как это делает шлюз, а не синтетикой:
     // проверять надо тот путь, которым счёт поднимается после перезапуска.
-    let mut j = broker::journal::Journal::new(10, 20_000);
+    let mut j = broker::journal::Journal::new(20_000);
     for e in j.seal(1, &broker::journal::Origin::System, &kinds) {
         j.commit(e).expect("лента");
     }
@@ -1325,7 +1325,7 @@ fn the_margin_invariant_speaks_the_accounts_currency() {
         )
         .unwrap();
         assert_eq!(
-            broker::check_snapshot(&b.snapshot(ALICE), 1),
+            broker::check_snapshot(&b.snapshot(ALICE)),
             vec![],
             "{code}: счёт здоров, и проверка обязана это видеть"
         );

@@ -80,7 +80,7 @@ fn rec(id: &str) -> OutboxRecord {
 
 async fn store_with(ids: &[&str]) -> Arc<MemoryStore> {
     let store = Arc::new(MemoryStore::new());
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     let out: Vec<OutboxRecord> = ids.iter().map(|i| rec(i)).collect();
     store
         .save_account(U, &snap(), &opening(&j), &out)

@@ -37,7 +37,7 @@ impl Rig {
     fn new() -> Self {
         Self {
             b: Broker::new(START, 1),
-            j: Journal::new(1, START),
+            j: Journal::new(START),
             at: 1_700_000_000_000,
         }
     }

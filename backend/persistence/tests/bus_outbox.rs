@@ -50,7 +50,7 @@ fn rec(id: &str) -> OutboxRecord {
 #[tokio::test]
 async fn saved_envelope_is_offered_to_the_relay() {
     let store = MemoryStore::new();
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     store
         .save_account(U, &snapshot(10_000_000), &opening(&j), &[rec("e-1")])
         .await
@@ -67,7 +67,7 @@ async fn saved_envelope_is_offered_to_the_relay() {
 #[tokio::test]
 async fn published_row_is_not_offered_again() {
     let store = MemoryStore::new();
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     store
         .save_account(U, &snapshot(10_000_000), &opening(&j), &[rec("e-1")])
         .await
@@ -90,7 +90,7 @@ async fn published_row_is_not_offered_again() {
 #[tokio::test]
 async fn failure_is_written_into_the_row() {
     let store = MemoryStore::new();
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     store
         .save_account(U, &snapshot(10_000_000), &opening(&j), &[rec("e-1")])
         .await
@@ -120,7 +120,7 @@ async fn failure_is_written_into_the_row() {
 #[tokio::test]
 async fn claimed_row_is_leased() {
     let store = MemoryStore::new();
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     store
         .save_account(U, &snapshot(10_000_000), &opening(&j), &[rec("e-1")])
         .await
@@ -142,14 +142,14 @@ async fn claimed_row_is_leased() {
 #[tokio::test]
 async fn the_same_fact_written_twice_is_one_row() {
     let store = MemoryStore::new();
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     let sealed = opening(&j);
     store
         .save_account(U, &snapshot(10_000_000), &sealed, &[rec("e-1")])
         .await
         .unwrap();
     // Второй заход: журнал уже другой (номера не повторяются), конверт тот же.
-    let mut j2 = Journal::new(1, 10_000_000);
+    let mut j2 = Journal::new(10_000_000);
     for e in sealed {
         j2.commit(e).unwrap();
     }
@@ -171,7 +171,7 @@ async fn the_same_fact_written_twice_is_one_row() {
 #[tokio::test]
 async fn rejected_write_leaves_no_envelope() {
     let store = MemoryStore::new();
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     let mut bad = opening(&j);
     bad.extend(opening(&j)); // две записи с номером 1 — повтор, отказ журнала
 
@@ -224,7 +224,7 @@ async fn envelope_survives_a_restart() {
         .await
         .unwrap();
 
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     store
         .save_account(U, &snapshot(10_000_000), &opening(&j), &[rec("live-1")])
         .await

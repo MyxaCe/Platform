@@ -65,7 +65,7 @@ fn snapshot() -> AccountSnapshot {
 #[tokio::test]
 async fn memory_store_round_trips_the_journal() {
     let store = MemoryStore::new();
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     let events = trade_events(&j);
     store
         .save_account(U, &snapshot(), &events, &[])
@@ -82,7 +82,7 @@ async fn memory_store_round_trips_the_journal() {
     assert_eq!(lane, events, "поднялось ровно то, что положили");
 
     // И цепочка сходится после подъёма — иначе хранилище что-то потеряло по дороге.
-    let rebuilt = Journal::load(1, 10_000_000, lane).expect("цепочка обязана сойтись");
+    let rebuilt = Journal::load(10_000_000, lane).expect("цепочка обязана сойтись");
     assert_eq!(rebuilt.replay().balance, 10_250_000);
     let op = rebuilt
         .events()
@@ -102,7 +102,7 @@ async fn memory_store_round_trips_the_journal() {
 #[tokio::test]
 async fn memory_store_refuses_to_overwrite_or_skip() {
     let store = MemoryStore::new();
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     let events = trade_events(&j);
     store
         .save_account(U, &snapshot(), &events, &[])
@@ -113,7 +113,7 @@ async fn memory_store_refuses_to_overwrite_or_skip() {
     assert!(again.is_err(), "повтор номера обязан быть отказом");
 
     // И пропуск номера тоже: дыра в ленте — потерянная история.
-    let gap = Journal::load(1, 10_000_000, events.clone()).unwrap();
+    let gap = Journal::load(10_000_000, events.clone()).unwrap();
     let mut next = gap.seal(
         1_700_000_060_000,
         &Origin::Client,
@@ -172,7 +172,7 @@ async fn postgres_journal_is_append_only_at_the_database_level() {
         .await
         .unwrap();
 
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     let events = trade_events(&j);
     store
         .save_account(U, &snapshot(), &events, &[])
@@ -187,7 +187,7 @@ async fn postgres_journal_is_append_only_at_the_database_level() {
         .expect("журнал обязан подняться")
         .1;
     assert_eq!(lane, events, "из БД поднялось ровно то, что записали");
-    Journal::load(1, 10_000_000, lane).expect("цепочка обязана сойтись после круга через БД");
+    Journal::load(10_000_000, lane).expect("цепочка обязана сойтись после круга через БД");
 
     // Неизменяемость — не на честном слове приложения: правка и удаление запрещены
     // самой базой.
@@ -334,7 +334,7 @@ async fn a_row_written_in_the_old_shape_still_loads() {
         "канон обязан приехать из базы как есть, а не пересобраться"
     );
 
-    Journal::load(1, 0, lane).expect(
+    Journal::load(0, lane).expect(
         "журнал со старой записью обязан сойтись: иначе выкатка отправит в карантин все счета",
     );
 }

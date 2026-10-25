@@ -89,9 +89,9 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|e| format!("нет связи с БД: {e}"))?;
 
-    // Плечо и стартовый баланс берутся так же, как их берёт шлюз: свёртка должна
-    // считаться теми же числами, иначе «тот же журнал» дал бы другое состояние.
-    let leverage: i128 = 1;
+    // Стартовый баланс берётся так же, как его берёт шлюз: свёртка должна
+    // считаться теми же числами, иначе «тот же журнал» дал бы другое
+    // состояние. Плечо свёртке больше не передаётся — оно в записях (TRM-53).
     let start_balance: i128 = std::env::var("DEMO_START_BALANCE_CENTS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -117,7 +117,7 @@ async fn run() -> Result<(), String> {
 
     // Цепочка проверяется ДО объявления. Писать поверх испорченной ленты нельзя:
     // новая запись закрепила бы порчу своим отпечатком.
-    let journal = Journal::load(leverage, start_balance, events)
+    let journal = Journal::load(start_balance, events)
         .map_err(|e| format!("журнал не прошёл проверку, объявление не делается: {e}"))?;
 
     let at_ms = std::time::SystemTime::now()
