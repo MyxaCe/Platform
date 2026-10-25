@@ -527,3 +527,70 @@ test('хейкин-аши живёт так же, как обычные свеч
 
   assert.deepEqual(term.errors, [], `живые сделки не должны ронять хейкин: ${term.errors.join(' | ')}`);
 });
+
+// ---- 6. Незаведённый счёт назван, а не показан нулём ------------------------
+
+test('счёт ещё не заведён: прочерки И названная причина, а не $0.00', async (t) => {
+  // Счёт заводится первой сделкой, а не регистрацией (TRM-46). Шлюз до этого
+  // отдаёт `opened: false` и `null` вместо денег (TRM-58).
+  //
+  // Проверяется ровно одно: что НУЛЯ НА ЭКРАНЕ НЕТ. `usd(null)` печатает
+  // «$0.00» — без правки экран показал бы правдоподобный пустой счёт вместо
+  // «счёта ещё нет». Это BUG-011 ещё раз: ноль — правдоподобный остаток, по
+  // нему принимают решение.
+  //
+  // И прочерков мало: те же пять прочерков рисует обрыв связи. Поэтому
+  // состояние обязано быть НАЗВАНО словами.
+  //
+  // Сессия нужна настоящая: без неё опрос счёта уходит раньше по ветке
+  // «сессии нет», и проверялось бы не то. Первая редакция этой проверки
+  // именно так и упала — показывала NO CABINET SESSION.
+  const term = await withParent(t, {
+    routes: {
+      '/account': () => ({
+        opened: false,
+        balance: null,
+        equity: null,
+        used_margin: null,
+        free_margin: null,
+        open_pnl: null,
+        model: null,
+        negative_balance_protection: true,
+      }),
+    },
+  });
+  await term.page.evaluate(() => window.__send({ type: 'sso.token', token: 'handoff-abc' }));
+  await settle(term.page, 1500);
+
+  const frame = term.page.frames().find((f) => f.url().includes('site=apex-ru'));
+  assert.ok(frame, 'терминал обязан быть во фрейме');
+
+  const seen = await frame.evaluate(() => {
+    const txt = (id) => (document.getElementById(id) || {}).textContent;
+    const warn = document.getElementById('acctWarn');
+    return {
+      fields: {
+        balance: txt('mBalance'),
+        equity: txt('mEquity'),
+        margin: txt('mMargin'),
+        free: txt('mFree'),
+        pnl: txt('mPnl'),
+      },
+      warnHidden: warn ? warn.hidden : null,
+      warnText: warn ? warn.textContent : null,
+      badgeHidden: (document.getElementById('modelBadge') || {}).hidden,
+    };
+  });
+
+  for (const [name, v] of Object.entries(seen.fields)) {
+    assert.notEqual(v, '$0.00', `${name}: ноль вместо «счёта нет» — это BUG-011`);
+    assert.equal(v, '—', `${name}: ожидался прочерк, получено ${v}`);
+  }
+  assert.equal(seen.warnHidden, false, 'причина обязана быть видна: прочерков мало');
+  assert.match(
+    String(seen.warnText),
+    /FIRST TRADE/,
+    `состояние обязано быть названо словами, показано: ${seen.warnText}`,
+  );
+  assert.equal(seen.badgeHidden, true, 'модель ещё не выбрана — значка быть не должно');
+});

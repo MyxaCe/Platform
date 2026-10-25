@@ -160,6 +160,10 @@ function stubApi(routes, sessionTtl) {
     '/stats/1': () => STATS,
     '/stats/2': () => STATS,
     '/account': () => ({
+      // `opened: true` — заглушка описывает ЗАВЕДЁННЫЙ счёт. Без этого поля
+      // экран считал бы счёт заведённым по умолчанию, то есть проверял бы не
+      // тот случай (TRM-58).
+      opened: true,
       balance: 1000000, equity: 1001234, used_margin: 20000, free_margin: 981234,
       open_pnl: 1234, model: 'netting',
     }),

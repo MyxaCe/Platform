@@ -42,14 +42,25 @@ async fn health_ok() {
     assert_eq!(status, StatusCode::OK);
 }
 
+/// До первой операции счёта НЕТ, и ручка говорит это словами.
+///
+/// Тест назывался `account_defaults_to_100k` и утверждал, что автономный
+/// терминал стартует с демо-счётом на $100k. С переходом на ленивое
+/// заведение (TRM-46) это перестало быть правдой — но тест продолжал
+/// проходить: ручка подставляла стартовую настройку площадки вместо
+/// остатка, и подстановка изображала счёт, которого нет (TRM-58).
+///
+/// **На ней держались три проверки.** Пока они были зелёными, расхождение
+/// между «счёт заводится первой сделкой» и «счёт есть всегда» никого не
+/// беспокоило: обе стороны подтверждались.
 #[tokio::test]
-async fn account_defaults_to_100k() {
-    // Автономный терминал стартует с одним демо-счётом на $100k (10_000_000 центов).
+async fn account_is_absent_until_the_first_operation() {
     let (status, acc) = send(&app(), "GET", "/account", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(acc["balance"], 10_000_000);
-    assert_eq!(acc["equity"], 10_000_000);
-    assert_eq!(acc["used_margin"], 0);
+    assert_eq!(acc["opened"], json!(false), "{acc}");
+    assert!(acc["balance"].is_null(), "остаток не выдумывается: {acc}");
+    assert!(acc["equity"].is_null(), "{acc}");
+    assert!(acc["used_margin"].is_null(), "{acc}");
 }
 
 #[tokio::test]

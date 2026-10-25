@@ -373,10 +373,10 @@ fn manual_posting_goes_through_the_same_path_and_is_distinguishable() {
         .operator()
         .expect("проводка обязана остаться ручной");
     assert_eq!((who.who(), who.incident()), ("ops@platform", "INC-42"));
-    assert_eq!(r.b.balance(U), START + 1_234_500);
+    assert_eq!(r.b.balance(U).expect("счёт заведён"), START + 1_234_500);
     assert_eq!(
         r.j.replay().balance,
-        r.b.balance(U),
+        r.b.balance(U).expect("счёт заведён"),
         "остаток обязан сходиться с проводками"
     );
 }

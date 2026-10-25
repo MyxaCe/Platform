@@ -1042,11 +1042,19 @@ impl Broker {
 
     // ---- Чтение -----------------------------------------------------------
 
-    pub fn balance(&self, user: UserId) -> Cents {
-        self.accounts
-            .get(&user)
-            .map(|a| a.balance)
-            .unwrap_or(self.start_balance)
+    /// Остаток счёта. `None` — **счёта нет**, и это не ноль (TRM-58).
+    ///
+    /// Прежде здесь стояло `unwrap_or(self.start_balance)`: несуществующему
+    /// счёту приписывалась настройка площадки. Число выглядело остатком
+    /// конкретного человека, и ручка `/account` отдавала его наружу.
+    /// Совпадало оно случайно — все счета сегодня демо и заводятся с той же
+    /// суммы; у реального счёта стартовый остаток ноль, и та же подстановка
+    /// показала бы ему чужие десять тысяч.
+    ///
+    /// Это ровно BUG-011, этажом ниже: «ноль — правдоподобный баланс, по нему
+    /// принимают решение». Правдоподобна и настройка площадки.
+    pub fn balance(&self, user: UserId) -> Option<Cents> {
+        self.accounts.get(&user).map(|a| a.balance)
     }
     pub fn used_margin(&self, user: UserId) -> Cents {
         self.accounts
@@ -1056,11 +1064,11 @@ impl Broker {
     }
     /// Свободная маржа — через equity, **одним определением на весь счёт**
     /// (TRM-41). Требует цены: нереализованный результат — часть средств.
-    pub fn free_margin(&self, user: UserId, marks: &HashMap<u32, i64>) -> Cents {
-        self.accounts
-            .get(&user)
-            .map(|a| a.free_margin(marks))
-            .unwrap_or(self.start_balance)
+    /// `None` — счёта нет (TRM-58). Прежде здесь тоже подставлялась стартовая
+    /// настройка площадки, и это было опаснее подставленного остатка:
+    /// свободная маржа — то число, по которому решают, пускать ли сделку.
+    pub fn free_margin(&self, user: UserId, marks: &HashMap<u32, i64>) -> Option<Cents> {
+        self.accounts.get(&user).map(|a| a.free_margin(marks))
     }
 
     /// Уровень маржи в процентах: `equity / занятая маржа`.
@@ -1107,8 +1115,11 @@ impl Broker {
             })
             .unwrap_or(0)
     }
-    pub fn equity(&self, user: UserId, marks: &HashMap<u32, i64>) -> Cents {
-        self.balance(user) + self.open_pnl(user, marks)
+    /// Средства счёта. `None` — счёта нет (TRM-58): складывать нечего, и ноль
+    /// здесь был бы таким же правдоподобным ответом на незаданный вопрос, как
+    /// подставленный остаток.
+    pub fn equity(&self, user: UserId, marks: &HashMap<u32, i64>) -> Option<Cents> {
+        self.balance(user).map(|b| b + self.open_pnl(user, marks))
     }
 
     // ---- Операции ---------------------------------------------------------
@@ -1163,7 +1174,16 @@ impl Broker {
         amount: Cents,
         marks: &HashMap<u32, i64>,
     ) -> Result<Cents, BrokerError> {
-        if amount > self.free_margin(user, marks) {
+        // Счёта нет — свободных средств нет, и вывод отказан (TRM-58).
+        //
+        // Прежде сравнение шло со стартовой настройкой площадки, и вывод с
+        // НЕСУЩЕСТВУЮЩЕГО счёта проходил: `acct()` заводил его тут же и
+        // выдавал стартовую сумму. Наружу эта ручка не выведена, так что
+        // следов в проде нет, но поведение было именно такое.
+        let Some(free) = self.free_margin(user, marks) else {
+            return Err(BrokerError::InsufficientFunds);
+        };
+        if amount > free {
             return Err(BrokerError::InsufficientFunds);
         }
         let a = self.acct(user);
@@ -1861,7 +1881,7 @@ mod invariant_tests {
             );
             // Уводим equity ровно в половину занятого: баланс + открытый P&L.
             let want_equity = used / 2;
-            let bal = b.balance(u);
+            let bal = b.balance(u).expect("счёт заведён");
             let need_pnl = want_equity - bal;
             // P&L длинной = (mark - entry) * объём в минорных единицах счёта.
             let unit = b.open_pnl(u, &HashMap::from([(1u32, 5001i64)]));
@@ -2173,7 +2193,7 @@ mod netting_tests {
             None,
         )
         .unwrap();
-        let before = b.balance(u);
+        let before = b.balance(u).expect("счёт заведён");
 
         b.open(
             u,
@@ -2206,7 +2226,7 @@ mod netting_tests {
             "маржа обязана уменьшиться пропорционально остатку"
         );
         assert_eq!(
-            b.balance(u) - before,
+            b.balance(u).expect("счёт заведён") - before,
             45,
             "реализован P&L только свёрнутой части"
         );
@@ -2278,7 +2298,7 @@ mod netting_tests {
             None,
         )
         .unwrap();
-        let before = b.balance(u);
+        let before = b.balance(u).expect("счёт заведён");
 
         b.open(
             u,
@@ -2301,7 +2321,7 @@ mod netting_tests {
         assert_eq!(ps[0].entry, 5200, "остаток открыт по цене встречной сделки");
         assert_eq!(ps[0].margin, 780);
         assert_eq!(
-            b.balance(u) - before,
+            b.balance(u).expect("счёт заведён") - before,
             20,
             "реализован P&L только закрытой части"
         );

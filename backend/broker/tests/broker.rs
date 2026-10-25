@@ -33,8 +33,11 @@ fn open_locks_margin() {
     let mut b = Broker::new(1_000_000, 1);
     open(&mut b, PosSide::Long, 6_000_000);
     assert_eq!(b.used_margin(ALICE), 60_000);
-    assert_eq!(b.free_margin(ALICE, &no_marks()), 940_000);
-    assert_eq!(b.balance(ALICE), 1_000_000);
+    assert_eq!(
+        b.free_margin(ALICE, &no_marks()).expect("счёт заведён"),
+        940_000
+    );
+    assert_eq!(b.balance(ALICE).expect("счёт заведён"), 1_000_000);
 }
 
 #[test]
@@ -85,7 +88,7 @@ fn close_realizes_pnl_and_records_history() {
     let id = open(&mut b, PosSide::Long, 6_000_000);
     let pnl = b.close(ALICE, id, 6_100_000).unwrap();
     assert_eq!(pnl, 1000);
-    assert_eq!(b.balance(ALICE), 1_001_000);
+    assert_eq!(b.balance(ALICE).expect("счёт заведён"), 1_001_000);
     assert!(b.positions(ALICE).is_empty());
     let closed = b.closed_deals(ALICE);
     assert_eq!(closed.len(), 1);
@@ -98,7 +101,7 @@ fn losing_trade_reduces_balance() {
     let mut b = Broker::new(1_000_000, 1);
     let id = open(&mut b, PosSide::Long, 6_000_000);
     b.close(ALICE, id, 5_900_000).unwrap();
-    assert_eq!(b.balance(ALICE), 999_000);
+    assert_eq!(b.balance(ALICE).expect("счёт заведён"), 999_000);
 }
 
 // ---- Лимитные ордера -------------------------------------------------------
@@ -240,7 +243,10 @@ fn snapshot_restore_roundtrip() {
     // Новый брокер (как после перезапуска) восстанавливает счёт из слепка.
     let mut fresh = Broker::new(1_000_000, 1);
     fresh.restore(ALICE, snap);
-    assert_eq!(fresh.balance(ALICE), b.balance(ALICE));
+    assert_eq!(
+        fresh.balance(ALICE).expect("счёт заведён"),
+        b.balance(ALICE).expect("счёт заведён")
+    );
     assert_eq!(fresh.pendings(ALICE).len(), 1);
     assert_eq!(fresh.closed_deals(ALICE).len(), 1);
     assert_eq!(fresh.users(), vec![ALICE]);
@@ -261,31 +267,61 @@ fn snapshot_of_unknown_user_is_start_balance() {
 
 // ---- Пополнение и вывод ----------------------------------------------------
 
+/// Пополнение увеличивает остаток — и до заведения счёта остатка НЕТ.
+///
+/// Прежняя редакция начиналась с `assert_eq!(b.balance(ALICE), 1_000_000)`
+/// на брокере, где счёт ALICE не заводили. Тест **закреплял подстановку**:
+/// несуществующему счёту приписывалась стартовая настройка площадки, и это
+/// выглядело ожидаемым поведением (TRM-58). Теперь первая строка утверждает
+/// обратное.
 #[test]
 fn deposit_increases_balance() {
     let mut b = Broker::new(1_000_000, 1);
-    assert_eq!(b.balance(ALICE), 1_000_000);
+    assert_eq!(
+        b.balance(ALICE),
+        None,
+        "счёта ещё нет — остатка нет, а не стартовая сумма площадки"
+    );
+    b.open_account(ALICE);
+    assert_eq!(b.balance(ALICE), Some(1_000_000));
     assert_eq!(b.deposit(ALICE, 500_000), 1_500_000);
-    assert_eq!(b.balance(ALICE), 1_500_000);
+    assert_eq!(b.balance(ALICE), Some(1_500_000));
 }
 
 #[test]
 fn withdraw_decreases_balance() {
     let mut b = Broker::new(1_000_000, 1);
+    b.open_account(ALICE);
     assert_eq!(b.withdraw(ALICE, 400_000, &no_marks()).unwrap(), 600_000);
-    assert_eq!(b.balance(ALICE), 600_000);
+    assert_eq!(b.balance(ALICE).expect("счёт заведён"), 600_000);
+}
+
+/// Со счёта, которого нет, вывести нельзя — и он от попытки не появляется.
+///
+/// Прежде сравнение шло со стартовой настройкой площадки: вывод проходил, а
+/// счёт заводился самой попыткой и отдавал стартовую сумму (TRM-58).
+#[test]
+fn cannot_withdraw_from_an_account_that_does_not_exist() {
+    let mut b = Broker::new(1_000_000, 1);
+    assert_eq!(
+        b.withdraw(ALICE, 1, &no_marks()),
+        Err(BrokerError::InsufficientFunds),
+        "счёта нет — выводить нечего"
+    );
+    assert_eq!(b.balance(ALICE), None, "неудачная попытка не заводит счёт");
 }
 
 #[test]
 fn cannot_withdraw_more_than_free() {
     let mut b = Broker::new(1_000_000, 1);
+    b.open_account(ALICE);
     assert_eq!(
         b.withdraw(ALICE, 1_000_001, &no_marks()),
         Err(BrokerError::InsufficientFunds)
     );
     assert_eq!(
         b.balance(ALICE),
-        1_000_000,
+        Some(1_000_000),
         "неудачный вывод не меняет баланс"
     );
 }
@@ -307,7 +343,7 @@ fn margin_locks_funds_from_withdrawal() {
         None,
     )
     .unwrap();
-    let free = b.free_margin(ALICE, &no_marks());
+    let free = b.free_margin(ALICE, &no_marks()).expect("счёт заведён");
     assert!(free < 1_000_000, "часть средств ушла под маржу");
     // Больше свободного вывести нельзя.
     assert_eq!(
@@ -669,16 +705,16 @@ fn unrealised_loss_reduces_free_margin() {
 
     assert_eq!(b.used_margin(ALICE), 10_000);
     assert_eq!(
-        b.free_margin(ALICE, &no_marks()),
+        b.free_margin(ALICE, &no_marks()).expect("счёт заведён"),
         10_000,
         "без движения цены"
     );
 
     let m = marks(1, 9_000); // -$100
     assert_eq!(b.open_pnl(ALICE, &m), -10_000);
-    assert_eq!(b.equity(ALICE, &m), 10_000);
+    assert_eq!(b.equity(ALICE, &m).expect("счёт заведён"), 10_000);
     assert_eq!(
-        b.free_margin(ALICE, &m),
+        b.free_margin(ALICE, &m).expect("счёт заведён"),
         0,
         "убыток съел всё свободное — по балансу его бы ещё хватало"
     );
@@ -693,7 +729,11 @@ fn admission_uses_the_same_number_as_the_screen() {
     open_t(&mut b, 1, PosSide::Long, 10_000, 10);
     let m = marks(1, 9_000);
 
-    assert_eq!(b.free_margin(ALICE, &m), 0, "свободного нет");
+    assert_eq!(
+        b.free_margin(ALICE, &m).expect("счёт заведён"),
+        0,
+        "свободного нет"
+    );
     assert_eq!(
         b.open(
             ALICE,
@@ -847,7 +887,7 @@ fn the_worst_position_goes_first_and_the_rest_stay() {
 
     // 1 проваливается на -$140, 2 — всего на -$10.
     let m = HashMap::from([(1u32, 3_600i64), (2u32, 4_900i64)]);
-    assert_eq!(b.equity(ALICE, &m), 5_000);
+    assert_eq!(b.equity(ALICE, &m).expect("счёт заведён"), 5_000);
     assert_eq!(b.margin_level_pct(ALICE, &m), Some(50), "порог достигнут");
 
     b.check(&m, false);
@@ -1051,7 +1091,11 @@ fn a_blown_account_is_brought_back_to_zero_by_a_named_posting() {
     b.check(&marks(1, 5_000), false);
 
     assert!(b.positions(ALICE).is_empty(), "позицию закрыли");
-    assert_eq!(b.balance(ALICE), 0, "остаток обязан вернуться к нулю");
+    assert_eq!(
+        b.balance(ALICE).expect("счёт заведён"),
+        0,
+        "остаток обязан вернуться к нулю"
+    );
 
     let ev = b.take_events(ALICE);
     let amount = ev
@@ -1076,7 +1120,10 @@ fn without_the_flag_the_balance_stays_negative() {
     b.check(&marks(1, 5_000), false);
 
     assert!(b.positions(ALICE).is_empty());
-    assert!(b.balance(ALICE) < 0, "защиты нет — долг остаётся");
+    assert!(
+        b.balance(ALICE).expect("счёт заведён") < 0,
+        "защиты нет — долг остаётся"
+    );
     let ev = b.take_events(ALICE);
     assert!(
         !ev.iter()
@@ -1099,12 +1146,15 @@ fn an_open_position_is_not_compensated_early() {
     let id2 = open_t(&mut b, 2, PosSide::Long, 10_000, 10);
     b.close(ALICE, id2, 7_000).expect("закрытие второй");
 
-    assert!(b.balance(ALICE) < 0, "остаток ушёл в минус");
+    assert!(
+        b.balance(ALICE).expect("счёт заведён") < 0,
+        "остаток ушёл в минус"
+    );
     assert!(!b.positions(ALICE).is_empty(), "но позиция ещё открыта");
 
     b.check(&marks(1, 10_000), false);
     assert!(
-        b.balance(ALICE) < 0,
+        b.balance(ALICE).expect("счёт заведён") < 0,
         "пока есть из чего выбраться, не гасим"
     );
 }
@@ -1126,7 +1176,7 @@ fn the_compensation_replays_from_its_own_amount() {
     }
     assert_eq!(
         j.replay().balance,
-        b.balance(ALICE),
+        b.balance(ALICE).expect("счёт заведён"),
         "свёртка обязана сойтись со счётом"
     );
     assert_eq!(j.replay().balance, 0, "и это ноль, выведенный из проводок");
@@ -1163,7 +1213,7 @@ fn a_real_account_opens_with_nothing() {
     let mut b = Broker::new(1_000_000, 1);
     assert!(b.open_account_with(ALICE, real_profile(ALICE)));
     assert_eq!(
-        b.balance(ALICE),
+        b.balance(ALICE).expect("счёт заведён"),
         0,
         "правило применяется при заведении, а не на словах"
     );
@@ -1347,7 +1397,7 @@ fn a_reset_is_recorded_as_a_signed_movement() {
     // Проторговали в минус: остаток 900 000.
     let id = open(&mut b, PosSide::Long, 6_000_000);
     b.close(ALICE, id, 5_000_000).expect("закрытие");
-    let lost = 1_000_000 - b.balance(ALICE);
+    let lost = 1_000_000 - b.balance(ALICE).expect("счёт заведён");
     assert!(lost > 0, "счёт обязан просесть, иначе проверять нечего");
     let _ = b.take_events(ALICE);
 

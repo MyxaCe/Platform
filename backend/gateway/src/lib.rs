@@ -1301,17 +1301,32 @@ struct ClosedDto {
 }
 #[derive(Serialize)]
 struct AccountDto {
+    /// Заведён ли счёт (TRM-58).
+    ///
+    /// **Счёт заводится лениво — при первой операции, а не при регистрации.**
+    /// Между регистрацией и первым действием счёта нет, и так выглядит каждый
+    /// новый человек. Прежде ручка этого не говорила: она подставляла
+    /// настройку площадки как остаток и выдавала несуществующий счёт за
+    /// обычный.
+    ///
+    /// `false` — все денежные поля `null`. Не ноль: ноль — правдоподобный
+    /// остаток, по нему принимают решение (BUG-011). Вопрос «сколько у вас
+    /// денег» такому счёту просто не задан.
+    opened: bool,
     /// Модель ведения позиций счёта (ADR-025): `hedging` | `netting`. Отдаётся
     /// наружу, потому что она меняет смысл каждой встречной сделки, и человек
     /// обязан видеть её ДО того, как не сойдётся баланс.
-    model: &'static str,
-    balance: i128,
-    equity: i128,
-    used_margin: i128,
+    ///
+    /// `null` у незаведённого счёта: модель ещё не выбрана, и «hedging» по
+    /// умолчанию было бы таким же выдуманным ответом, как остаток.
+    model: Option<&'static str>,
+    balance: Option<i128>,
+    equity: Option<i128>,
+    used_margin: Option<i128>,
     /// Свободная маржа — `equity - занятая маржа`, **одно определение на весь
     /// счёт** (TRM-41). До этого экран и допуск считали её по-разному, и человек
     /// видел не то число, по которому движок решает, пустить ли сделку.
-    free_margin: i128,
+    free_margin: Option<i128>,
     /// Уровень маржи в процентах. `null` — позиций нет, и уровень **не
     /// определён**: это не «бесконечно хорошо», вопрос такому счёту не задаётся.
     /// По нему же срабатывает принудительное закрытие.
@@ -1328,7 +1343,7 @@ struct AccountDto {
     /// регулятора, а наш выбор**, поэтому виден отдельным полем: клиент вправе
     /// знать, рискует ли он остаться должным.
     negative_balance_protection: bool,
-    open_pnl: i128,
+    open_pnl: Option<i128>,
 }
 #[derive(Serialize)]
 struct InstrumentDto {
@@ -1937,7 +1952,33 @@ async fn account(
     let user = require_user(&st, &headers).await?;
     let m = marks(&st).await;
     let b = st.broker.lock().await;
-    let balance = b.balance(user);
+
+    // Счёт заводится лениво — при первой операции (TRM-46). Пока его нет,
+    // денежных величин у человека нет тоже, и **выдумывать их здесь нельзя**:
+    // прежде ручка подставляла стартовую настройку площадки и выдавала её за
+    // остаток конкретного человека. Настройки, отданные наружу как деньги, —
+    // та же болезнь, что показанный вместо отказа ноль (BUG-011).
+    //
+    // Пороги и защита остатка отдаются и здесь: это свойства площадки, они
+    // известны и до заведения счёта, и человеку полезно видеть условия
+    // заранее.
+    if !b.has_account(user) {
+        return Ok(Json(AccountDto {
+            opened: false,
+            model: None,
+            balance: None,
+            equity: None,
+            used_margin: None,
+            free_margin: None,
+            margin_level_pct: None,
+            stop_out_level_pct: b.stop_out_pct(),
+            margin_call_level_pct: b.margin_call_pct(),
+            negative_balance_protection: b.negative_balance_protection(),
+            open_pnl: None,
+        }));
+    }
+
+    let balance = b.balance(user).expect("счёт есть: проверено выше");
     let open_pnl = b.open_pnl(user, &m);
     let used = b.used_margin(user);
     let equity = balance + open_pnl;
@@ -1951,22 +1992,23 @@ async fn account(
     // же. Вызов оставлен затем, чтобы формула не существовала дважды, — защита
     // от будущего расхождения, а не от текущего. Следующий, кто «упростит» её
     // обратно в арифметику по месту, вернёт нам ровно тот зазор.
-    let free = b.free_margin(user, &m);
+    let free = b.free_margin(user, &m).expect("счёт есть: проверено выше");
     let model = match b.model(user) {
         broker::PositionModel::Netting => "netting",
         broker::PositionModel::Hedging => "hedging",
     };
     Ok(Json(AccountDto {
-        model,
-        balance,
-        equity,
-        used_margin: used,
-        free_margin: free,
+        opened: true,
+        model: Some(model),
+        balance: Some(balance),
+        equity: Some(equity),
+        used_margin: Some(used),
+        free_margin: Some(free),
         margin_level_pct: b.margin_level_pct(user, &m),
         stop_out_level_pct: b.stop_out_pct(),
         margin_call_level_pct: b.margin_call_pct(),
         negative_balance_protection: b.negative_balance_protection(),
-        open_pnl,
+        open_pnl: Some(open_pnl),
     }))
 }
 
@@ -2290,6 +2332,11 @@ async fn send_margin_calls(st: &AppState, marks: &HashMap<u32, i64>) {
             seq: 0, // записей журнала здесь нет — номер не участвует в ключе
             at_ms: now_ms(),
         };
+        // Предупреждение бывает только у счёта с открытыми позициями —
+        // значит счёт существует. `expect` здесь документирует это условие, а
+        // не прячет случай: подстановка нуля отправила бы человеку письмо с
+        // выдуманными средствами.
+        let equity = equity.expect("маржин-колл бывает только у существующего счёта");
         let env = bus::margin_called(&who, level, stop_out, equity, used);
         eprintln!(
             "[margin] счёт {} на уровне {level}% — предупреждение отправлено (порог закрытия {:?})",
@@ -4097,7 +4144,12 @@ mod bus_wiring_tests {
             send(&app, "POST", "/deals/1/close", None).await,
             StatusCode::OK
         );
-        let lost = st.broker.lock().await.balance(DEFAULT_USER);
+        let lost = st
+            .broker
+            .lock()
+            .await
+            .balance(DEFAULT_USER)
+            .expect("счёт заведён");
         assert!(lost < 10_000_000, "счёт обязан просесть");
 
         assert_eq!(
@@ -4106,7 +4158,7 @@ mod bus_wiring_tests {
         );
         assert_eq!(
             st.broker.lock().await.balance(DEFAULT_USER),
-            10_000_000,
+            Some(10_000_000),
             "деньги меняет ТЕРМИНАЛ, а не кабинет у себя"
         );
 
@@ -4224,6 +4276,64 @@ mod margin_wiring_tests {
                 ask: px,
             },
         );
+    }
+
+    /// Незаведённый счёт назван словами, а не показан стартовой настройкой.
+    ///
+    /// **Счёт заводится при первой операции, а не при регистрации** — между
+    /// ними его нет, и так выглядит каждый новый человек. Ручка подставляла
+    /// сюда стартовую сумму площадки, и экран показывал её как остаток
+    /// конкретного человека (TRM-58).
+    ///
+    /// Сегодня число совпадало случайно: все счета демо и заводятся с той же
+    /// суммы. У реального счёта стартовый остаток ноль — та же подстановка
+    /// показала бы ему чужие десять тысяч.
+    #[tokio::test]
+    async fn an_account_that_does_not_exist_yet_is_named_not_invented() {
+        let st = build_state();
+        let app = router(st.clone());
+
+        let acc = get(&app, "/account").await;
+
+        assert_eq!(acc["opened"], serde_json::json!(false), "{acc}");
+        for f in [
+            "balance",
+            "equity",
+            "used_margin",
+            "free_margin",
+            "open_pnl",
+            "model",
+        ] {
+            assert!(
+                acc[f].is_null(),
+                "{f} у незаведённого счёта обязан быть null, а не числом: {acc}"
+            );
+        }
+        // Ноль здесь был бы не лучше настройки: ноль — правдоподобный остаток,
+        // по нему принимают решение (BUG-011).
+        assert_ne!(acc["balance"], serde_json::json!(0), "{acc}");
+
+        // Свойства ПЛОЩАДКИ известны и до заведения счёта — их скрывать не за
+        // что, человеку полезно видеть условия заранее.
+        assert!(
+            acc.get("negative_balance_protection").is_some(),
+            "защита остатка — свойство площадки, она известна: {acc}"
+        );
+
+        // А после первой операции счёт заведён, и цифры появляются.
+        price(&st, 1, 5_000_000).await;
+        assert_eq!(
+            post(
+                &app,
+                "/deals",
+                serde_json::json!({"instrument":1,"side":"buy","qty":1000})
+            )
+            .await,
+            StatusCode::OK
+        );
+        let acc = get(&app, "/account").await;
+        assert_eq!(acc["opened"], serde_json::json!(true), "{acc}");
+        assert!(acc["balance"].is_i64(), "{acc}");
     }
 
     /// Отказ не приходит на счёт, где экран показывает свободные деньги.

@@ -697,6 +697,9 @@ const ACCT_MSG = {
   'no-session': 'NO CABINET SESSION — TRADING UNAVAILABLE',
   unreachable: 'ACCOUNT UNREACHABLE — FIGURES MAY BE STALE',
   unknown: 'NO ACCOUNT DATA YET',
+  // Счёт заводится первой сделкой, а не регистрацией (TRM-58). До неё цифр
+  // нет — и голый прочерк читается как поломка, поэтому состояние НАЗВАНО.
+  'not-opened': 'ACCOUNT OPENS WITH YOUR FIRST TRADE — NO FIGURES YET',
 };
 function showAcctWarn(status) {
   const el = document.getElementById('acctWarn');
@@ -734,6 +737,17 @@ async function pollAccount() {
       // Сессии нет — цифр нет и быть не может: показываем прочерки, а не последнее
       // известное значение (оно было бы от чужого/прошлого счёта).
       if (st === 'no-session' || st === 'unknown') blankMetrics();
+      return;
+    }
+    if (a.opened === false) {
+      // Счёта ещё нет: шлюз отдаёт `null` вместо цифр, и подставлять сюда ноль
+      // нельзя — ноль правдоподобен, по нему принимают решение (BUG-011).
+      // Показываем прочерки И называем причину: прочерк без слов неотличим от
+      // сбоя связи, у которого прочерки те же.
+      blankMetrics();
+      showPositionModel(null);
+      const w = document.getElementById('acctWarn');
+      if (w) { w.hidden = false; w.textContent = ACCT_MSG['not-opened']; }
       return;
     }
     showPositionModel(a.model);
