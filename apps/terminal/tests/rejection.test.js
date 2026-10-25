@@ -121,3 +121,43 @@ test('текст говорит, ЧТО сделать, а не только ч�
     assert.match(t, /sell/i, `не названа сторона для продажи: ${t}`);
   }
 });
+
+// ---- Заведение счёта: сумму называет сайт (Р-293) ---------------------------
+
+/** Коды, которыми шлюз отказывает в ЗАВЕДЕНИИ счёта. */
+const OPEN_CODES = [
+  'demo_start_balance_not_set',
+  'demo_start_balance_unavailable',
+  'identity_store_unavailable',
+];
+
+test('отказ в заведении счёта объяснён, а не показан кодом', () => {
+  for (const code of OPEN_CODES) {
+    const t = Rejection.text(409, code);
+    assert.ok(!t.includes(code), `«${code}» показывается сырым кодом: ${t}`);
+    assert.ok(
+      !/terminal does not know/i.test(t),
+      `«${code}» уехал в запасную ветку: ${t}`,
+    );
+  }
+});
+
+test('три причины — три РАЗНЫХ текста: чинят их разные люди', () => {
+  const texts = OPEN_CODES.map((c) => Rejection.text(409, c));
+  assert.equal(new Set(texts).size, texts.length, `тексты совпадают: ${texts.join(' | ')}`);
+  // «Сумма не названа» чинит ВЛАДЕЛЕЦ в админке, и текст обязан это сказать:
+  // иначе человек напишет в поддержку, а чинится это правкой настройки.
+  assert.match(Rejection.text(409, 'demo_start_balance_not_set'), /admin panel/i);
+});
+
+test('отказ не обвиняет человека в его же запросе', () => {
+  // Все три — не про то, что он сделал. Если текст не скажет этого прямо,
+  // человек будет править заявку, в которой нечего править.
+  for (const code of OPEN_CODES) {
+    assert.match(
+      Rejection.text(409, code),
+      /nothing is wrong with your request|your request was fine/i,
+      `${code}: человек подумает, что виноват он: ${Rejection.text(409, code)}`,
+    );
+  }
+});

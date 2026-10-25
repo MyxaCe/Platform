@@ -1028,7 +1028,7 @@ impl Broker {
     /// деньги на счёте оставались без происхождения (найдено 24.10 живым
     /// прогоном). Разделять надо там, где разные факты, а не ловить их на выходе.
     pub fn open_account(&mut self, user: UserId) -> bool {
-        self.open_account_with(user, AccountProfile::legacy_demo(user))
+        self.open_account_with(user, AccountProfile::legacy_demo(user), self.start_balance)
     }
 
     /// Завести счёт с **названным профилем** и стартовым балансом по его роду
@@ -1038,11 +1038,30 @@ impl Broker {
     /// открывается нулём**. Ненулевой начальный баланс на реальном счёте — это
     /// деньги, взявшиеся ниоткуда, и решать это у места вызова нельзя, иначе
     /// однажды решат иначе.
-    pub fn open_account_with(&mut self, user: UserId, profile: AccountProfile) -> bool {
+    ///
+    /// `demo_start` — сумма, с которой открывается **демо**-счёт, и она
+    /// передаётся, а не читается из поля брокера.
+    ///
+    /// **Это та же развязка, что с плечом (TRM-53).** Сумма — настройка
+    /// площадки, её меняет владелец в админке; будь она полем брокера, правка
+    /// задним числом меняла бы то, с чего открывались прошлые счета. Как
+    /// вход она попадает в запись `AccountOpened { balance }` и остаётся в
+    /// истории навсегда: свёртка берёт остаток оттуда, а не из сегодняшней
+    /// настройки.
+    ///
+    /// **Ноль законен.** Демо-счёт на ноль — это решение площадки, а не
+    /// отсутствие значения; отличать «ноль» от «не сказали» обязан тот, кто
+    /// читает источник, и до сюда «не сказали» не доходит.
+    pub fn open_account_with(
+        &mut self,
+        user: UserId,
+        profile: AccountProfile,
+        demo_start: Cents,
+    ) -> bool {
         if self.accounts.contains_key(&user) {
             return false;
         }
-        let start = start_balance_for(profile.kind, self.start_balance);
+        let start = start_balance_for(profile.kind, demo_start);
         let mut a = Account {
             balance: start,
             profile,

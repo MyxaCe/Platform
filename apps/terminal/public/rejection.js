@@ -46,6 +46,16 @@
       'Your stop loss is already on the other side of the price — the position would close immediately. Move it below the current price for a buy, above it for a sell.',
     take_profit_already_reached:
       'Your take profit is already reached — the position would close immediately. Move it above the current price for a buy, below it for a sell.',
+    // Р-293. Счёт заводится первой операцией, и сумму для него называет САЙТ.
+    // Три кода, потому что чинят их три разных человека: владелец в админке,
+    // команда развёртывания, снова развёртывание. Один текст на всех отправил
+    // бы человека наугад — ровно то, что случилось 24.10 с кодами списка.
+    demo_start_balance_not_set:
+      'This site has not set a starting balance for demo accounts, so your account was not opened. Nothing is wrong with your request — the site owner sets this amount in the admin panel.',
+    demo_start_balance_unavailable:
+      'Site settings could not be reached, so your account was not opened. Your request was fine; this is a platform-side outage and is being fixed there.',
+    identity_store_unavailable:
+      'We could not confirm which site your account belongs to, so it was not opened. Nothing is wrong with your request — this is a platform-side outage.',
   };
 
   // НЕ закрыты здесь намеренно, и названы, чтобы следующий не считал их

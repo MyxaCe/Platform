@@ -1220,7 +1220,7 @@ fn a_real_account_opens_with_nothing() {
     );
 
     let mut b = Broker::new(1_000_000, 1);
-    assert!(b.open_account_with(ALICE, real_profile(ALICE)));
+    assert!(b.open_account_with(ALICE, real_profile(ALICE), b.start_balance()));
     assert_eq!(
         b.balance(ALICE).expect("счёт заведён"),
         0,
@@ -1233,7 +1233,7 @@ fn a_real_account_opens_with_nothing() {
 #[test]
 fn the_profile_travels_in_the_opening_record() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open_account_with(ALICE, real_profile(ALICE));
+    b.open_account_with(ALICE, real_profile(ALICE), b.start_balance());
     let ev = b.take_events(ALICE);
     match ev.first().expect("запись о заведении") {
         EventKind::AccountOpened { balance, profile } => {
@@ -1250,7 +1250,7 @@ fn the_profile_travels_in_the_opening_record() {
 #[test]
 fn the_profile_survives_a_snapshot_round_trip() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open_account_with(ALICE, real_profile(ALICE));
+    b.open_account_with(ALICE, real_profile(ALICE), b.start_balance());
     let snap = b.snapshot(ALICE);
     assert_eq!(snap.profile.kind, AccountKind::Real);
 
@@ -1263,7 +1263,7 @@ fn the_profile_survives_a_snapshot_round_trip() {
 #[test]
 fn trading_does_not_change_the_profile() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE));
+    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE), b.start_balance());
     let before = b.snapshot(ALICE).profile;
     open(&mut b, PosSide::Long, 6_000_000);
     assert_eq!(
@@ -1278,9 +1278,9 @@ fn trading_does_not_change_the_profile() {
 #[test]
 fn opening_an_existing_account_is_refused() {
     let mut b = Broker::new(1_000_000, 1);
-    assert!(b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE)));
+    assert!(b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE), b.start_balance()));
     assert!(
-        !b.open_account_with(ALICE, real_profile(ALICE)),
+        !b.open_account_with(ALICE, real_profile(ALICE), b.start_balance()),
         "счёт уже есть — подменять его род нельзя"
     );
     assert_eq!(b.snapshot(ALICE).profile.kind, AccountKind::Demo);
@@ -1315,7 +1315,7 @@ fn margin_scales_with_the_currency_not_with_a_hardwired_cent() {
     let expected = [("JPY", 100i128), ("USD", 10_000), ("BHD", 100_000)];
     for (code, want) in expected {
         let (mut b, profile) = account_in(code);
-        b.open_account_with(ALICE, profile);
+        b.open_account_with(ALICE, profile, b.start_balance());
         b.open(
             ALICE,
             &no_marks(),
@@ -1344,7 +1344,7 @@ fn unrealised_pnl_scales_with_the_currency() {
     let expected = [("JPY", 1i128), ("USD", 100), ("BHD", 1_000)];
     for (code, want) in expected {
         let (mut b, profile) = account_in(code);
-        b.open_account_with(ALICE, profile);
+        b.open_account_with(ALICE, profile, b.start_balance());
         b.open(
             ALICE,
             &no_marks(),
@@ -1369,7 +1369,7 @@ fn unrealised_pnl_scales_with_the_currency() {
 fn the_margin_invariant_speaks_the_accounts_currency() {
     for code in ["JPY", "USD", "BHD"] {
         let (mut b, profile) = account_in(code);
-        b.open_account_with(ALICE, profile);
+        b.open_account_with(ALICE, profile, b.start_balance());
         b.open(
             ALICE,
             &no_marks(),
@@ -1400,7 +1400,7 @@ fn the_margin_invariant_speaks_the_accounts_currency() {
 #[test]
 fn a_reset_is_recorded_as_a_signed_movement() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE));
+    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE), b.start_balance());
     let _ = b.take_events(ALICE);
 
     // Проторговали в минус: остаток 900 000.
@@ -1426,7 +1426,7 @@ fn a_reset_is_recorded_as_a_signed_movement() {
 #[test]
 fn a_reset_can_move_the_balance_down() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE));
+    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE), b.start_balance());
     b.deposit(ALICE, 500_000);
     let _ = b.take_events(ALICE);
 
@@ -1442,7 +1442,7 @@ fn a_reset_can_move_the_balance_down() {
 #[test]
 fn resetting_an_untouched_account_writes_nothing() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE));
+    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE), b.start_balance());
     let _ = b.take_events(ALICE);
     assert_eq!(b.reset_demo(ALICE).expect("сброс"), 1_000_000);
     assert!(b.take_events(ALICE).is_empty());
@@ -1454,13 +1454,17 @@ fn resetting_an_untouched_account_writes_nothing() {
 #[test]
 fn a_reset_is_refused_while_the_account_is_not_flat() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE));
+    b.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE), b.start_balance());
     open(&mut b, PosSide::Long, 6_000_000);
     assert_eq!(b.reset_demo(ALICE), Err(BrokerError::AccountNotFlat));
 
     // И с отложенным ордером тоже: он тоже обязательство счёта.
     let mut b2 = Broker::new(1_000_000, 1);
-    b2.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE));
+    b2.open_account_with(
+        ALICE,
+        AccountProfile::legacy_demo(ALICE),
+        b2.start_balance(),
+    );
     b2.place_pending(ALICE, 1, PosSide::Long, 1000, 5_000_000, PD, QD, None, None)
         .expect("ордер поставлен");
     assert_eq!(b2.reset_demo(ALICE), Err(BrokerError::AccountNotFlat));
@@ -1471,7 +1475,7 @@ fn a_reset_is_refused_while_the_account_is_not_flat() {
 #[test]
 fn a_real_account_cannot_be_reset() {
     let mut b = Broker::new(1_000_000, 1);
-    b.open_account_with(ALICE, real_profile(ALICE));
+    b.open_account_with(ALICE, real_profile(ALICE), b.start_balance());
     assert_eq!(b.reset_demo(ALICE), Err(BrokerError::NotADemoAccount));
 }
 
