@@ -414,13 +414,24 @@ jobs:
         env:
           OZHIDANIE: ${{ matrix.bez-okruzhenija }}
           SLOVO: ${{ matrix.slovo }}
+          ZADACHA: ${{ matrix.zadacha }}
         run: |
           set -uo pipefail
 
           case "$OZHIDANIE" in
             otkaz|start) ;;
+            # ТРЕТЬЕ ОБЪЯВЛЕНИЕ — «поведение известно и оно дефектно».
+            # Нужно там, где образ не отказывает и не стартует, а делает
+            # ХУЖЕ обоих: завершается успехом, не сделав ничего. Подвести
+            # такое под `start` значило бы благословить молчаливый успех,
+            # а не объявить вовсе — получить красный без причины.
+            # Красное здесь ожидаемо и несёт номер задачи.
+            defekt)
+              echo "::error::${{ matrix.image }}: поведение без окружения объявлено ДЕФЕКТНЫМ, см. ${ZADACHA:-задачу в матрице}"
+              echo "::error::красное здесь — не поломка проверки, а открытая задача. Снимается её закрытием и сменой объявления"
+              exit 1;;
             *)
-              echo "::error::для ${{ matrix.image }} не объявлено поведение без окружения (bez-okruzhenija: otkaz|start)"
+              echo "::error::для ${{ matrix.image }} не объявлено поведение без окружения (bez-okruzhenija: otkaz|start|defekt)"
               exit 1;;
           esac
           if [ "$OZHIDANIE" = otkaz ] && [ -z "$SLOVO" ]; then
