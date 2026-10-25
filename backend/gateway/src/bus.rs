@@ -284,6 +284,28 @@ pub struct Addressee<'a> {
     /// два перевода на одну и ту же сумму — разные события, а час и остаток у них
     /// могут совпасть. Номер в ленте не совпадает никогда: лента только
     /// дописывается, и повтор номера у нас — отказ записи.
+    /// Номер последней записи журнала счёта на момент операции.
+    ///
+    /// Едет на шину полем `accountSeq` **во всех** событиях о счёте (TRM-60,
+    /// §5), и это решение штаба: порядок нужен не только деньгам, но и
+    /// правилу «заведение приходит раньше сделки», которое иначе нечем
+    /// проверить.
+    ///
+    /// **Он у нас был и раньше — и уходил в необратимый отпечаток.**
+    /// `event_id` считается как UUIDv5 от `{user}:{seq}`, то есть номер влиял
+    /// на идентичность события, но потребителю не сообщался: достать его из
+    /// хеша нельзя. Не «забыли положить», а потратили на другое.
+    ///
+    /// **Временем его не заменить.** `occurred_at` считается ОДИН раз на
+    /// пачку и клонируется во все её конверты — внутри пачки он одинаков
+    /// побайтово, а между пачками разрешение миллисекунда: две операции в
+    /// одну миллисекунду неразличимы. Сортировка по времени дала бы ту же
+    /// болезнь, от которой это поле заводится.
+    ///
+    /// **Номер — ПАЧКИ, а не события.** Все события одной операции несут
+    /// один и тот же `accountSeq`. Поэтому правило потребителя, которое
+    /// перезаписывает значение, обязано применять событие при **строго
+    /// большем** номере: «не меньший» съел бы соседей по пачке.
     pub seq: u64,
     /// Момент запечатывания записей журнала.
     pub at_ms: i64,
@@ -327,6 +349,7 @@ pub fn envelopes_for(
         let mut data = serde_json::json!({
             "tenant": who.tenant,
             "userId": who.sub,
+            "accountSeq": who.seq,
             "currency": after.profile.currency.code(),
             "balanceCents": cents(*balance),
         });
@@ -374,6 +397,7 @@ pub fn envelopes_for(
         let mut data = serde_json::json!({
             "tenant": who.tenant,
             "userId": who.sub,
+            "accountSeq": who.seq,
             "balanceCents": cents(after.balance),
             "positions": positions_json(after, instrument),
         });
@@ -522,6 +546,7 @@ fn trade_executed(
     let mut data = serde_json::json!({
         "tenant": who.tenant,
         "userId": who.sub,
+        "accountSeq": who.seq,
         // Номер сделки в истории счёта — он же её адрес в `GET /deals/closed`.
         // Устойчив между перезапусками: история только дописывается.
         "tradeId": format!("{}:{}", who.user, idx),
@@ -571,6 +596,7 @@ pub fn margin_called(
     let mut data = serde_json::json!({
         "tenant": who.tenant,
         "userId": who.sub,
+        "accountSeq": who.seq,
         "marginLevelPct": cents(level_pct),
         "equityCents": cents(equity),
         "usedMarginCents": cents(used_margin),
@@ -896,6 +922,89 @@ mod tests {
             closed: 0,
             balance: 1_000_000,
         }
+    }
+
+    /// `accountSeq` едет во ВСЕХ событиях пачки и равен номеру записи.
+    ///
+    /// Поле заведено потому, что порядок у нас был и не сообщался: он уходил
+    /// в `event_id` — UUIDv5 от `{user}:{seq}`, необратимый. Проекция,
+    /// перезаписывающая остаток, упорядочивала события по приходу, и остаток
+    /// оказывался «тем, что применилось позже», а не самым новым (TRM-60).
+    #[test]
+    fn every_account_event_carries_the_journal_position() {
+        let evs = envelopes_for(
+            &who(42),
+            &before_empty(),
+            &after_one_deal(None, None),
+            &[EventKind::AccountOpened {
+                balance: 1_000_000,
+                profile: Default::default(),
+            }],
+            &known,
+        );
+        assert!(
+            evs.len() >= 3,
+            "ожидались заведение, сделка и остаток: {evs:?}"
+        );
+        for e in &evs {
+            assert_eq!(
+                e.data["accountSeq"],
+                serde_json::json!(42),
+                "событие {} уехало без позиции в журнале: {:?}",
+                e.event,
+                e.data
+            );
+        }
+    }
+
+    /// Номер — ПАЧКИ, а не события: все события операции несут один и тот же.
+    ///
+    /// Записано проверкой, потому что из этого следует форма правила у
+    /// потребителя: перезаписывающая проекция применяет событие при **строго
+    /// большем** номере. «Не меньший» съел бы соседей по той же пачке.
+    #[test]
+    fn one_batch_means_one_number_for_all_its_events() {
+        let evs = envelopes_for(
+            &who(7),
+            &before_empty(),
+            &after_one_deal(None, None),
+            &[EventKind::AccountOpened {
+                balance: 1_000_000,
+                profile: Default::default(),
+            }],
+            &known,
+        );
+        let nums: Vec<&serde_json::Value> = evs.iter().map(|e| &e.data["accountSeq"]).collect();
+        assert!(
+            nums.windows(2).all(|w| w[0] == w[1]),
+            "в одной пачке номера разошлись: {nums:?}"
+        );
+    }
+
+    /// В пачке ровно ОДНО событие об остатке.
+    ///
+    /// Сегодня это верно по построению — ветка `after.balance != before.balance`
+    /// одна. **Закрепляется проверкой, а не комментарием** (требование штаба):
+    /// на этом допущении стоит правило «применять при строго большем номере».
+    /// Появись второе событие об остатке в той же пачке — у них совпал бы
+    /// номер, и потребитель применил бы только первое, молча потеряв второе.
+    #[test]
+    fn a_batch_carries_at_most_one_balance_event() {
+        let evs = envelopes_for(
+            &who(7),
+            &before_empty(),
+            &after_one_deal(None, None),
+            &[EventKind::AccountOpened {
+                balance: 1_000_000,
+                profile: Default::default(),
+            }],
+            &known,
+        );
+        let n = evs.iter().filter(|e| e.event == EV_BALANCE_CHANGED).count();
+        assert_eq!(
+            n, 1,
+            "событий об остатке в пачке должно быть ровно одно, их {n}: {evs:?}"
+        );
     }
 
     fn trade_of(evs: &[Envelope]) -> &Envelope {
