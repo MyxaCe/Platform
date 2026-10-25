@@ -96,7 +96,6 @@ mod tests {
     use super::*;
     use broker::PosSide;
 
-    const LEV: i128 = 1;
     const START: i128 = 1_000_000;
 
     fn operator() -> Operator {
@@ -105,7 +104,7 @@ mod tests {
 
     /// Журнал с тремя записями — как у счёта на контуре.
     fn journal_with_history() -> Journal {
-        let mut j = Journal::new(LEV, START);
+        let mut j = Journal::new(START);
         let kinds = [
             EventKind::AccountOpened {
                 balance: START,
@@ -121,6 +120,7 @@ mod tests {
                 qd: 4,
                 sl: None,
                 tp: None,
+                lev: 1,
             },
         ];
         for e in j.seal(1_700_000_000_000, &Origin::Client, &kinds) {
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn an_empty_journal_has_nothing_to_declare() {
-        let j = Journal::new(LEV, START);
+        let j = Journal::new(START);
         assert_eq!(declare(&j, 1, operator()), Err(Refusal::EmptyJournal));
     }
 

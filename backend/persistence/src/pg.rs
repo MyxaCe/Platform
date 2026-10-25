@@ -177,6 +177,19 @@ CREATE TABLE IF NOT EXISTS positions (
   tp          BIGINT,
   PRIMARY KEY (user_id, id)
 );
+-- Плечо позиции (TRM-53). Снимок на момент открытия: маржа под позицией
+-- посчитана по действовавшему плечу, и пересчёт задним числом либо освободил
+-- бы маржу, которую человек не освобождал, либо потребовал бы сверх той, на
+-- которую он соглашался.
+--
+-- DEFAULT 1 — факт истории: до TRM-53 другого плеча в терминале не было.
+--
+-- **Стоит СРАЗУ ПОСЛЕ создания таблицы, и это не стиль.** `ALTER` до `CREATE`
+-- валит весь DDL — но только на пустой базе: на обжитой таблица уже есть, и
+-- ошибка не видна. Сначала и стоял выше; нашлось живым прогоном против чистой
+-- базы, поднятой специально для этого. Цена пропуска — новое окружение, в
+-- котором шлюз не стартует вообще.
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS leverage BIGINT NOT NULL DEFAULT 1;
 CREATE TABLE IF NOT EXISTS pendings (
   user_id     BIGINT NOT NULL,
   id          BIGINT NOT NULL,
@@ -386,7 +399,7 @@ impl Persistence for PgStore {
             };
 
             let positions = sqlx::query(
-                "SELECT id, instrument, side, qty, entry, pd, qd, margin, sl, tp FROM positions WHERE user_id = $1 ORDER BY id",
+                "SELECT id, instrument, side, qty, entry, pd, qd, margin, sl, tp, leverage FROM positions WHERE user_id = $1 ORDER BY id",
             )
             .bind(id_db)
             .fetch_all(&self.pool)
@@ -405,6 +418,7 @@ impl Persistence for PgStore {
                     margin: from_numeric(&r.get::<BigDecimal, _>("margin"))?,
                     sl: r.get::<Option<i64>, _>("sl"),
                     tp: r.get::<Option<i64>, _>("tp"),
+                    leverage: r.get::<i64, _>("leverage") as i128,
                 })
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
@@ -538,12 +552,12 @@ impl Persistence for PgStore {
             .map_err(db)?;
         for p in &snap.positions {
             sqlx::query(
-                "INSERT INTO positions (user_id, id, instrument, side, qty, entry, pd, qd, margin, sl, tp)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                "INSERT INTO positions (user_id, id, instrument, side, qty, entry, pd, qd, margin, sl, tp, leverage)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
             )
             .bind(id_db).bind(p.id as i64).bind(p.instrument as i32).bind(side_to_db(p.side))
             .bind(p.qty).bind(p.entry).bind(p.pd as i16).bind(p.qd as i16)
-            .bind(to_numeric(p.margin)).bind(p.sl).bind(p.tp)
+            .bind(to_numeric(p.margin)).bind(p.sl).bind(p.tp).bind(p.leverage as i64)
             .execute(&mut *tx).await.map_err(db)?;
         }
 

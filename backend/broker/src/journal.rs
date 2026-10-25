@@ -211,6 +211,19 @@ pub enum EventKind {
         qd: u8,
         sl: Option<i64>,
         tp: Option<i64>,
+        /// Плечо, под которым позиция открыта (TRM-53).
+        ///
+        /// **Едет в записи, потому что маржа пересчитывается свёрткой.** Записи
+        /// несут входные данные, а не результат; маржа считается как
+        /// `нотионал / плечо`, значит плечо — такой же вход, как цена и объём.
+        /// Без него свёртка считала бы старые позиции по сегодняшней настройке
+        /// площадки, и смена плеча переписывала бы маржу задним числом у всех
+        /// открытых позиций разом.
+        ///
+        /// У записей, написанных до появления поля, плечо равно **1**: другого
+        /// в терминале не было. Их канон при этом не меняется — запись
+        /// подписана своим текстом (`AccountEvent::canon`).
+        lev: i128,
     },
     /// Доливка: к позиции добавлен объём по своей цене (неттинг).
     PositionIncreased {
@@ -492,6 +505,22 @@ fn profile_added_later(fs: &[(&str, &str)]) -> Result<AccountProfile, BadRecord>
     })
 }
 
+/// Плечо записи об открытии, появившееся позже (TRM-53).
+///
+/// Нет поля — значит **1**: до TRM-53 другого плеча в терминале не было, и это
+/// факт их истории, а не умолчание на всякий случай. Поле, которое есть, но не
+/// читается числом или не больше нуля, — **отказ**: плечо делит нотионал, и
+/// ноль здесь уронил бы расчёт, а отрицательное дало бы отрицательную маржу.
+fn lev_added_later(fs: &[(&str, &str)]) -> Result<i128, BadRecord> {
+    match fs.iter().find(|(k, _)| *k == "lev") {
+        None => Ok(1),
+        Some((_, v)) => match v.parse::<i128>() {
+            Ok(l) if l > 0 => Ok(l),
+            _ => Err(BadRecord("плечо записи не положительное число")),
+        },
+    }
+}
+
 fn side_of(fs: &[(&str, &str)], key: &str) -> Result<PosSide, BadRecord> {
     match pick(fs, key)? {
         "long" => Ok(PosSide::Long),
@@ -532,8 +561,8 @@ impl EventKind {
             }
             EventKind::Deposited { amount } => format!("deposited amount={amount}"),
             EventKind::Withdrawn { amount } => format!("withdrawn amount={amount}"),
-            EventKind::PositionOpened { id, instrument, side, qty, entry, pd, qd, sl, tp } => format!(
-                "position_opened id={id} instrument={instrument} side={} qty={qty} entry={entry} pd={pd} qd={qd} sl={} tp={}",
+            EventKind::PositionOpened { id, instrument, side, qty, entry, pd, qd, sl, tp, lev } => format!(
+                "position_opened id={id} instrument={instrument} side={} qty={qty} entry={entry} pd={pd} qd={qd} sl={} tp={} lev={lev}",
                 side_tag(*side),
                 opt(*sl),
                 opt(*tp)
@@ -611,6 +640,7 @@ impl EventKind {
                 qd: num(&f, "qd")?,
                 sl: num_opt(&f, "sl")?,
                 tp: num_opt(&f, "tp")?,
+                lev: lev_added_later(&f)?,
             },
             "position_increased" => EventKind::PositionIncreased {
                 id: num(&f, "id")?,
@@ -878,7 +908,7 @@ impl ReplayState {
 
     /// Применить одно событие. Деньги считаются теми же функциями, что и в торговом
     /// ядре; независимо здесь воспроизводится **ветвление операции**.
-    fn apply(&mut self, kind: &EventKind, lev: i128) {
+    fn apply(&mut self, kind: &EventKind) {
         // Множитель валюты счёта берётся ДО изменяемых заимствований ниже:
         // позиция одалживается на правку, а валюта лежит в том же `self`.
         let minor = self.profile.currency.minor_per_unit();
@@ -923,9 +953,15 @@ impl ReplayState {
                 qd,
                 sl,
                 tp,
+                lev: rec_lev,
             } => {
                 self.next_id = self.next_id.max(*id);
                 self.positions.push(Position {
+                    // Маржу считает плечо ЗАПИСИ, а не сегодняшняя настройка
+                    // площадки (TRM-53 шаг 2). Свёртка обязана воспроизводить
+                    // прошлое таким, каким оно было: иначе смена плеча
+                    // переписывала бы маржу у всех открытых позиций разом.
+                    leverage: *rec_lev,
                     id: *id,
                     instrument: *instrument,
                     side: *side,
@@ -933,7 +969,7 @@ impl ReplayState {
                     entry: *entry,
                     pd: *pd,
                     qd: *qd,
-                    margin: margin_for(*entry, *qty, *pd, *qd, lev, minor),
+                    margin: margin_for(*entry, *qty, *pd, *qd, *rec_lev, minor),
                     sl: *sl,
                     tp: *tp,
                 });
@@ -953,7 +989,7 @@ impl ReplayState {
                 let new_entry = merged_entry(p.qty, p.entry, *add_qty, *add_entry);
                 p.qty = new_qty;
                 p.entry = new_entry;
-                p.margin = margin_for(new_entry, new_qty, p.pd, p.qd, lev, minor);
+                p.margin = margin_for(new_entry, new_qty, p.pd, p.qd, p.leverage, minor);
                 if sl.is_some() {
                     p.sl = *sl;
                 }
@@ -985,7 +1021,7 @@ impl ReplayState {
                 };
                 p.qty -= qty;
                 let left = p.qty;
-                p.margin = margin_for(p.entry, left, p.pd, p.qd, lev, minor);
+                p.margin = margin_for(p.entry, left, p.pd, p.qd, p.leverage, minor);
                 self.balance += pnl;
                 self.closed.push(deal);
             }
@@ -1099,17 +1135,22 @@ impl std::fmt::Display for JournalFault {
 pub struct Journal {
     events: Vec<AccountEvent>,
     state: ReplayState,
-    lev: i128,
     start_balance: Cents,
 }
 
 impl Journal {
-    pub fn new(leverage: i128, start_balance: Cents) -> Self {
-        let lev = leverage.max(1);
+    /// Плечо журналу больше не передаётся (TRM-53 шаг 2).
+    ///
+    /// **Свёртка не должна знать сегодняшнюю настройку площадки.** Пока
+    /// знала, маржа поднятой из ленты позиции зависела от значения, которое
+    /// владелец меняет в админке, и правка переписывала прошлое у всех
+    /// открытых позиций разом. Плечо каждой позиции лежит в её записи об
+    /// открытии; другого источника у свёртки теперь нет — не по соглашению, а
+    /// потому что параметра не существует.
+    pub fn new(start_balance: Cents) -> Self {
         Self {
             events: Vec::new(),
             state: ReplayState::new(start_balance),
-            lev,
             start_balance,
         }
     }
@@ -1121,12 +1162,8 @@ impl Journal {
     /// по одной через [`Journal::commit`]. Разница не стилистическая: при поштучной
     /// проверке `verify` не вызывался бы ниоткуда, и снятие его мутацией не красило
     /// бы ни одного теста — проверка существовала бы на бумаге. Так и нашлось.
-    pub fn load(
-        leverage: i128,
-        start_balance: Cents,
-        events: Vec<AccountEvent>,
-    ) -> Result<Self, JournalFault> {
-        let mut j = Journal::new(leverage, start_balance);
+    pub fn load(start_balance: Cents, events: Vec<AccountEvent>) -> Result<Self, JournalFault> {
+        let mut j = Journal::new(start_balance);
         j.events = events;
         j.verify()?;
         j.state = j.replay();
@@ -1178,7 +1215,7 @@ impl Journal {
     pub fn preview(&self, events: &[AccountEvent]) -> ReplayState {
         let mut s = self.state.clone();
         for e in events {
-            s.apply(&e.kind, self.lev);
+            s.apply(&e.kind);
         }
         s
     }
@@ -1199,7 +1236,7 @@ impl Journal {
         if e.hash != e.digest() {
             return Err(JournalFault::Tampered { seq: e.seq });
         }
-        self.state.apply(&e.kind, self.lev);
+        self.state.apply(&e.kind);
         self.events.push(e);
         Ok(())
     }
@@ -1235,7 +1272,7 @@ impl Journal {
     pub fn replay(&self) -> ReplayState {
         let mut s = ReplayState::new(self.start_balance);
         for e in &self.events {
-            s.apply(&e.kind, self.lev);
+            s.apply(&e.kind);
         }
         s
     }
@@ -1525,6 +1562,7 @@ mod tests {
                 qd: 3,
                 sl: Some(4900),
                 tp: None,
+                lev: 1,
             },
             EventKind::PositionIncreased {
                 id: 1,
@@ -1620,7 +1658,7 @@ mod tests {
             let e = AccountEvent::from_storage(1, 1_700_000_000_000, Origin::Client, text, 0, hash)
                 .unwrap_or_else(|err| panic!("{text}: {err}"));
             assert_eq!(e.canon(), text, "канон приезжает как есть");
-            Journal::load(1, 10_000_000, vec![e])
+            Journal::load(10_000_000, vec![e])
                 .unwrap_or_else(|f| panic!("{text}: запись с контура обязана сверяться, а не {f}"));
         }
     }
@@ -1657,7 +1695,7 @@ mod tests {
             }
             other => panic!("не та запись: {other:?}"),
         }
-        Journal::load(1, 10_000_000, vec![e]).expect("и сверяется прежним отпечатком");
+        Journal::load(10_000_000, vec![e]).expect("и сверяется прежним отпечатком");
     }
 
     /// **Запись, написанная ДО расширения вида, поднимается и сверяется.**
@@ -1687,7 +1725,7 @@ mod tests {
             .expect("разбор обязан быть терпимым к отсутствию полей");
         assert_eq!(stored.canon(), OLD, "канон обязан сохраниться как есть");
 
-        let j = Journal::load(1, 10_000_000, vec![stored])
+        let j = Journal::load(10_000_000, vec![stored])
             .expect("журнал со старой записью обязан подниматься, а не уходить в карантин");
         assert_eq!(j.events().len(), 1);
         assert_eq!(
@@ -1715,9 +1753,132 @@ mod tests {
             SIGNED_AS_IF_NEW,
         )
         .expect("разбор");
-        let fault = Journal::load(1, 10_000_000, vec![stored])
+        let fault = Journal::load(10_000_000, vec![stored])
             .expect_err("чужой отпечаток обязан ловиться — иначе первый тест ничего не значит");
         assert_eq!(fault, JournalFault::Tampered { seq: 1 });
+    }
+
+    /// **Запись об открытии, написанная до появления плеча, переигрывается с
+    /// плечом 1 и даёт ту же маржу** (TRM-53, проверка ДО работы).
+    ///
+    /// Написана прежде, чем в запись добавлено поле плеча, и в этом её смысл:
+    /// она закрепляет поведение, которое добавление обязано **сохранить**.
+    /// Если после правки старая запись перестанет читаться или даст другую
+    /// маржу — это увидит она, а не прод.
+    ///
+    /// Почему именно маржа. Записи журнала несут входные данные, а не
+    /// результат: маржа пересчитывается при свёртке, и делает это **по
+    /// плечу**. Значит плечо — скрытый вход свёртки, и у старых записей он
+    /// обязан остаться единицей: другого в терминале не было.
+    ///
+    /// Строка настоящая, снята с журнала счёта на контуре.
+    /// Свёртка считает маржу по плечу ЗАПИСИ (TRM-53 шаг 2).
+    ///
+    /// **Сегодняшней настройки свёртка больше не видит вовсе.** Параметр
+    /// `lev` у `ReplayState::apply` и поле `Journal::lev` удалены: пока они
+    /// были, маржа прошлого зависела от значения, которое владелец меняет
+    /// сегодня. Это сильнее теста — выразить ошибку стало нечем.
+    ///
+    /// Тест остаётся на то, что выразить ещё можно: плечо берётся из записи,
+    /// а не зашито. Прежние прогоны этого не ловили — все записи и все
+    /// свёртки стояли на единице, и подмена `rec_lev` на `1` была невидима.
+    #[test]
+    fn the_fold_takes_the_leverage_from_the_record() {
+        // 239883 × 1000 × 100 / 10^(2+4) = 23988 наименьших единиц нотионала.
+        const AT_LEV_1: Cents = 23_988;
+        const AT_LEV_100: Cents = 239;
+
+        for (lev, want) in [(1i128, AT_LEV_1), (100, AT_LEV_100)] {
+            let rec = format!(
+                "position_opened id=1 instrument=2 side=long qty=1000 entry=239883                  pd=2 qd=4 sl=- tp=- lev={lev}"
+            )
+            .replace("                 ", "");
+            let kind = EventKind::decode(&rec).expect("запись читается");
+            let mut st = ReplayState::new(1_000_000);
+            st.profile = AccountProfile::legacy_demo(UserId(1));
+            st.apply(&kind);
+            assert_eq!(
+                st.positions.first().expect("позиция восстановилась").margin,
+                want,
+                "запись с плечом {lev} обязана свернуться в маржу {want}"
+            );
+        }
+    }
+
+    /// Доливка и частичное закрытие идут по плечу ПОЗИЦИИ (TRM-53 шаг 2).
+    ///
+    /// Позиция — единая величина от открытия до закрытия (решение штаба), и
+    /// её маржа считается одним правилом. Записи о доливке своего плеча не
+    /// несут — оно уже в позиции, и свёртка обязана брать его оттуда, а не
+    /// подставлять единицу.
+    #[test]
+    fn increase_and_reduce_follow_the_position_leverage() {
+        const OPEN_AT_100: &str = "position_opened id=1 instrument=2 side=long qty=1000 entry=239883 pd=2 qd=4 sl=- tp=- lev=100";
+        const MARGIN_1K: Cents = 239;
+        const MARGIN_2K: Cents = 479;
+
+        let mut st = ReplayState::new(1_000_000);
+        st.profile = AccountProfile::legacy_demo(UserId(1));
+        st.apply(&EventKind::decode(OPEN_AT_100).expect("запись читается"));
+        assert_eq!(st.positions[0].margin, MARGIN_1K, "открытие при плече 100");
+
+        st.apply(&EventKind::PositionIncreased {
+            id: 1,
+            add_qty: 1000,
+            add_entry: 239_883,
+            sl: None,
+            tp: None,
+        });
+        assert_eq!(
+            st.positions[0].margin, MARGIN_2K,
+            "доливка считается плечом позиции (100), а не единицей"
+        );
+
+        st.apply(&EventKind::PositionReduced {
+            id: 1,
+            qty: 1000,
+            exit: 239_883,
+        });
+        assert_eq!(
+            st.positions[0].margin, MARGIN_1K,
+            "частичное закрытие тоже считается плечом позиции"
+        );
+    }
+
+    #[test]
+    fn a_pre_leverage_opening_replays_at_leverage_one() {
+        const OLD: &str =
+            "position_opened id=1 instrument=2 side=long qty=1000 entry=239883 pd=2 qd=4 sl=- tp=-";
+        // 239883 × 1000 × 100 / 10^(2+4) = 23988 наименьших единиц при плече 1.
+        const MARGIN_AT_LEV_1: Cents = 23_988;
+
+        let kind = EventKind::decode(OLD).expect("старая запись обязана читаться");
+        let mut st = ReplayState::new(1_000_000);
+        st.profile = AccountProfile::legacy_demo(UserId(1));
+        st.apply(&kind);
+
+        let p = st
+            .positions
+            .first()
+            .expect("позиция обязана восстановиться");
+        assert_eq!(
+            p.margin, MARGIN_AT_LEV_1,
+            "маржа старой записи обязана считаться по плечу 1 — другого у неё не было"
+        );
+        // И САМО плечо, восстановленное из записи, — единица.
+        //
+        // Проверяется отдельно от маржи намеренно: утверждение о марже при
+        // совпадающих плечах до поля записи не дотягивается, и подмена
+        // умолчания на ноль осталась бы незамеченной. Нашлось мутацией
+        // «нет поля — значит 0».
+        //
+        // Ноль здесь не абстрактная порча: плечо делит нотионал, и ноль
+        // уронил бы расчёт маржи делением на ноль в тот день, когда маржу
+        // начнёт считать плечо позиции.
+        assert_eq!(
+            p.leverage, 1,
+            "у записи без поля плечо обязано быть единицей, а не нулём и не чем-то ещё"
+        );
     }
 
     /// **Запись под СТАРЫМ именем читается новым видом и сохраняет подпись.**
@@ -1781,20 +1942,14 @@ mod tests {
     #[test]
     fn the_sandbox_declaration_moves_nothing() {
         let mut s = ReplayState::new(1_000_000);
-        s.apply(
-            &EventKind::AccountOpened {
-                balance: 1_000_000,
-                profile: Default::default(),
-            },
-            1,
-        );
-        s.apply(&EventKind::Deposited { amount: 7 }, 1);
+        s.apply(&EventKind::AccountOpened {
+            balance: 1_000_000,
+            profile: Default::default(),
+        });
+        s.apply(&EventKind::Deposited { amount: 7 });
         let before = s.clone();
 
-        s.apply(
-            &EventKind::HistoryExcludedFromReporting { through_seq: 2 },
-            1,
-        );
+        s.apply(&EventKind::HistoryExcludedFromReporting { through_seq: 2 });
 
         assert_eq!(s.balance, before.balance);
         assert_eq!(s.positions, before.positions);
@@ -1964,7 +2119,7 @@ mod tests {
     /// это не готовность к ADM-03, а мёртвый код.
     #[test]
     fn manual_posting_is_recorded_and_moves_the_replayed_balance() {
-        let mut j = Journal::new(1, 10_000_000);
+        let mut j = Journal::new(10_000_000);
         let op = Origin::Operator(
             Operator::new("ops@platform", "платёж прошёл у провайдера", "INC-42").unwrap(),
         );
@@ -2011,7 +2166,7 @@ mod tests {
     /// движка — ровно то, что скрывает злоупотребление.
     #[test]
     fn origin_is_part_of_the_fingerprint() {
-        let j = Journal::new(1, 0);
+        let j = Journal::new(0);
         let k = [EventKind::Deposited { amount: 1 }];
         let a = j.seal(1, &Origin::System, &k);
         let b = j.seal(1, &Origin::Client, &k);
@@ -2025,7 +2180,7 @@ mod tests {
     // ---- Неизменяемость ------------------------------------------------------
 
     fn filled() -> Journal {
-        let mut j = Journal::new(1, 10_000_000);
+        let mut j = Journal::new(10_000_000);
         let kinds = [
             EventKind::AccountOpened {
                 balance: 10_000_000,
@@ -2042,6 +2197,7 @@ mod tests {
                 qd: 3,
                 sl: None,
                 tp: None,
+                lev: 1,
             },
         ];
         for (i, k) in kinds.iter().enumerate() {
@@ -2067,7 +2223,7 @@ mod tests {
             victim.hash(), // отпечаток остался прежним
         )
         .expect("строка разбирается");
-        let faulted = Journal::load(1, 10_000_000, rows).expect_err("правка обязана ловиться");
+        let faulted = Journal::load(10_000_000, rows).expect_err("правка обязана ловиться");
         assert_eq!(faulted, JournalFault::Tampered { seq: 2 });
     }
 
@@ -2099,7 +2255,7 @@ mod tests {
             h,
         )
         .expect("строка разбирается");
-        let faulted = Journal::load(1, 10_000_000, rows).expect_err("подделка обязана ловиться");
+        let faulted = Journal::load(10_000_000, rows).expect_err("подделка обязана ловиться");
         assert_eq!(
             faulted,
             JournalFault::Chain { seq: 3 },
@@ -2113,7 +2269,7 @@ mod tests {
         let j = filled();
         let mut rows: Vec<AccountEvent> = j.events().to_vec();
         rows.remove(1);
-        let faulted = Journal::load(1, 10_000_000, rows).expect_err("пропажа обязана ловиться");
+        let faulted = Journal::load(10_000_000, rows).expect_err("пропажа обязана ловиться");
         assert_eq!(
             faulted,
             JournalFault::Sequence {
@@ -2259,7 +2415,7 @@ mod tests {
     /// Недоступность хранилища сюда не попадает вовсе: это ошибка чтения.
     #[test]
     fn empty_journal_over_a_live_account_says_no_entries() {
-        let j = Journal::new(1, 10_000_000);
+        let j = Journal::new(10_000_000);
         let live = AccountSnapshot {
             profile: Default::default(),
             balance: 10_000_500,
@@ -2302,7 +2458,7 @@ mod tests {
     /// игнорирующая непонятное, выдаёт расхождение за порядок.
     #[test]
     fn event_about_an_unknown_position_is_not_swallowed() {
-        let mut j = Journal::new(1, 0);
+        let mut j = Journal::new(0);
         for e in j.seal(
             1,
             &Origin::System,

@@ -1141,6 +1141,7 @@ mod tests {
             margin: 100_000,
             sl: None,
             tp: None,
+            leverage: 1,
         }];
         let evs = envelopes_for(&who(9), &before_empty(), &after, &[], &known);
         let e = evs

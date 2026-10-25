@@ -3,7 +3,16 @@
 //! Без БД режим проверяется здесь и на каждом прогоне. С БД — живым прогоном против
 //! настоящего PostgreSQL: тест помечен `#[ignore]`, потому что живой базы в обычном
 //! прогоне нет, и он **виден в выводе как пропущенный**, а не притворяется зелёным.
-//! Запуск: `TEST_DATABASE_URL=postgres://... cargo test -p persistence -- --ignored`.
+//! Запуск: `TEST_DATABASE_URL=postgres://... cargo test -p persistence --
+//! --ignored --test-threads=1`.
+//!
+//! **`--test-threads=1` обязателен, и база должна быть ЧИСТОЙ.** Живые тесты
+//! делят одну схему: параллельно они мешают друг другу и падают на записи, а
+//! не на том, что проверяют. А обжитая база прячет ошибки порядка DDL —
+//! `ALTER` до `CREATE` на ней проходит, потому что таблица уже есть. Так и
+//! уехал в master перенос колонки `positions.leverage` (TRM-53): на контуре
+//! init молчал, на пустой базе валился целиком. Поднимайте одноразовый
+//! PostgreSQL под прогон, а не подключайтесь к живущему.
 
 use broker::journal::{EventKind, Journal, Operator, Origin};
 use broker::{AccountSnapshot, PosSide};
@@ -34,6 +43,7 @@ fn trade_events(j: &Journal) -> Vec<broker::journal::AccountEvent> {
                 qd: 3,
                 sl: None,
                 tp: Some(39_000),
+                lev: 1,
             },
         ],
     );
@@ -64,7 +74,7 @@ fn snapshot() -> AccountSnapshot {
 #[tokio::test]
 async fn memory_store_round_trips_the_journal() {
     let store = MemoryStore::new();
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     let events = trade_events(&j);
     store
         .save_account(U, &snapshot(), &events, &[])
@@ -81,7 +91,7 @@ async fn memory_store_round_trips_the_journal() {
     assert_eq!(lane, events, "поднялось ровно то, что положили");
 
     // И цепочка сходится после подъёма — иначе хранилище что-то потеряло по дороге.
-    let rebuilt = Journal::load(1, 10_000_000, lane).expect("цепочка обязана сойтись");
+    let rebuilt = Journal::load(10_000_000, lane).expect("цепочка обязана сойтись");
     assert_eq!(rebuilt.replay().balance, 10_250_000);
     let op = rebuilt
         .events()
@@ -101,7 +111,7 @@ async fn memory_store_round_trips_the_journal() {
 #[tokio::test]
 async fn memory_store_refuses_to_overwrite_or_skip() {
     let store = MemoryStore::new();
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     let events = trade_events(&j);
     store
         .save_account(U, &snapshot(), &events, &[])
@@ -112,7 +122,7 @@ async fn memory_store_refuses_to_overwrite_or_skip() {
     assert!(again.is_err(), "повтор номера обязан быть отказом");
 
     // И пропуск номера тоже: дыра в ленте — потерянная история.
-    let gap = Journal::load(1, 10_000_000, events.clone()).unwrap();
+    let gap = Journal::load(10_000_000, events.clone()).unwrap();
     let mut next = gap.seal(
         1_700_000_060_000,
         &Origin::Client,
@@ -171,7 +181,7 @@ async fn postgres_journal_is_append_only_at_the_database_level() {
         .await
         .unwrap();
 
-    let j = Journal::new(1, 10_000_000);
+    let j = Journal::new(10_000_000);
     let events = trade_events(&j);
     store
         .save_account(U, &snapshot(), &events, &[])
@@ -186,7 +196,7 @@ async fn postgres_journal_is_append_only_at_the_database_level() {
         .expect("журнал обязан подняться")
         .1;
     assert_eq!(lane, events, "из БД поднялось ровно то, что записали");
-    Journal::load(1, 10_000_000, lane).expect("цепочка обязана сойтись после круга через БД");
+    Journal::load(10_000_000, lane).expect("цепочка обязана сойтись после круга через БД");
 
     // Неизменяемость — не на честном слове приложения: правка и удаление запрещены
     // самой базой.
@@ -333,7 +343,7 @@ async fn a_row_written_in_the_old_shape_still_loads() {
         "канон обязан приехать из базы как есть, а не пересобраться"
     );
 
-    Journal::load(1, 0, lane).expect(
+    Journal::load(0, lane).expect(
         "журнал со старой записью обязан сойтись: иначе выкатка отправит в карантин все счета",
     );
 }
@@ -501,4 +511,87 @@ async fn the_storage_refuses_to_change_the_currency() {
         .execute(&pool)
         .await
         .unwrap();
+}
+
+/// Плечо позиции переживает хранилище (TRM-53 шаг 2).
+///
+/// **После шага 2 это вопрос карантина, а не аккуратности.** Маржу сверяет
+/// `check_snapshot` по плечу, записанному В ПОЗИЦИИ. Если колонка не доедет
+/// обратно, позиция, открытая при плече 100, поднимется с плечом 1, маржа под
+/// ней окажется «в сто раз меньше пересчитанной» — и счёт уйдёт в карантин при
+/// первом же перезапуске. Без базы это не проверить: отображение живёт в SQL.
+#[tokio::test]
+#[ignore = "нужна живая БД: TEST_DATABASE_URL=postgres://... cargo test -p persistence -- --ignored"]
+async fn postgres_round_trips_the_position_leverage() {
+    let url = std::env::var("TEST_DATABASE_URL")
+        .expect("TEST_DATABASE_URL не задан — тест запущен без базы, которую он проверяет");
+    let store = persistence::PgStore::connect(&url)
+        .await
+        .expect("подключение");
+    store.init().await.expect("DDL");
+
+    // Свой пользователь и уборка ДО утверждений: падение соседнего прогона не
+    // должно отравлять этот, а этот — соседний.
+    const V: UserId = UserId(78);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+    for t in ["positions", "accounts"] {
+        sqlx::query(&format!("DELETE FROM {t} WHERE user_id = $1"))
+            .bind(V.0 as i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let pos = broker::Position {
+        id: 1,
+        instrument: 2,
+        side: PosSide::Long,
+        qty: 1000,
+        entry: 239_883,
+        pd: 2,
+        qd: 4,
+        // 23 988 нотионала при плече 100 — маржа 239.
+        margin: 239,
+        sl: None,
+        tp: None,
+        leverage: 100,
+    };
+    let snap = AccountSnapshot {
+        balance: 10_000_000,
+        next_id: 1,
+        positions: vec![pos.clone()],
+        ..Default::default()
+    };
+    assert_eq!(
+        broker::check_snapshot(&snap),
+        vec![],
+        "предпосылка: до записи слепок здоров"
+    );
+
+    store
+        .save_account(V, &snap, &[], &[])
+        .await
+        .expect("запись в БД");
+    let loaded = store.load_all().await.expect("подъём из БД");
+    let back = loaded
+        .accounts
+        .into_iter()
+        .find(|(id, _)| *id == V)
+        .expect("счёт поднялся")
+        .1;
+
+    assert_eq!(
+        back.positions.first().expect("позиция поднялась").leverage,
+        100,
+        "плечо позиции обязано пережить хранилище"
+    );
+    assert_eq!(
+        broker::check_snapshot(&back),
+        vec![],
+        "поднятый счёт здоров: маржа отвечает плечу, которое доехало обратно"
+    );
 }

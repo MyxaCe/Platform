@@ -134,6 +134,17 @@ pub struct Position {
     pub margin: Cents,
     pub sl: Option<i64>,
     pub tp: Option<i64>,
+    /// Плечо, под которым позиция открыта (TRM-53).
+    ///
+    /// **Снимок, как категория клиента при открытии счёта.** Маржа под
+    /// позицией посчитана по действовавшему плечу, и пересчёт задним числом
+    /// либо освободил бы маржу, которую человек не освобождал, либо потребовал
+    /// бы сверх того, на что он соглашался.
+    ///
+    /// Доливка идёт по **этому же** плечу: позиция — единая величина, и маржа
+    /// под ней считается одним правилом от открытия до закрытия (решение
+    /// штаба). Поэтому запись о доливке своего плеча не несёт — оно уже здесь.
+    pub leverage: i128,
 }
 
 impl Position {
@@ -415,6 +426,7 @@ impl Account {
                 margin,
                 sl,
                 tp,
+                leverage: lev,
             },
         );
         self.log(EventKind::PositionOpened {
@@ -427,6 +439,7 @@ impl Account {
             qd,
             sl,
             tp,
+            lev,
         });
         Ok(id)
     }
@@ -472,7 +485,7 @@ impl Account {
             // Доливка: объёмы складываются, вход усредняется по объёму.
             let new_qty = cur.qty + qty;
             let new_entry = merged_entry(cur.qty, cur.entry, qty, entry);
-            let new_margin = margin_for(new_entry, new_qty, pd, qd, lev, self.minor());
+            let new_margin = margin_for(new_entry, new_qty, pd, qd, cur.leverage, self.minor());
             // Считаем ДОПОЛНИТЕЛЬНУЮ маржу: часть уже занята этой же позицией.
             let extra = new_margin - cur.margin;
             // Тем же единственным определением, что и обычное открытие (TRM-41):
@@ -536,7 +549,7 @@ impl Account {
             let minor = self.minor();
             let p = self.positions.get_mut(&pos_id).expect("позиция на месте");
             p.qty = left;
-            p.margin = margin_for(p.entry, left, p.pd, p.qd, lev, minor);
+            p.margin = margin_for(p.entry, left, p.pd, p.qd, p.leverage, minor);
             self.log(EventKind::PositionReduced {
                 id: pos_id,
                 qty: closing,
@@ -1361,6 +1374,25 @@ impl Broker {
         self.leverage
     }
 
+    /// Сменить плечо площадки (TRM-53 шаг 2).
+    ///
+    /// **Настройка, а не выпуск.** Плечо — свойство юрисдикции, и владелец
+    /// меняет его без сборки образа. Менять его безопасно ровно потому, что
+    /// маржа каждой открытой позиции считается по плечу, записанному В НЕЙ:
+    /// новое значение достаётся только позициям, открытым после него.
+    ///
+    /// Ноль и отрицательное отвергаются молча-но-видимо — значение не
+    /// применяется, и функция отдаёт `false`: плечо делит нотионал, нулевое
+    /// уронило бы расчёт, а отрицательное дало бы отрицательную маржу. Тот же
+    /// отказ, что у `lev_added_later` в журнале, и по той же причине.
+    pub fn set_leverage(&mut self, lev: i128) -> bool {
+        if lev <= 0 {
+            return false;
+        }
+        self.leverage = lev;
+        true
+    }
+
     /// Стартовый баланс счёта — нужен журналу: с него начинается свёртка счёта,
     /// у которого ещё нет ни одной записи.
     pub fn start_balance(&self) -> Cents {
@@ -1430,7 +1462,7 @@ pub fn start_balance_for(kind: AccountKind, demo_start: Cents) -> Cents {
 /// корректном состоянии в день включения плеча (TRM-06). Неверная проверка,
 /// которая сегодня проходит, опаснее отсутствующей: она сработает позже и на
 /// правильных данных.
-pub fn check_snapshot(snap: &AccountSnapshot, leverage: i128) -> Vec<Violation> {
+pub fn check_snapshot(snap: &AccountSnapshot) -> Vec<Violation> {
     let mut out = Vec::new();
     let v = |out: &mut Vec<Violation>, msg: String| out.push(Violation(msg));
 
@@ -1443,11 +1475,19 @@ pub fn check_snapshot(snap: &AccountSnapshot, leverage: i128) -> Vec<Violation> 
     //    Сравнивать надо СОХРАНЁННОЕ с ПЕРЕСЧИТАННЫМ, иначе проверяется тождество.
     //    Это единственный способ поймать маржу, приехавшую из хранилища кривой
     //    или посчитанную при другом плече.
-    let lev = leverage.max(1);
     // Пересчёт идёт в валюте ЭТОГО счёта: та же проверка с зашитым центом
     // объявила бы здоровую маржу иенового счёта неверной в сто раз.
     let minor = snap.profile.currency.minor_per_unit();
     for p in &snap.positions {
+        // Плечо берётся У ПОЗИЦИИ, а не у площадки (TRM-53 шаг 2).
+        //
+        // **Проверка обязана сверять счёт с его собственным прошлым.** Пока
+        // здесь стояло сегодняшнее плечо, смена настройки объявляла неверной
+        // маржу каждой открытой позиции разом — счета уезжали в карантин
+        // целыми пачками, хотя испорчено не было ничего. Расхождение значило
+        // «настройку поменяли», а не «данные кривые», и как сигнал о порче
+        // проверка переставала работать именно тогда, когда была нужна.
+        let lev = p.leverage.max(1);
         let expected = value_minor(p.entry, p.qty, p.pd, p.qd, minor) / lev;
         if p.margin != expected {
             v(
@@ -1567,6 +1607,7 @@ mod invariant_tests {
             margin,
             sl: None,
             tp: None,
+            leverage: 1,
         }
     }
 
@@ -1591,12 +1632,12 @@ mod invariant_tests {
 
     #[test]
     fn healthy_snapshot_has_no_violations() {
-        assert_eq!(check_snapshot(&healthy(), 1), vec![]);
+        assert_eq!(check_snapshot(&healthy()), vec![]);
     }
 
     #[test]
     fn empty_account_is_valid() {
-        assert_eq!(check_snapshot(&AccountSnapshot::default(), 1), vec![]);
+        assert_eq!(check_snapshot(&AccountSnapshot::default()), vec![]);
     }
 
     /// Отрицательный баланс НЕ нарушение: с плечом он законен. Прежняя проверка
@@ -1606,7 +1647,7 @@ mod invariant_tests {
         let mut s = healthy();
         s.balance = -50_000;
         assert_eq!(
-            check_snapshot(&s, 1),
+            check_snapshot(&s),
             vec![],
             "отрицательный баланс законен с плечом"
         );
@@ -1617,18 +1658,18 @@ mod invariant_tests {
         let mut s = healthy();
         s.positions[0].qty = 0;
         assert!(
-            check_snapshot(&s, 1).iter().any(|v| v.0.contains("объём")),
+            check_snapshot(&s).iter().any(|v| v.0.contains("объём")),
             "нулевой объём должен ловиться"
         );
         s.positions[0].qty = -5;
-        assert!(check_snapshot(&s, 1).iter().any(|v| v.0.contains("объём")));
+        assert!(check_snapshot(&s).iter().any(|v| v.0.contains("объём")));
     }
 
     #[test]
     fn detects_zero_entry_price() {
         let mut s = healthy();
         s.positions[1].entry = 0;
-        assert!(check_snapshot(&s, 1)
+        assert!(check_snapshot(&s)
             .iter()
             .any(|v| v.0.contains("цена входа")));
     }
@@ -1641,26 +1682,205 @@ mod invariant_tests {
         let mut s = healthy();
         s.positions[0].margin += 1;
         assert!(
-            check_snapshot(&s, 1).iter().any(|v| v.0.contains("маржа")),
+            check_snapshot(&s).iter().any(|v| v.0.contains("маржа")),
             "дрейф маржи должен ловиться"
         );
     }
 
-    /// Та же маржа при другом плече — нарушение: слепок посчитан по чужим правилам.
+    /// Маржа, не сходящаяся с плечом САМОЙ позиции, — нарушение.
+    ///
+    /// Раньше этот тест сверял слепок с плечом площадки, и смена настройки
+    /// красила его у всех счетов разом (TRM-53 шаг 2). Теперь он ловит то, что
+    /// и должен был: запись говорит «плечо 10», а маржа под ней посчитана под
+    /// плечо 1 — значит в хранилище рассогласование, а не смена настройки.
     #[test]
-    fn detects_margin_computed_with_other_leverage() {
-        let s = healthy();
+    fn detects_margin_inconsistent_with_position_leverage() {
+        let mut s = healthy();
+        s.positions[0].leverage = 10;
         assert!(
-            !check_snapshot(&s, 10).is_empty(),
-            "маржа под плечо 1 не годится для плеча 10"
+            !check_snapshot(&s).is_empty(),
+            "маржа под плечо 1 не годится для позиции, записанной с плечом 10"
         );
+    }
+
+    /// Смена плеча площадки НЕ двигает маржу уже открытой позиции (TRM-53).
+    ///
+    /// Это и есть денежный инвариант задачи. До шага 2 новая настройка
+    /// пересчитывала маржу у всех открытых позиций разом: человек не трогал
+    /// позицию, а занятое под ней менялось — в обе стороны.
+    #[test]
+    fn platform_leverage_change_leaves_open_margin_alone() {
+        let mut b = Broker::new(1_000_000, 1);
+        let u = UserId(1);
+        b.open_account(u);
+        let m = HashMap::from([(1u32, 5000i64)]);
+        let id = b
+            .open(u, &m, 1, PosSide::Long, 1000, 5000, 2, 3, None, None)
+            .expect("позиция открыта");
+        let before = b.used_margin(u);
+        assert!(before > 0, "предпосылка: маржа занята");
+
+        assert!(b.set_leverage(100), "плечо площадки сменилось");
+
+        assert_eq!(
+            b.used_margin(u),
+            before,
+            "смена настройки площадки не двигает занятое под открытой позицией"
+        );
+        assert_eq!(
+            b.snapshot(u)
+                .positions
+                .iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .leverage,
+            1,
+            "позиция помнит плечо, под которым открыта"
+        );
+        assert_eq!(
+            check_snapshot(&b.snapshot(u)),
+            vec![],
+            "слепок сходится сам с собой и после смены настройки"
+        );
+    }
+
+    /// Доливка после смены плеча идёт по плечу ПОЗИЦИИ, а не площадки.
+    ///
+    /// Дыра нашлась мутацией: подмена `cur.leverage` на сегодняшнее плечо не
+    /// красила ни одного теста из 134 — ни один не доливал позицию после
+    /// смены настройки. А именно это и случится у первого же человека,
+    /// державшего позицию в день правки: под мутацией его маржа упала бы с
+    /// 10 000 до 100, то есть позиция оказалась бы обеспечена в сто раз хуже,
+    /// чем он соглашался, и молча.
+    #[test]
+    fn adding_to_a_position_after_a_leverage_change_keeps_its_leverage() {
+        let mut b = Broker::new(1_000_000, 1);
+        let u = UserId(1);
+        b.open_account(u);
+        // Доливка бывает только при неттинге: в хеджинге второе открытие — это
+        // ВТОРАЯ позиция, и она законно берёт сегодняшнее плечо.
+        assert!(
+            b.adopt_model(u, PositionModel::Netting),
+            "предпосылка: счёт неттинговый"
+        );
+        let m = HashMap::from([(1u32, 5000i64)]);
+        b.open(u, &m, 1, PosSide::Long, 1000, 5000, 2, 3, None, None)
+            .expect("позиция открыта");
+        let one = b.used_margin(u);
+
+        assert!(b.set_leverage(100), "плечо площадки сменилось");
+        b.open(u, &m, 1, PosSide::Long, 1000, 5000, 2, 3, None, None)
+            .expect("доливка прошла");
+
+        assert_eq!(
+            b.snapshot(u).positions.len(),
+            1,
+            "предпосылка: это доливка одной позиции, а не вторая позиция"
+        );
+        assert_eq!(
+            b.used_margin(u),
+            one * 2,
+            "долитая половина обеспечена тем же плечом, что и первая"
+        );
+        assert_eq!(
+            check_snapshot(&b.snapshot(u)),
+            vec![],
+            "слепок сходится: маржа отвечает плечу, записанному в позиции"
+        );
+    }
+
+    /// Позиции по разные стороны правки плеча несут РАЗНЫЕ плечи — и обе верны.
+    ///
+    /// Это не край, а обычный день при хеджинге: правку делают, когда у людей
+    /// открыты позиции. Ровно поэтому плечо обязано лежать в позиции: одного
+    /// числа на счёт не хватает, чтобы описать такой счёт честно.
+    #[test]
+    fn positions_opened_around_a_leverage_change_keep_their_own() {
+        let mut b = Broker::new(1_000_000, 1);
+        let u = UserId(1);
+        b.open_account(u);
+        let m = HashMap::from([(1u32, 5000i64)]);
+        b.open(u, &m, 1, PosSide::Long, 1000, 5000, 2, 3, None, None)
+            .expect("первая позиция");
+        assert!(b.set_leverage(100));
+        b.open(u, &m, 1, PosSide::Long, 1000, 5000, 2, 3, None, None)
+            .expect("вторая позиция");
+
+        let snap = b.snapshot(u);
+        // Сортируем: порядок позиций в слепке не обещан, и утверждать его
+        // здесь значило бы прибивать к тесту постороннее свойство.
+        let mut levs: Vec<i128> = snap.positions.iter().map(|p| p.leverage).collect();
+        levs.sort_unstable();
+        assert_eq!(levs, vec![1, 100], "каждая позиция помнит своё плечо");
+        assert_eq!(
+            b.used_margin(u),
+            5050,
+            "занято 5000 под первой (плечо 1) и 50 под второй (плечо 100)"
+        );
+        assert_eq!(
+            check_snapshot(&snap),
+            vec![],
+            "счёт с двумя плечами — здоровый счёт, а не карантин"
+        );
+    }
+
+    /// Плечо площадки не становится нулевым или отрицательным.
+    ///
+    /// Ноль уронил бы расчёт делением, отрицательное дало бы отрицательную
+    /// маржу — то есть позицию, которая освобождает деньги вместо того чтобы
+    /// их занимать. Отказ виден вызывающему: `false`, и значение прежнее.
+    #[test]
+    fn set_leverage_refuses_nonpositive() {
+        let mut b = Broker::new(1_000_000, 7);
+        for bad in [0i128, -5] {
+            assert!(!b.set_leverage(bad), "плечо {bad} не принимается");
+            assert_eq!(b.leverage(), 7, "после отказа плечо прежнее");
+        }
+        assert!(b.set_leverage(50), "нормальное значение принимается");
+        assert_eq!(b.leverage(), 50);
+    }
+
+    /// Порог принудительного закрытия — отношение, а не сумма: 50 % остаются
+    /// 50 % и при плече 1, и при плече 100 (формулировка штаба, TRM-53).
+    #[test]
+    fn margin_level_half_is_half_at_any_leverage() {
+        // Занятое под одной и той же позицией при двух плечах — числами, а не
+        // через тот же расчёт: 239883-подобной арифметики здесь нет, нотионал
+        // 5000 × 1000 × 100 / 10^5 = 5000 наименьших единиц.
+        for (lev, want_used) in [(1i128, 5000i128), (100, 50)] {
+            let mut b = Broker::new(1_000_000, lev);
+            let u = UserId(1);
+            b.open_account(u);
+            let m = HashMap::from([(1u32, 5000i64)]);
+            b.open(u, &m, 1, PosSide::Long, 1000, 5000, 2, 3, None, None)
+                .expect("позиция открыта");
+            let used = b.used_margin(u);
+            assert_eq!(
+                used, want_used,
+                "плечо {lev}: занято должно быть {want_used}"
+            );
+            // Уводим equity ровно в половину занятого: баланс + открытый P&L.
+            let want_equity = used / 2;
+            let bal = b.balance(u);
+            let need_pnl = want_equity - bal;
+            // P&L длинной = (mark - entry) * объём в минорных единицах счёта.
+            let unit = b.open_pnl(u, &HashMap::from([(1u32, 5001i64)]));
+            assert!(unit != 0, "предпосылка: тик цены двигает P&L");
+            let mark = 5000 + (need_pnl / unit) as i64;
+            let marks = HashMap::from([(1u32, mark)]);
+            let pct = b.margin_level_pct(u, &marks).expect("уровень маржи есть");
+            assert!(
+                (pct - 50).abs() <= 1,
+                "плечо {lev}: уровень маржи {pct}%, ожидали ~50%"
+            );
+        }
     }
 
     #[test]
     fn detects_negative_margin() {
         let mut s = healthy();
         s.positions[0].margin = -1;
-        assert!(check_snapshot(&s, 1)
+        assert!(check_snapshot(&s)
             .iter()
             .any(|v| v.0.contains("отрицательная маржа")));
     }
@@ -1669,7 +1889,7 @@ mod invariant_tests {
     fn detects_duplicate_ids() {
         let mut s = healthy();
         s.positions[1].id = s.positions[0].id;
-        assert!(check_snapshot(&s, 1)
+        assert!(check_snapshot(&s)
             .iter()
             .any(|v| v.0.contains("не уникальны")));
     }
@@ -1680,9 +1900,7 @@ mod invariant_tests {
     fn detects_id_beyond_counter() {
         let mut s = healthy();
         s.next_id = 1; // а позиция с id=2 уже есть
-        assert!(check_snapshot(&s, 1)
-            .iter()
-            .any(|v| v.0.contains("next_id")));
+        assert!(check_snapshot(&s).iter().any(|v| v.0.contains("next_id")));
     }
 
     #[test]
@@ -1700,10 +1918,10 @@ mod invariant_tests {
             sl: None,
             tp: None,
         });
-        assert!(check_snapshot(&s, 1).iter().any(|v| v.0.contains("ордер")));
+        assert!(check_snapshot(&s).iter().any(|v| v.0.contains("ордер")));
         s.pendings[0].qty = 10;
         s.pendings[0].price = 0;
-        assert!(check_snapshot(&s, 1).iter().any(|v| v.0.contains("цена")));
+        assert!(check_snapshot(&s).iter().any(|v| v.0.contains("цена")));
     }
 
     /// Инварианты обязаны считаться и без хранилища: они чистые функции.
@@ -1712,7 +1930,7 @@ mod invariant_tests {
     fn invariants_do_not_need_a_store() {
         let b = Broker::new(1_000_000, 1);
         let snap = b.snapshot(UserId(42)); // счёта нет — слепок по умолчанию
-        assert_eq!(check_snapshot(&snap, 1), vec![]);
+        assert_eq!(check_snapshot(&snap), vec![]);
     }
 
     /// Настоящая торговая последовательность не нарушает инвариантов: открытие,
@@ -1736,15 +1954,15 @@ mod invariant_tests {
                 None,
             )
             .expect("открытие");
-        assert_eq!(check_snapshot(&b.snapshot(u), 1), vec![], "после открытия");
+        assert_eq!(check_snapshot(&b.snapshot(u)), vec![], "после открытия");
         b.place_pending(u, 2, PosSide::Short, 500, 40_000, 2, 3, None, None);
         assert_eq!(
-            check_snapshot(&b.snapshot(u), 1),
+            check_snapshot(&b.snapshot(u)),
             vec![],
             "после лимитного ордера"
         );
         b.close(u, id, 51_000).expect("закрытие");
-        assert_eq!(check_snapshot(&b.snapshot(u), 1), vec![], "после закрытия");
+        assert_eq!(check_snapshot(&b.snapshot(u)), vec![], "после закрытия");
     }
 
     /// Занятая маржа обязана быть суммой маржи позиций — самый опасный дрейф:
@@ -1786,7 +2004,7 @@ mod invariant_tests {
             sum,
             "used_margin разошёлся с суммой маржи позиций"
         );
-        assert_eq!(check_snapshot(&snap, 1), vec![]);
+        assert_eq!(check_snapshot(&snap), vec![]);
     }
 }
 
@@ -2118,7 +2336,7 @@ mod netting_tests {
             None,
         )
         .unwrap();
-        assert_eq!(check_snapshot(&b.snapshot(u), 1), vec![], "после открытия");
+        assert_eq!(check_snapshot(&b.snapshot(u)), vec![], "после открытия");
         b.open(
             u,
             &no_marks(),
@@ -2133,7 +2351,7 @@ mod netting_tests {
         )
         .unwrap();
         assert_eq!(
-            check_snapshot(&b.snapshot(u), 1),
+            check_snapshot(&b.snapshot(u)),
             vec![],
             "после частичного сворачивания"
         );
@@ -2150,11 +2368,7 @@ mod netting_tests {
             None,
         )
         .unwrap();
-        assert_eq!(
-            check_snapshot(&b.snapshot(u), 1),
-            vec![],
-            "после переворота"
-        );
+        assert_eq!(check_snapshot(&b.snapshot(u)), vec![], "после переворота");
     }
 
     /// Разные инструменты не сворачиваются друг о друга.

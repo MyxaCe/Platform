@@ -151,9 +151,18 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         .unwrap_or_default();
     let sso = Arc::new(sso::Sso::new(jwks_url));
     let sso_enabled = sso.enabled() && std::env::var("SSO_DISABLED").ok().as_deref() != Some("1");
-    // Стартовый баланс демо-счёта. Дефолт $100k; в интеграции с платформой выравнивается
-    // под сайт (env DEMO_START_BALANCE_CENTS; целевое — per-tenant demoStartBalanceCents из
-    // CMS, когда появится server-side ключ, ADR-023).
+    // Стартовый баланс демо-счёта. Дефолт $100k; сегодня задаётся окружением
+    // (env DEMO_START_BALANCE_CENTS), то есть **меняется только выпуском** —
+    // а это настройка площадки, и правило владельца требует админку.
+    //
+    // Целевое — читать его из CMS в момент открытия счёта, как `TenantSource`
+    // читает allow-list: `GET {CMS_BASE_URL}/cms/sites/{slug}` под `X-API-Key`.
+    // **Server-side ключ уже есть** и в проде настроен — прежняя редакция
+    // этого комментария говорила «когда появится», и это было неправдой
+    // полгода. Осталось одно: несёт ли ответ площадки такое поле. Пока не
+    // несёт — умолчание здесь не выдумываем (то же правило, что у порога
+    // принудительного закрытия: придуманное у нас число молча разошлось бы с
+    // тем, по которому считает источник, и обе стороны были бы «правы»).
     let start_cents = std::env::var("DEMO_START_BALANCE_CENTS")
         .ok()
         .and_then(|s| s.parse::<i128>().ok())
@@ -334,10 +343,7 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
     // который их путает, стартует на выдуманной истории (TRM-13).
     let loaded = st.store.load_all().await?;
     let accounts_n = loaded.accounts.len();
-    let (lev, start_balance) = {
-        let b = st.broker.lock().await;
-        (b.leverage(), b.start_balance())
-    };
+    let start_balance = st.broker.lock().await.start_balance();
     {
         let mut b = st.broker.lock().await;
         for (id, snap) in loaded.accounts {
@@ -350,7 +356,7 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
         let mut js = st.journals.lock().await;
         let mut q = st.quarantined.lock().await;
         for (user, events) in loaded.journals {
-            match Journal::load(lev, start_balance, events) {
+            match Journal::load(start_balance, events) {
                 Ok(j) => {
                     js.insert(user, j);
                 }
@@ -374,7 +380,7 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
         let mut q = st.quarantined.lock().await;
         for user in b.users() {
             let snap = b.snapshot(user);
-            let violations = broker::check_snapshot(&snap, b.leverage());
+            let violations = broker::check_snapshot(&snap);
             if !violations.is_empty() {
                 q.insert(user);
                 for v in &violations {
@@ -390,7 +396,7 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
             if q.contains(&user) {
                 continue; // уже в карантине, причина названа
             }
-            let empty = Journal::new(b.leverage(), b.start_balance());
+            let empty = Journal::new(b.start_balance());
             let status = journal::audit(js.get(&user).unwrap_or(&empty), &snap);
             if !status.ok() {
                 q.insert(user);
@@ -544,7 +550,7 @@ async fn ensure_account_opened(st: &AppState, user: UserId) -> Result<(), ApiErr
         return Ok(());
     }
 
-    let (kinds, snap, lev, start_balance) = {
+    let (kinds, snap, start_balance) = {
         let mut b = st.broker.lock().await;
         // Повторная проверка под локом: между быстрым путём и этим местом счёт мог
         // завести соседний запрос. `open_account` отдаёт `false` — уходим, запись
@@ -552,12 +558,7 @@ async fn ensure_account_opened(st: &AppState, user: UserId) -> Result<(), ApiErr
         if !b.open_account_with(user, profile_for_new_account(user)) {
             return Ok(());
         }
-        (
-            b.take_events(user),
-            b.snapshot(user),
-            b.leverage(),
-            b.start_balance(),
-        )
+        (b.take_events(user), b.snapshot(user), b.start_balance())
     };
 
     // Откат заведения: счёт обязан исчезнуть из памяти вместе с несостоявшейся
@@ -570,7 +571,7 @@ async fn ensure_account_opened(st: &AppState, user: UserId) -> Result<(), ApiErr
         let mut js = st.journals.lock().await;
         let j = js
             .entry(user)
-            .or_insert_with(|| Journal::new(lev, start_balance));
+            .or_insert_with(|| Journal::new(start_balance));
         let sealed = j.seal(now_ms(), &Origin::System, &kinds);
         let diverged = journal::reconcile(&j.preview(&sealed), &snap);
         if !diverged.is_empty() {
@@ -651,7 +652,7 @@ async fn with_account<T>(
     // отказом: `f` ниже работает по заведомо существующему счёту.
     ensure_account_opened(st, user).await?;
 
-    let (out, before, snap, kinds, lev, start_balance) = {
+    let (out, before, snap, kinds, start_balance) = {
         let mut b = st.broker.lock().await;
         let before = b.snapshot(user);
         let out = f(&mut b);
@@ -659,7 +660,7 @@ async fn with_account<T>(
         // операции не должны уехать в журнал прицепом к следующей.
         let kinds = b.take_events(user);
         let snap = b.snapshot(user);
-        (out, before, snap, kinds, b.leverage(), b.start_balance())
+        (out, before, snap, kinds, b.start_balance())
     };
     let out = out?;
 
@@ -668,7 +669,7 @@ async fn with_account<T>(
     // проходит по счёту — соседи не затронуты, сервис не останавливается.
     // Код отдельный: это не деловой отказ вроде «недостаточно средств», и путать
     // их нельзя (КОНТРАКТЫ §4в).
-    let violations = broker::check_snapshot(&snap, lev);
+    let violations = broker::check_snapshot(&snap);
     if !violations.is_empty() {
         st.broker.lock().await.restore(user, before);
         for v in &violations {
@@ -685,7 +686,7 @@ async fn with_account<T>(
         let mut js = st.journals.lock().await;
         let j = js
             .entry(user)
-            .or_insert_with(|| Journal::new(lev, start_balance));
+            .or_insert_with(|| Journal::new(start_balance));
         // Чем счёт был до операции — по свёртке журнала (TRM-40). Берём здесь, пока
         // запись ещё не принята: после `commit_journal` свёртка уже «после».
         let before_bus = bus::Before {
@@ -733,9 +734,7 @@ async fn commit_journal(st: &AppState, user: UserId, sealed: Vec<broker::journal
         let b = st.broker.lock().await;
         (b.leverage(), b.start_balance())
     };
-    let j = js
-        .entry(user)
-        .or_insert_with(|| Journal::new(lev_start.0, lev_start.1));
+    let j = js.entry(user).or_insert_with(|| Journal::new(lev_start.1));
     for e in sealed {
         if let Err(fault) = j.commit(e) {
             eprintln!(
@@ -2022,12 +2021,12 @@ async fn account_journal(
     headers: HeaderMap,
 ) -> Result<Json<JournalDto>, ApiErr> {
     let user = require_user(&st, &headers).await?;
-    let (snap, lev, start_balance) = {
+    let (snap, start_balance) = {
         let b = st.broker.lock().await;
-        (b.snapshot(user), b.leverage(), b.start_balance())
+        (b.snapshot(user), b.start_balance())
     };
     let js = st.journals.lock().await;
-    let empty = Journal::new(lev, start_balance);
+    let empty = Journal::new(start_balance);
     let j = js.get(&user).unwrap_or(&empty);
     let status = journal::audit(j, &snap);
     let entries = j
@@ -2191,20 +2190,15 @@ pub async fn monitor_tick(st: &AppState) {
     for user in changed {
         let lock = account_lock(st, user).await;
         let _guard = lock.lock().await;
-        let (snap, kinds, lev, start_balance) = {
+        let (snap, kinds, start_balance) = {
             let mut b = st.broker.lock().await;
-            (
-                b.snapshot(user),
-                b.take_events(user),
-                b.leverage(),
-                b.start_balance(),
-            )
+            (b.snapshot(user), b.take_events(user), b.start_balance())
         };
         // Триггеры SL/TP и лимитных ордеров меняют счёт так же, как ручные
         // операции, поэтому и проверяются так же, и в журнал идут так же.
         // Иначе защита стояла бы только на том пути, о котором мы помним, а
         // сработавший стоп не оставлял бы следа — при том что спорят именно о нём.
-        let violations = broker::check_snapshot(&snap, lev);
+        let violations = broker::check_snapshot(&snap);
         if !violations.is_empty() {
             st.quarantined.lock().await.insert(user);
             for v in &violations {
@@ -2219,7 +2213,7 @@ pub async fn monitor_tick(st: &AppState) {
             let mut js = st.journals.lock().await;
             let j = js
                 .entry(user)
-                .or_insert_with(|| Journal::new(lev, start_balance));
+                .or_insert_with(|| Journal::new(start_balance));
             // «До» — по свёртке журнала (TRM-40). Слепка «до» здесь нет и быть не
             // может: монитор узнаёт о затронутых счетах уже после мутации.
             let before_bus = bus::Before {
@@ -2791,6 +2785,7 @@ mod invariant_wiring_tests {
                 margin: 5_000,
                 sl: None,
                 tp: None,
+                leverage: 1,
             }],
             pendings: vec![],
             closed: vec![],
@@ -2952,7 +2947,7 @@ mod invariant_wiring_tests {
             "нулевой объём обязан сохраниться как улика"
         );
         assert!(
-            !broker::check_snapshot(&snap, 1).is_empty(),
+            !broker::check_snapshot(&snap).is_empty(),
             "состояние обязано остаться помеченным как неверное"
         );
     }
