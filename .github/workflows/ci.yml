@@ -28,6 +28,25 @@ jobs:
   backend:
     name: Тесты и clippy (Rust)
     runs-on: ubuntu-latest
+    # QA-09. Живые проверки к базе помечены `#[ignore]` и до этого не гонялись
+    # НИГДЕ: ни один прогон не поднимал postgres, а локально их запускал тот,
+    # кто вспомнит. Так в master уехал порядок DDL, при котором `init()`
+    # валится на пустой базе (TRM-53 шаг 2): на обжитой схеме `ALTER` до
+    # `CREATE` проходит, и ошибку видно только там, где базы ещё нет.
+    #
+    # База прогона всегда ЧИСТАЯ — в этом вся её ценность. Обжитая прячет
+    # ровно тот класс ошибок, ради которого проверка и заводится.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: terminal_ci
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+        ports:
+          - 5432:5432
     defaults:
       run:
         working-directory: backend
@@ -72,6 +91,40 @@ jobs:
             exit 1
           fi
           tail -3 /tmp/tests.txt
+
+      # ЖИВЫЕ ПРОВЕРКИ К БАЗЕ (QA-09).
+      #
+      # `--test-threads=1` обязателен: они делят одну схему и параллельно
+      # падают на записи, а не на том, что проверяют. Проверено — те же пять
+      # проверок параллельно красные, последовательно зелёные.
+      #
+      # ДОГОВОР, КОТОРЫЙ ЭТОТ ШАГ ВВОДИТ. `--workspace`, а не один пакет:
+      # живая проверка, добавленная завтра в другом крейте, обязана гоняться
+      # тоже. Цена — `#[ignore]` в этом репозитории отныне значит «нужна живая
+      # база», и ничего другого. Первый же пропуск, поставленный по иной
+      # причине («медленно», «потом починю»), покрасит прогон. Это не риск, а
+      # условие: нужен пропуск другого рода — заводите отдельный признак,
+      # `#[ignore]` занят.
+      #
+      # Шаг обязан печатать, СКОЛЬКО проверок прошло: «0 passed; 6 ignored»
+      # означает, что он отработал вхолостую, и это неотличимо от зелёного,
+      # если смотреть только на код выхода.
+      - name: Живые проверки к PostgreSQL
+        env:
+          TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/terminal_ci
+        run: |
+          if ! cargo test --workspace -- --ignored --test-threads=1 > /tmp/live.txt 2>&1; then
+            cat /tmp/live.txt
+            grep -E "^(test .* FAILED|thread .* panicked|error\[|error:)" /tmp/live.txt | head -20               | while IFS= read -r line; do echo "::error::живые проверки: ${line}"; done
+            exit 1
+          fi
+          grep -E "^test result" /tmp/live.txt
+          PASSED=$(grep -E "^test result" /tmp/live.txt | awk '{s+=$4} END {print s+0}')
+          echo "::notice::живые проверки к БД: пройдено ${PASSED}"
+          if [ "$PASSED" -eq 0 ]; then
+            echo "::error::живые проверки не выполнились ни разу — шаг отработал вхолостую"
+            exit 1
+          fi
 
       # -D warnings: предупреждение = ошибка сборки. Тот же режим, что локально.
       #
