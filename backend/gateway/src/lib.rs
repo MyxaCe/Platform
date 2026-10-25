@@ -163,11 +163,8 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
     // несёт — умолчание здесь не выдумываем (то же правило, что у порога
     // принудительного закрытия: придуманное у нас число молча разошлось бы с
     // тем, по которому считает источник, и обе стороны были бы «правы»).
-    let start_cents = std::env::var("DEMO_START_BALANCE_CENTS")
-        .ok()
-        .and_then(|s| s.parse::<i128>().ok())
-        .filter(|c| *c > 0)
-        .unwrap_or(10_000_000);
+    let start_cents =
+        demo_start_from_env(std::env::var("DEMO_START_BALANCE_CENTS").ok().as_deref());
     // Уровень принудительного закрытия (TRM-41). Имя переменной — будущее имя
     // поля профиля юрисдикции (`CMS-24`, по умолчанию Сейшелы): когда профиль
     // появится, меняется источник, а не словарь.
@@ -510,6 +507,55 @@ async fn account_lock(st: &AppState, user: UserId) -> Arc<Mutex<()>> {
 ///
 /// Владелец — сам `user`: счёт у человека один. Поле существует затем, чтобы
 /// перестать совпадать с ключом без миграции.
+/// Стартовая сумма демо-счёта автономного терминала, из окружения.
+///
+/// Смотрится **только когда интеграции с площадкой нет**: при живой CMS сумму
+/// называет сайт, и это значение не читается вовсе (см. `DemoStart`).
+///
+/// **Ноль законен и здесь.** Прежде стоял `.filter(|c| *c > 0)`, то есть
+/// `DEMO_START_BALANCE_CENTS=0` молча превращался в сто тысяч: ноль считался
+/// «не задано». Это та же подмена, что владелец только что запретил для
+/// `demoStartBalanceCents`, и держать её на соседнем пути незачем.
+///
+/// Отрицательное и неразборчивое — умолчание: это испорченная настройка, а не
+/// намерение, и долг при открытии счёта не бывает намерением.
+fn demo_start_from_env(raw: Option<&str>) -> i128 {
+    const DEFAULT: i128 = 10_000_000;
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => DEFAULT,
+        Some(s) => match s.parse::<i128>() {
+            Ok(c) if c >= 0 => c,
+            _ => {
+                eprintln!(
+                    "[gateway] DEMO_START_BALANCE_CENTS=«{s}» не целое неотрицательное — взято умолчание {DEFAULT}"
+                );
+                DEFAULT
+            }
+        },
+    }
+}
+
+/// Отказ брокера — в код границы, СВОИМ именем (TRM-57, КОНТРАКТЫ §4б).
+///
+/// **Прежде здесь стояло `.map_err(|_| insufficient_margin)`**: любой отказ
+/// брокера приезжал человеку как «не хватает маржи». Пока вариант отказа был
+/// один, это совпадало; первый же новый превратил бы совпадение во враньё —
+/// человек шёл бы пополнять счёт из-за стоп-лосса не на той стороне цены.
+fn deal_error(e: broker::BrokerError) -> ApiErr {
+    use broker::BrokerError as E;
+    match e {
+        E::InsufficientMargin => err(StatusCode::PAYMENT_REQUIRED, "insufficient_margin"),
+        E::StopLossAlreadyReached => err(StatusCode::CONFLICT, "stop_loss_already_reached"),
+        E::TakeProfitAlreadyReached => err(StatusCode::CONFLICT, "take_profit_already_reached"),
+        E::InsufficientFunds => err(StatusCode::PAYMENT_REQUIRED, "insufficient_funds"),
+        E::UnknownPosition => err(StatusCode::NOT_FOUND, "unknown_position"),
+        E::UnknownPending => err(StatusCode::NOT_FOUND, "unknown_pending"),
+        E::UnknownAccount => err(StatusCode::NOT_FOUND, "unknown_account"),
+        E::NotADemoAccount => err(StatusCode::CONFLICT, "not_a_demo_account"),
+        E::AccountNotFlat => err(StatusCode::CONFLICT, "account_not_flat"),
+    }
+}
+
 fn profile_for_new_account(user: UserId) -> AccountProfile {
     AccountProfile::legacy_demo(user)
 }
@@ -544,18 +590,61 @@ fn profile_for_new_account(user: UserId) -> AccountProfile {
 /// Если запись не прошла, счёт **убирается из памяти**. Оставить его значило бы
 /// получить заведённый счёт без журнала, который при следующей попытке уже не
 /// напишет `AccountOpened`, — ровно тот дефект, от которого уходим.
+/// Сумма, с которой откроется демо-счёт этого человека (Р-293).
+///
+/// Три случая, и они разные:
+///
+/// * счёт **не привязан к сайту** (автономный терминал) — сайта нет, спросить
+///   некого, берём настройку окружения. Это единственный путь, где умолчание
+///   терминала законно;
+/// * счёт привязан — сумму называет **сайт**, живым запросом;
+/// * личность **не прочиталась** — мы не знаем, к какому сайту счёт, и это
+///   отказ, а не повод взять своё число. Отличать «не привязан» от «не смогли
+///   прочитать» обязательно: иначе моргнувшая база открывала бы счета чужой
+///   суммой.
+async fn demo_start_for(st: &AppState, user: UserId) -> Result<i128, ApiErr> {
+    let site = match st.store.identity_of(user).await {
+        Ok(Some((tenant, _))) => tenant,
+        Ok(None) => return Ok(st.broker.lock().await.start_balance()),
+        Err(e) => {
+            eprintln!(
+                "[gateway] личность счёта {} не прочитана — счёт НЕ заводится: {e}",
+                user.0
+            );
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity_store_unavailable",
+            ));
+        }
+    };
+    match st.tenant_instruments.demo_start_balance(&site).await {
+        DemoStart::Named(c) => Ok(c),
+        DemoStart::NoPlatformSource => Ok(st.broker.lock().await.start_balance()),
+        DemoStart::NotSet => Err(err(StatusCode::CONFLICT, "demo_start_balance_not_set")),
+        DemoStart::Unavailable => Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "demo_start_balance_unavailable",
+        )),
+    }
+}
+
 async fn ensure_account_opened(st: &AppState, user: UserId) -> Result<(), ApiErr> {
     // Быстрый путь: счёт уже есть — ни записи, ни блокировок.
     if st.broker.lock().await.has_account(user) {
         return Ok(());
     }
 
+    // Сумму спрашиваем ДО лока брокера: чтение сетевое, и держать под ним лок
+    // незачем. Отказ здесь означает, что счёт не заведён вовсе, — и это
+    // правильнее, чем завести его выдуманной суммой.
+    let demo_start = demo_start_for(st, user).await?;
+
     let (kinds, snap, start_balance) = {
         let mut b = st.broker.lock().await;
         // Повторная проверка под локом: между быстрым путём и этим местом счёт мог
         // завести соседний запрос. `open_account` отдаёт `false` — уходим, запись
         // уже сделана тем, кто успел первым.
-        if !b.open_account_with(user, profile_for_new_account(user)) {
+        if !b.open_account_with(user, profile_for_new_account(user), demo_start) {
             return Ok(());
         }
         (b.take_events(user), b.snapshot(user), b.start_balance())
@@ -597,7 +686,16 @@ async fn ensure_account_opened(st: &AppState, user: UserId) -> Result<(), ApiErr
         user,
         bus::Before {
             closed: 0,
-            balance: start_balance,
+            // «До» для только что заведённого счёта — его же стартовый
+            // остаток: заведение не является изменением остатка, о сумме
+            // говорит `account.opened`.
+            //
+            // Стояла настройка площадки, и это работало по совпадению: демо
+            // открывается ровно ею. У реального счёта остаток при открытии
+            // **ноль**, и сравнение с настройкой дало бы на шину лишнее
+            // `balance.changed` на минус всю настройку. С приходом суммы из
+            // CMS совпадение исчезло бы и у демо.
+            balance: snap.balance,
         },
         &snap,
         &kinds,
@@ -957,6 +1055,80 @@ impl TenantSource {
         }
     }
 
+    /// Стартовая сумма демо-счёта для сайта (Р-293).
+    ///
+    /// Читается **живым запросом в момент заведения счёта** — как и allow-list,
+    /// без кеша: сумму владелец меняет в админке, и счёт обязан открыться той,
+    /// что названа сейчас. Прочитанное значение уезжает в запись
+    /// `AccountOpened { balance }` и больше не перечитывается никогда, поэтому
+    /// позднейшая правка не трогает уже открытые счета.
+    ///
+    /// Своего умолчания у терминала нет и быть не может: придуманное здесь
+    /// число молча разошлось бы с тем, которое показывает сайт, и обе стороны
+    /// были бы «правы». То же правило, что у порога принудительного закрытия.
+    async fn demo_start_balance(&self, site: &str) -> DemoStart {
+        let (base, api_key, http) = match self {
+            TenantSource::Cms {
+                base,
+                api_key,
+                http,
+            } => (base, api_key, http),
+            // ПРАВИЛО ОДНОГО ИСТОЧНИКА, и его надо читать целиком.
+            //
+            // CMS сконфигурирована — она **единственный** источник суммы:
+            // нет поля или нет ответа, значит отказ, и настройка окружения не
+            // смотрится НИКОГДА. Иначе у величины стало бы два писателя, и
+            // расхождение между тем, что показывает сайт, и тем, чем открылся
+            // счёт, никто бы не заметил: обе стороны «правы».
+            //
+            // CMS не сконфигурирована — интеграции с площадкой нет, спрашивать
+            // некого, и терминал работает своей настройкой. Это не запасной
+            // путь при сбое, а другой режим работы, и он объявлен в логе
+            // старта.
+            _ => return DemoStart::NoPlatformSource,
+        };
+        let url = format!("{base}/cms/sites/{site}");
+        let resp = match http.get(&url).header("X-API-Key", api_key).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[gateway] {site}: CMS недоступна ({e}) — счёт не заводится");
+                return DemoStart::Unavailable;
+            }
+        };
+        if !resp.status().is_success() {
+            eprintln!(
+                "[gateway] {site}: CMS ответила {} — счёт не заводится",
+                resp.status()
+            );
+            return DemoStart::Unavailable;
+        }
+        let body: SiteConfigDto = match resp.json().await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[gateway] {site}: ответ CMS не разобран ({e}) — счёт не заводится");
+                return DemoStart::Unavailable;
+            }
+        };
+        match body.demo_start_balance_cents {
+            Some(c) if c >= 0 => DemoStart::Named(c),
+            Some(c) => {
+                // Отрицательная стартовая сумма — испорченная настройка, а не
+                // «долг при открытии». Отличается от «не задано»: источник
+                // сказал, и сказал невозможное.
+                eprintln!(
+                    "[gateway] {site}: стартовая сумма демо-счёта отрицательная ({c}) — счёт не заводится"
+                );
+                DemoStart::NotSet
+            }
+            None => {
+                eprintln!(
+                    "[gateway] {site}: в ответе CMS нет demoStartBalanceCents — сумма не названа, счёт не заводится"
+                );
+                DemoStart::NotSet
+            }
+        }
+    }
+
     /// Список сайта. Любой отказ закрывает торговлю и называет причину в логе.
     async fn allow_list(
         &self,
@@ -1042,6 +1214,29 @@ impl TenantSource {
 struct SiteConfigDto {
     #[serde(default)]
     instruments: Option<Vec<String>>,
+    /// Стартовая сумма демо-счёта, целые центы (Р-293, решение владельца).
+    ///
+    /// **Ноль законен**, поэтому поле `Option`, а не «ноль значит не задано».
+    /// Демо-счёт на ноль — это решение площадки; «не сказали» — другое
+    /// утверждение, и путать их нельзя ровно по той же причине, по которой
+    /// `instruments: None` не значит «ничего не разрешено».
+    #[serde(default, rename = "demoStartBalanceCents")]
+    demo_start_balance_cents: Option<i128>,
+}
+
+/// Ответ источника про стартовую сумму демо-счёта.
+///
+/// Три исхода, а не два: «сказал», «отвечает, но не сказал» и «не отвечает».
+/// Последние два оба запрещают заводить счёт, но **чинятся разными людьми** —
+/// первый владельцем в админке, второй развёртыванием. Один код на оба
+/// отправил бы человека наугад (§4б).
+enum DemoStart {
+    Named(i128),
+    NotSet,
+    Unavailable,
+    /// Интеграции с площадкой нет вовсе: CMS не сконфигурирована. Тогда
+    /// терминал работает сам по себе и берёт собственную настройку.
+    NoPlatformSource,
 }
 
 /// Разобрать статический источник allow-list: `site:BTCUSD,ETHUSD;other:XRPUSD`.
@@ -1301,17 +1496,32 @@ struct ClosedDto {
 }
 #[derive(Serialize)]
 struct AccountDto {
+    /// Заведён ли счёт (TRM-58).
+    ///
+    /// **Счёт заводится лениво — при первой операции, а не при регистрации.**
+    /// Между регистрацией и первым действием счёта нет, и так выглядит каждый
+    /// новый человек. Прежде ручка этого не говорила: она подставляла
+    /// настройку площадки как остаток и выдавала несуществующий счёт за
+    /// обычный.
+    ///
+    /// `false` — все денежные поля `null`. Не ноль: ноль — правдоподобный
+    /// остаток, по нему принимают решение (BUG-011). Вопрос «сколько у вас
+    /// денег» такому счёту просто не задан.
+    opened: bool,
     /// Модель ведения позиций счёта (ADR-025): `hedging` | `netting`. Отдаётся
     /// наружу, потому что она меняет смысл каждой встречной сделки, и человек
     /// обязан видеть её ДО того, как не сойдётся баланс.
-    model: &'static str,
-    balance: i128,
-    equity: i128,
-    used_margin: i128,
+    ///
+    /// `null` у незаведённого счёта: модель ещё не выбрана, и «hedging» по
+    /// умолчанию было бы таким же выдуманным ответом, как остаток.
+    model: Option<&'static str>,
+    balance: Option<i128>,
+    equity: Option<i128>,
+    used_margin: Option<i128>,
     /// Свободная маржа — `equity - занятая маржа`, **одно определение на весь
     /// счёт** (TRM-41). До этого экран и допуск считали её по-разному, и человек
     /// видел не то число, по которому движок решает, пустить ли сделку.
-    free_margin: i128,
+    free_margin: Option<i128>,
     /// Уровень маржи в процентах. `null` — позиций нет, и уровень **не
     /// определён**: это не «бесконечно хорошо», вопрос такому счёту не задаётся.
     /// По нему же срабатывает принудительное закрытие.
@@ -1328,7 +1538,7 @@ struct AccountDto {
     /// регулятора, а наш выбор**, поэтому виден отдельным полем: клиент вправе
     /// знать, рискует ли он остаться должным.
     negative_balance_protection: bool,
-    open_pnl: i128,
+    open_pnl: Option<i128>,
 }
 #[derive(Serialize)]
 struct InstrumentDto {
@@ -1708,7 +1918,7 @@ async fn open_deal(
             req.sl,
             req.tp,
         )
-        .map_err(|_| err(StatusCode::PAYMENT_REQUIRED, "insufficient_margin"))
+        .map_err(deal_error)
     })
     .await?;
     Ok(Json(DealDto {
@@ -1749,7 +1959,7 @@ async fn place_pending(
     let fi = feed_by_id(&st, req.instrument)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
     let id = with_account(&st, user, Origin::Client, |b| {
-        Ok(b.place_pending(
+        b.place_pending(
             user,
             req.instrument,
             side,
@@ -1759,7 +1969,8 @@ async fn place_pending(
             fi.qty_decimals,
             req.sl,
             req.tp,
-        ))
+        )
+        .map_err(deal_error)
     })
     .await?;
     Ok(Json(PendingDto {
@@ -1937,7 +2148,33 @@ async fn account(
     let user = require_user(&st, &headers).await?;
     let m = marks(&st).await;
     let b = st.broker.lock().await;
-    let balance = b.balance(user);
+
+    // Счёт заводится лениво — при первой операции (TRM-46). Пока его нет,
+    // денежных величин у человека нет тоже, и **выдумывать их здесь нельзя**:
+    // прежде ручка подставляла стартовую настройку площадки и выдавала её за
+    // остаток конкретного человека. Настройки, отданные наружу как деньги, —
+    // та же болезнь, что показанный вместо отказа ноль (BUG-011).
+    //
+    // Пороги и защита остатка отдаются и здесь: это свойства площадки, они
+    // известны и до заведения счёта, и человеку полезно видеть условия
+    // заранее.
+    if !b.has_account(user) {
+        return Ok(Json(AccountDto {
+            opened: false,
+            model: None,
+            balance: None,
+            equity: None,
+            used_margin: None,
+            free_margin: None,
+            margin_level_pct: None,
+            stop_out_level_pct: b.stop_out_pct(),
+            margin_call_level_pct: b.margin_call_pct(),
+            negative_balance_protection: b.negative_balance_protection(),
+            open_pnl: None,
+        }));
+    }
+
+    let balance = b.balance(user).expect("счёт есть: проверено выше");
     let open_pnl = b.open_pnl(user, &m);
     let used = b.used_margin(user);
     let equity = balance + open_pnl;
@@ -1951,22 +2188,23 @@ async fn account(
     // же. Вызов оставлен затем, чтобы формула не существовала дважды, — защита
     // от будущего расхождения, а не от текущего. Следующий, кто «упростит» её
     // обратно в арифметику по месту, вернёт нам ровно тот зазор.
-    let free = b.free_margin(user, &m);
+    let free = b.free_margin(user, &m).expect("счёт есть: проверено выше");
     let model = match b.model(user) {
         broker::PositionModel::Netting => "netting",
         broker::PositionModel::Hedging => "hedging",
     };
     Ok(Json(AccountDto {
-        model,
-        balance,
-        equity,
-        used_margin: used,
-        free_margin: free,
+        opened: true,
+        model: Some(model),
+        balance: Some(balance),
+        equity: Some(equity),
+        used_margin: Some(used),
+        free_margin: Some(free),
         margin_level_pct: b.margin_level_pct(user, &m),
         stop_out_level_pct: b.stop_out_pct(),
         margin_call_level_pct: b.margin_call_pct(),
         negative_balance_protection: b.negative_balance_protection(),
-        open_pnl,
+        open_pnl: Some(open_pnl),
     }))
 }
 
@@ -2290,6 +2528,11 @@ async fn send_margin_calls(st: &AppState, marks: &HashMap<u32, i64>) {
             seq: 0, // записей журнала здесь нет — номер не участвует в ключе
             at_ms: now_ms(),
         };
+        // Предупреждение бывает только у счёта с открытыми позициями —
+        // значит счёт существует. `expect` здесь документирует это условие, а
+        // не прячет случай: подстановка нуля отправила бы человеку письмо с
+        // выдуманными средствами.
+        let equity = equity.expect("маржин-колл бывает только у существующего счёта");
         let env = bus::margin_called(&who, level, stop_out, equity, used);
         eprintln!(
             "[margin] счёт {} на уровне {level}% — предупреждение отправлено (порог закрытия {:?})",
@@ -3511,6 +3754,7 @@ mod journal_wiring_tests {
                     kind: broker::AccountKind::Real,
                     ..Default::default()
                 },
+                0, // реальный счёт открывается нулём независимо от настройки
             );
         }
         with_price(&st, 1, 5_000_000).await;
@@ -3612,6 +3856,61 @@ mod journal_wiring_tests {
             kinds.iter().all(|k| !k.starts_with("position_opened")),
             "несостоявшаяся операция в журнал попасть не должна: {kinds:?}"
         );
+    }
+
+    /// Отказ по уровню приезжает СВОИМ именем, а не «не хватает маржи».
+    ///
+    /// До TRM-57 обработчик сворачивал любой отказ брокера в
+    /// `insufficient_margin` через `.map_err(|_| …)`. Пока вариант был один,
+    /// это совпадало. Первый же новый превратил бы совпадение во враньё:
+    /// человек с тейком не на той стороне цены шёл бы пополнять счёт.
+    #[tokio::test]
+    async fn a_level_already_reached_is_refused_by_its_own_name() {
+        let st = build_state();
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+
+        // Тейк НИЖЕ цены покупки — достигнут в момент постановки.
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/deals",
+            Some(serde_json::json!({
+                "instrument": 1, "side": "buy", "qty": 1000, "tp": 820
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "take_profit_already_reached", "{body}");
+        assert_ne!(
+            body["error"], "insufficient_margin",
+            "денег хватало — отказ не про них: {body}"
+        );
+
+        // Стоп ВЫШЕ цены покупки — сработал бы сразу, и это другая причина.
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/deals",
+            Some(serde_json::json!({
+                "instrument": 1, "side": "buy", "qty": 1000, "sl": 90_000
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "stop_loss_already_reached", "{body}");
+
+        // И здоровая сделка проходит — отказ не задел обычный случай.
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/deals",
+            Some(serde_json::json!({
+                "instrument": 1, "side": "buy", "qty": 1000, "sl": 40_000, "tp": 60_000
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     /// То же для закрытия несуществующей позиции: счёт заводится и этой операцией.
@@ -3789,6 +4088,278 @@ mod bus_wiring_tests {
         ) -> Result<Option<(String, String)>, persistence::StoreError> {
             Ok((u == self.linked).then(|| (TENANT.to_string(), SUB.to_string())))
         }
+    }
+
+    /// Подставная CMS: отвечает заданным телом на `GET /cms/sites/{slug}`.
+    ///
+    /// Нужна настоящая по протоколу, а не подмена функции: проверяется путь
+    /// «сходили к источнику и разобрали ответ», и именно в нём живут
+    /// «поля нет» и «источник молчит».
+    async fn stub_cms(body: Option<serde_json::Value>) -> String {
+        use axum::response::IntoResponse;
+        let app = Router::new().route(
+            "/cms/sites/:slug",
+            axum::routing::get(move || {
+                let b = body.clone();
+                async move {
+                    match b {
+                        Some(v) => axum::Json(v).into_response(),
+                        None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    }
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(l, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Состояние, у которого источник сайта — поднятая рядом подставная CMS.
+    fn with_cms(mut st: AppState, base: String) -> AppState {
+        st.tenant_instruments = Arc::new(TenantSource::Cms {
+            base,
+            api_key: "k".to_string(),
+            http: reqwest::Client::new(),
+        });
+        st
+    }
+
+    async fn get_json(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    async fn post_json(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    fn deal() -> serde_json::Value {
+        serde_json::json!({"instrument": 1, "side": "buy", "qty": 1000})
+    }
+
+    /// Счёт открывается суммой, которую назвал САЙТ, а не настройкой терминала.
+    #[tokio::test]
+    async fn the_account_opens_with_the_amount_the_site_named() {
+        let base = stub_cms(Some(serde_json::json!({
+            "instruments": ["BTCUSD"],
+            "demoStartBalanceCents": 77_700
+        })))
+        .await;
+        let st = with_cms(build_state_with(tenanted(DEFAULT_USER)), base);
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+
+        assert_eq!(post_json(&app, "/deals", deal()).await.0, StatusCode::OK);
+        let (_, acc) = get_json(&app, "/account").await;
+        // Маржа РЕЗЕРВИРУЕТСЯ, а не списывается: остаток равен названной сумме
+        // целиком. Первая редакция складывала остаток с занятым и получала
+        // 127 700 — ошибка была в утверждении, а не в коде.
+        assert_eq!(
+            acc["balance"],
+            serde_json::json!(77_700),
+            "счёт открыт суммой, которую назвал сайт: {acc}"
+        );
+        assert_ne!(
+            acc["balance"], 10_000_000,
+            "настройка терминала при живой CMS не смотрится вовсе: {acc}"
+        );
+    }
+
+    /// Ноль законен: демо-счёт на ноль — решение площадки, а не «не сказали».
+    #[tokio::test]
+    async fn zero_is_a_legal_start_balance() {
+        let base = stub_cms(Some(serde_json::json!({
+            "instruments": ["BTCUSD"],
+            "demoStartBalanceCents": 0
+        })))
+        .await;
+        let st = with_cms(build_state_with(tenanted(DEFAULT_USER)), base);
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+
+        // Сделка не пройдёт — не на что; но СЧЁТ обязан завестись, и нулём.
+        let (status, _) = post_json(&app, "/deals", deal()).await;
+        assert_eq!(
+            status,
+            StatusCode::PAYMENT_REQUIRED,
+            "денег нет — отказ по марже"
+        );
+        let (_, acc) = get_json(&app, "/account").await;
+        assert_eq!(acc["opened"], serde_json::json!(true), "{acc}");
+        assert_eq!(acc["balance"], serde_json::json!(0), "{acc}");
+    }
+
+    /// Сумма не названа — счёт НЕ заводится, и отказ говорит, чья это правка.
+    #[tokio::test]
+    async fn an_unnamed_start_balance_refuses_instead_of_inventing_one() {
+        let base = stub_cms(Some(serde_json::json!({ "instruments": ["BTCUSD"] }))).await;
+        let st = with_cms(build_state_with(tenanted(DEFAULT_USER)), base);
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+
+        let (status, body) = post_json(&app, "/deals", deal()).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "demo_start_balance_not_set", "{body}");
+
+        let (_, acc) = get_json(&app, "/account").await;
+        assert_eq!(
+            acc["opened"],
+            serde_json::json!(false),
+            "несостоявшееся заведение не оставляет счёта: {acc}"
+        );
+    }
+
+    /// Источник молчит — тоже отказ, но ДРУГОЙ: чинит его другой человек.
+    #[tokio::test]
+    async fn an_unreachable_source_is_a_different_refusal() {
+        let base = stub_cms(None).await;
+        let st = with_cms(build_state_with(tenanted(DEFAULT_USER)), base);
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+
+        let (status, body) = post_json(&app, "/deals", deal()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["error"], "demo_start_balance_unavailable", "{body}");
+        assert_ne!(
+            body["error"], "demo_start_balance_not_set",
+            "«не ответил» и «не сказал» чинят разные люди: {body}"
+        );
+    }
+
+    /// Хранилище, которое НЕ МОЖЕТ сказать, к какому сайту привязан счёт.
+    ///
+    /// Отличается от «счёт не привязан» принципиально: там ответ есть, здесь
+    /// его нет. Если бы оба случая вели в «автономный терминал», моргнувшая
+    /// база открывала бы счёт настройкой терминала вместо суммы сайта — тихо
+    /// и каждый раз по-разному.
+    struct BlindIdentity(persistence::MemoryStore);
+
+    #[async_trait::async_trait]
+    impl Persistence for BlindIdentity {
+        async fn init(&self) -> Result<(), persistence::StoreError> {
+            self.0.init().await
+        }
+        async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
+            self.0.load_all().await
+        }
+        async fn save_account(
+            &self,
+            u: UserId,
+            s: &broker::AccountSnapshot,
+            e: &[journal::AccountEvent],
+            o: &[persistence::OutboxRecord],
+        ) -> Result<(), persistence::StoreError> {
+            self.0.save_account(u, s, e, o).await
+        }
+        // `claim_outbox` не переопределяем: у признака есть умолчание, и этот
+        // тест очередь не разбирает.
+        async fn identity_of(
+            &self,
+            _u: UserId,
+        ) -> Result<Option<(String, String)>, persistence::StoreError> {
+            Err(persistence::StoreError("связь с базой потеряна".into()))
+        }
+    }
+
+    /// Ноль из окружения — это ноль, а не «не задано».
+    #[test]
+    fn demo_start_from_env_treats_zero_as_a_value() {
+        assert_eq!(super::demo_start_from_env(None), 10_000_000, "не задано");
+        assert_eq!(super::demo_start_from_env(Some("")), 10_000_000, "пусто");
+        assert_eq!(super::demo_start_from_env(Some("777")), 777);
+        assert_eq!(
+            super::demo_start_from_env(Some("0")),
+            0,
+            "ноль — решение, а не отсутствие значения"
+        );
+        assert_eq!(
+            super::demo_start_from_env(Some("-5")),
+            10_000_000,
+            "отрицательная сумма — испорченная настройка, не намерение"
+        );
+        assert_eq!(super::demo_start_from_env(Some("abc")), 10_000_000);
+    }
+
+    /// Заведение счёта НЕ порождает `balance.changed`.
+    ///
+    /// О стартовой сумме говорит `account.opened`, и второе событие об одном и
+    /// том же факте — это изменение остатка, которого не было.
+    ///
+    /// Пока «до» бралось из настройки терминала, совпадение прятало ошибку:
+    /// демо открывался ровно настройкой, разница выходила нулевой. С суммой из
+    /// CMS совпадения нет — а у реального счёта (остаток ноль) его не было
+    /// никогда, и на шину уехало бы `balance.changed` на минус всю настройку.
+    #[tokio::test]
+    async fn opening_an_account_does_not_look_like_a_balance_change() {
+        let base = stub_cms(Some(serde_json::json!({
+            "instruments": ["BTCUSD"],
+            "demoStartBalanceCents": 77_700
+        })))
+        .await;
+        let st = with_cms(build_state_with(tenanted(DEFAULT_USER)), base);
+        restore_state(&st).await.unwrap();
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+
+        assert_eq!(post_json(&app, "/deals", deal()).await.0, StatusCode::OK);
+
+        let all = queued(&st).await;
+        let names: Vec<String> = all
+            .iter()
+            .map(|e| e["event"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == bus::EV_ACCOUNT_OPENED),
+            "счёт заведён, событие обязано быть: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == bus::EV_BALANCE_CHANGED),
+            "заведение — не изменение остатка: {names:?}"
+        );
+    }
+
+    /// Личность не прочиталась — счёт НЕ заводится и настройка не подставляется.
+    #[tokio::test]
+    async fn an_unreadable_identity_refuses_instead_of_falling_back() {
+        let st = build_state_with(Arc::new(BlindIdentity(persistence::MemoryStore::new())));
+        with_price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+
+        let (status, body) = post_json(&app, "/deals", deal()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["error"], "identity_store_unavailable", "{body}");
+
+        let (_, acc) = get_json(&app, "/account").await;
+        assert_eq!(
+            acc["opened"],
+            serde_json::json!(false),
+            "«не смогли прочитать» — не повод завести счёт своей суммой: {acc}"
+        );
     }
 
     fn tenanted(linked: UserId) -> Arc<Tenanted> {
@@ -4097,7 +4668,12 @@ mod bus_wiring_tests {
             send(&app, "POST", "/deals/1/close", None).await,
             StatusCode::OK
         );
-        let lost = st.broker.lock().await.balance(DEFAULT_USER);
+        let lost = st
+            .broker
+            .lock()
+            .await
+            .balance(DEFAULT_USER)
+            .expect("счёт заведён");
         assert!(lost < 10_000_000, "счёт обязан просесть");
 
         assert_eq!(
@@ -4106,7 +4682,7 @@ mod bus_wiring_tests {
         );
         assert_eq!(
             st.broker.lock().await.balance(DEFAULT_USER),
-            10_000_000,
+            Some(10_000_000),
             "деньги меняет ТЕРМИНАЛ, а не кабинет у себя"
         );
 
@@ -4224,6 +4800,64 @@ mod margin_wiring_tests {
                 ask: px,
             },
         );
+    }
+
+    /// Незаведённый счёт назван словами, а не показан стартовой настройкой.
+    ///
+    /// **Счёт заводится при первой операции, а не при регистрации** — между
+    /// ними его нет, и так выглядит каждый новый человек. Ручка подставляла
+    /// сюда стартовую сумму площадки, и экран показывал её как остаток
+    /// конкретного человека (TRM-58).
+    ///
+    /// Сегодня число совпадало случайно: все счета демо и заводятся с той же
+    /// суммы. У реального счёта стартовый остаток ноль — та же подстановка
+    /// показала бы ему чужие десять тысяч.
+    #[tokio::test]
+    async fn an_account_that_does_not_exist_yet_is_named_not_invented() {
+        let st = build_state();
+        let app = router(st.clone());
+
+        let acc = get(&app, "/account").await;
+
+        assert_eq!(acc["opened"], serde_json::json!(false), "{acc}");
+        for f in [
+            "balance",
+            "equity",
+            "used_margin",
+            "free_margin",
+            "open_pnl",
+            "model",
+        ] {
+            assert!(
+                acc[f].is_null(),
+                "{f} у незаведённого счёта обязан быть null, а не числом: {acc}"
+            );
+        }
+        // Ноль здесь был бы не лучше настройки: ноль — правдоподобный остаток,
+        // по нему принимают решение (BUG-011).
+        assert_ne!(acc["balance"], serde_json::json!(0), "{acc}");
+
+        // Свойства ПЛОЩАДКИ известны и до заведения счёта — их скрывать не за
+        // что, человеку полезно видеть условия заранее.
+        assert!(
+            acc.get("negative_balance_protection").is_some(),
+            "защита остатка — свойство площадки, она известна: {acc}"
+        );
+
+        // А после первой операции счёт заведён, и цифры появляются.
+        price(&st, 1, 5_000_000).await;
+        assert_eq!(
+            post(
+                &app,
+                "/deals",
+                serde_json::json!({"instrument":1,"side":"buy","qty":1000})
+            )
+            .await,
+            StatusCode::OK
+        );
+        let acc = get(&app, "/account").await;
+        assert_eq!(acc["opened"], serde_json::json!(true), "{acc}");
+        assert!(acc["balance"].is_i64(), "{acc}");
     }
 
     /// Отказ не приходит на счёт, где экран показывает свободные деньги.

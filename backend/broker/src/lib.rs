@@ -218,6 +218,54 @@ pub enum BrokerError {
     NotADemoAccount,
     /// На счёте есть открытые позиции или ордера, а операция требует плоского.
     AccountNotFlat,
+    /// Стоп-лосс уже по ту сторону цены: позиция закрылась бы на первом же
+    /// тике (TRM-57).
+    StopLossAlreadyReached,
+    /// Тейк-профит уже достигнут: позиция закрылась бы на первом же тике.
+    TakeProfitAlreadyReached,
+}
+
+/// Сработал бы стоп-лосс `sl` при цене `m` у позиции стороны `side`.
+///
+/// **Одна формула на две надобности** (TRM-57): по ней прогон триггеров
+/// закрывает позицию, и по ней же граница отказывает в уровне, который
+/// закрыл бы её сразу. Будь их две, они разошлись бы — и граница принимала бы
+/// уровень, срабатывающий на следующем тике, или отказывала в том, что не
+/// сработало бы никогда. Та же защита, что у свободной маржи (TRM-41).
+pub fn stop_loss_reached(side: PosSide, m: i64, sl: i64) -> bool {
+    match side {
+        PosSide::Long => m <= sl,
+        PosSide::Short => m >= sl,
+    }
+}
+
+/// Сработал бы тейк-профит `tp` при цене `m`. См. [`stop_loss_reached`].
+pub fn take_profit_reached(side: PosSide, m: i64, tp: i64) -> bool {
+    match side {
+        PosSide::Long => m >= tp,
+        PosSide::Short => m <= tp,
+    }
+}
+
+/// Отказать, если уровень уже по ту сторону цены `at` (TRM-57).
+///
+/// `at` — цена, относительно которой уровень будет срабатывать: для открытия
+/// это **марк-цена** (по ней пойдёт ближайший прогон триггеров), для
+/// отложенного ордера — **его собственная цена**, потому что позиция родится
+/// именно там, а не там, где рынок сейчас.
+fn refuse_levels_already_reached(
+    side: PosSide,
+    at: i64,
+    sl: Option<i64>,
+    tp: Option<i64>,
+) -> Result<(), BrokerError> {
+    if sl.is_some_and(|sl| stop_loss_reached(side, at, sl)) {
+        return Err(BrokerError::StopLossAlreadyReached);
+    }
+    if tp.is_some_and(|tp| take_profit_reached(side, at, tp)) {
+        return Err(BrokerError::TakeProfitAlreadyReached);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default, Clone)]
@@ -381,6 +429,13 @@ impl Account {
         sl: Option<i64>,
         tp: Option<i64>,
     ) -> Result<u64, BrokerError> {
+        // Уровень, уже достигнутый рынком, — отказ, а не позиция, живущая до
+        // первого тика (TRM-57). Сверяемся с МАРК-ценой: по ней пойдёт
+        // ближайший прогон триггеров. Цены нет — судить не о чем, и
+        // выдумывать отказ не станем.
+        if let Some(&m) = marks.get(&instrument) {
+            refuse_levels_already_reached(side, m, sl, tp)?;
+        }
         match self.model {
             PositionModel::Hedging => {
                 self.open_new(lev, marks, instrument, side, qty, entry, pd, qd, sl, tp)
@@ -695,14 +750,10 @@ impl Account {
         let mut to_close: Vec<(u64, i64, i64, CloseCause)> = Vec::new();
         for pos in self.positions.values() {
             if let Some(&m) = marks.get(&pos.instrument) {
-                let sl_hit = pos.sl.is_some_and(|sl| match pos.side {
-                    PosSide::Long => m <= sl,
-                    PosSide::Short => m >= sl,
-                });
-                let tp_hit = pos.tp.is_some_and(|tp| match pos.side {
-                    PosSide::Long => m >= tp,
-                    PosSide::Short => m <= tp,
-                });
+                let sl_hit = pos.sl.is_some_and(|sl| stop_loss_reached(pos.side, m, sl));
+                let tp_hit = pos
+                    .tp
+                    .is_some_and(|tp| take_profit_reached(pos.side, m, tp));
                 // Исполняем по НАБЛЮДЁННОЙ цене `m` — решение владельца Р-178,
                 // проскальзывание. Гарантия уровня означала бы, что разницу на
                 // каждом скачке платит брокер: это отдельный продукт, который
@@ -977,7 +1028,7 @@ impl Broker {
     /// деньги на счёте оставались без происхождения (найдено 24.10 живым
     /// прогоном). Разделять надо там, где разные факты, а не ловить их на выходе.
     pub fn open_account(&mut self, user: UserId) -> bool {
-        self.open_account_with(user, AccountProfile::legacy_demo(user))
+        self.open_account_with(user, AccountProfile::legacy_demo(user), self.start_balance)
     }
 
     /// Завести счёт с **названным профилем** и стартовым балансом по его роду
@@ -987,11 +1038,30 @@ impl Broker {
     /// открывается нулём**. Ненулевой начальный баланс на реальном счёте — это
     /// деньги, взявшиеся ниоткуда, и решать это у места вызова нельзя, иначе
     /// однажды решат иначе.
-    pub fn open_account_with(&mut self, user: UserId, profile: AccountProfile) -> bool {
+    ///
+    /// `demo_start` — сумма, с которой открывается **демо**-счёт, и она
+    /// передаётся, а не читается из поля брокера.
+    ///
+    /// **Это та же развязка, что с плечом (TRM-53).** Сумма — настройка
+    /// площадки, её меняет владелец в админке; будь она полем брокера, правка
+    /// задним числом меняла бы то, с чего открывались прошлые счета. Как
+    /// вход она попадает в запись `AccountOpened { balance }` и остаётся в
+    /// истории навсегда: свёртка берёт остаток оттуда, а не из сегодняшней
+    /// настройки.
+    ///
+    /// **Ноль законен.** Демо-счёт на ноль — это решение площадки, а не
+    /// отсутствие значения; отличать «ноль» от «не сказали» обязан тот, кто
+    /// читает источник, и до сюда «не сказали» не доходит.
+    pub fn open_account_with(
+        &mut self,
+        user: UserId,
+        profile: AccountProfile,
+        demo_start: Cents,
+    ) -> bool {
         if self.accounts.contains_key(&user) {
             return false;
         }
-        let start = start_balance_for(profile.kind, self.start_balance);
+        let start = start_balance_for(profile.kind, demo_start);
         let mut a = Account {
             balance: start,
             profile,
@@ -1042,11 +1112,19 @@ impl Broker {
 
     // ---- Чтение -----------------------------------------------------------
 
-    pub fn balance(&self, user: UserId) -> Cents {
-        self.accounts
-            .get(&user)
-            .map(|a| a.balance)
-            .unwrap_or(self.start_balance)
+    /// Остаток счёта. `None` — **счёта нет**, и это не ноль (TRM-58).
+    ///
+    /// Прежде здесь стояло `unwrap_or(self.start_balance)`: несуществующему
+    /// счёту приписывалась настройка площадки. Число выглядело остатком
+    /// конкретного человека, и ручка `/account` отдавала его наружу.
+    /// Совпадало оно случайно — все счета сегодня демо и заводятся с той же
+    /// суммы; у реального счёта стартовый остаток ноль, и та же подстановка
+    /// показала бы ему чужие десять тысяч.
+    ///
+    /// Это ровно BUG-011, этажом ниже: «ноль — правдоподобный баланс, по нему
+    /// принимают решение». Правдоподобна и настройка площадки.
+    pub fn balance(&self, user: UserId) -> Option<Cents> {
+        self.accounts.get(&user).map(|a| a.balance)
     }
     pub fn used_margin(&self, user: UserId) -> Cents {
         self.accounts
@@ -1056,11 +1134,11 @@ impl Broker {
     }
     /// Свободная маржа — через equity, **одним определением на весь счёт**
     /// (TRM-41). Требует цены: нереализованный результат — часть средств.
-    pub fn free_margin(&self, user: UserId, marks: &HashMap<u32, i64>) -> Cents {
-        self.accounts
-            .get(&user)
-            .map(|a| a.free_margin(marks))
-            .unwrap_or(self.start_balance)
+    /// `None` — счёта нет (TRM-58). Прежде здесь тоже подставлялась стартовая
+    /// настройка площадки, и это было опаснее подставленного остатка:
+    /// свободная маржа — то число, по которому решают, пускать ли сделку.
+    pub fn free_margin(&self, user: UserId, marks: &HashMap<u32, i64>) -> Option<Cents> {
+        self.accounts.get(&user).map(|a| a.free_margin(marks))
     }
 
     /// Уровень маржи в процентах: `equity / занятая маржа`.
@@ -1107,8 +1185,11 @@ impl Broker {
             })
             .unwrap_or(0)
     }
-    pub fn equity(&self, user: UserId, marks: &HashMap<u32, i64>) -> Cents {
-        self.balance(user) + self.open_pnl(user, marks)
+    /// Средства счёта. `None` — счёта нет (TRM-58): складывать нечего, и ноль
+    /// здесь был бы таким же правдоподобным ответом на незаданный вопрос, как
+    /// подставленный остаток.
+    pub fn equity(&self, user: UserId, marks: &HashMap<u32, i64>) -> Option<Cents> {
+        self.balance(user).map(|b| b + self.open_pnl(user, marks))
     }
 
     // ---- Операции ---------------------------------------------------------
@@ -1163,7 +1244,16 @@ impl Broker {
         amount: Cents,
         marks: &HashMap<u32, i64>,
     ) -> Result<Cents, BrokerError> {
-        if amount > self.free_margin(user, marks) {
+        // Счёта нет — свободных средств нет, и вывод отказан (TRM-58).
+        //
+        // Прежде сравнение шло со стартовой настройкой площадки, и вывод с
+        // НЕСУЩЕСТВУЮЩЕГО счёта проходил: `acct()` заводил его тут же и
+        // выдавал стартовую сумму. Наружу эта ручка не выведена, так что
+        // следов в проде нет, но поведение было именно такое.
+        let Some(free) = self.free_margin(user, marks) else {
+            return Err(BrokerError::InsufficientFunds);
+        };
+        if amount > free {
             return Err(BrokerError::InsufficientFunds);
         }
         let a = self.acct(user);
@@ -1173,6 +1263,11 @@ impl Broker {
     }
 
     /// Разместить отложенный (лимитный) ордер. Возвращает его id.
+    ///
+    /// Уровни сверяются с **ценой самого ордера**, а не с рынком (TRM-57):
+    /// позиция родится там, где ордер исполнится. Лимит на покупку стоит ниже
+    /// рынка по замыслу, и сверка с текущей ценой отвергала бы здоровые
+    /// ордера, пропуская как раз больные.
     #[allow(clippy::too_many_arguments)]
     pub fn place_pending(
         &mut self,
@@ -1185,7 +1280,8 @@ impl Broker {
         qd: u8,
         sl: Option<i64>,
         tp: Option<i64>,
-    ) -> u64 {
+    ) -> Result<u64, BrokerError> {
+        refuse_levels_already_reached(side, price, sl, tp)?;
         let a = self.acct(user);
         a.next_id += 1;
         let id = a.next_id;
@@ -1214,7 +1310,7 @@ impl Broker {
             sl,
             tp,
         });
-        id
+        Ok(id)
     }
 
     pub fn cancel_pending(&mut self, user: UserId, id: u64) -> Result<(), BrokerError> {
@@ -1861,7 +1957,7 @@ mod invariant_tests {
             );
             // Уводим equity ровно в половину занятого: баланс + открытый P&L.
             let want_equity = used / 2;
-            let bal = b.balance(u);
+            let bal = b.balance(u).expect("счёт заведён");
             let need_pnl = want_equity - bal;
             // P&L длинной = (mark - entry) * объём в минорных единицах счёта.
             let unit = b.open_pnl(u, &HashMap::from([(1u32, 5001i64)]));
@@ -1955,7 +2051,8 @@ mod invariant_tests {
             )
             .expect("открытие");
         assert_eq!(check_snapshot(&b.snapshot(u)), vec![], "после открытия");
-        b.place_pending(u, 2, PosSide::Short, 500, 40_000, 2, 3, None, None);
+        b.place_pending(u, 2, PosSide::Short, 500, 40_000, 2, 3, None, None)
+            .expect("ордер поставлен");
         assert_eq!(
             check_snapshot(&b.snapshot(u)),
             vec![],
@@ -2173,7 +2270,7 @@ mod netting_tests {
             None,
         )
         .unwrap();
-        let before = b.balance(u);
+        let before = b.balance(u).expect("счёт заведён");
 
         b.open(
             u,
@@ -2206,7 +2303,7 @@ mod netting_tests {
             "маржа обязана уменьшиться пропорционально остатку"
         );
         assert_eq!(
-            b.balance(u) - before,
+            b.balance(u).expect("счёт заведён") - before,
             45,
             "реализован P&L только свёрнутой части"
         );
@@ -2278,7 +2375,7 @@ mod netting_tests {
             None,
         )
         .unwrap();
-        let before = b.balance(u);
+        let before = b.balance(u).expect("счёт заведён");
 
         b.open(
             u,
@@ -2301,7 +2398,7 @@ mod netting_tests {
         assert_eq!(ps[0].entry, 5200, "остаток открыт по цене встречной сделки");
         assert_eq!(ps[0].margin, 780);
         assert_eq!(
-            b.balance(u) - before,
+            b.balance(u).expect("счёт заведён") - before,
             20,
             "реализован P&L только закрытой части"
         );
@@ -2503,7 +2600,8 @@ mod netting_tests {
     fn pending_orders_do_not_block_model_change() {
         let mut b = Broker::new(10_000_000, 1);
         let u = UserId(1);
-        b.place_pending(u, 1, PosSide::Long, 100, 4000, PD, QD, None, None);
+        b.place_pending(u, 1, PosSide::Long, 100, 4000, PD, QD, None, None)
+            .expect("ордер поставлен");
         assert!(
             b.adopt_model(u, PositionModel::Netting),
             "ордер — не позиция"

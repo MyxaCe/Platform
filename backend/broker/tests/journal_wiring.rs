@@ -309,7 +309,8 @@ fn take_profit_is_recorded_separately_from_stop_loss() {
 fn pending_lifecycle_is_recorded_place_cancel_and_fill() {
     let mut r = Rig::new();
     let id =
-        r.b.place_pending(U, 1, PosSide::Long, 100, 4000, PD, QD, None, None);
+        r.b.place_pending(U, 1, PosSide::Long, 100, 4000, PD, QD, None, None)
+            .expect("ордер поставлен");
     r.record(Origin::Client);
     r.must_reconcile("после размещения ордера");
 
@@ -317,7 +318,8 @@ fn pending_lifecycle_is_recorded_place_cancel_and_fill() {
     r.record(Origin::Client);
     r.must_reconcile("после отмены ордера");
 
-    r.b.place_pending(U, 1, PosSide::Long, 100, 4000, PD, QD, None, None);
+    r.b.place_pending(U, 1, PosSide::Long, 100, 4000, PD, QD, None, None)
+        .expect("ордер поставлен");
     r.record(Origin::Client);
     r.b.check(&HashMap::from([(1, 3_900)]), false);
     r.record(Origin::System);
@@ -373,10 +375,10 @@ fn manual_posting_goes_through_the_same_path_and_is_distinguishable() {
         .operator()
         .expect("проводка обязана остаться ручной");
     assert_eq!((who.who(), who.incident()), ("ops@platform", "INC-42"));
-    assert_eq!(r.b.balance(U), START + 1_234_500);
+    assert_eq!(r.b.balance(U).expect("счёт заведён"), START + 1_234_500);
     assert_eq!(
         r.j.replay().balance,
-        r.b.balance(U),
+        r.b.balance(U).expect("счёт заведён"),
         "остаток обязан сходиться с проводками"
     );
 }
@@ -513,7 +515,8 @@ fn a_long_mixed_sequence_replays_to_the_same_account() {
     )
     .unwrap();
     r.record(Origin::Client);
-    r.b.place_pending(U, 3, PosSide::Long, 50, 1_000, PD, QD, None, None);
+    r.b.place_pending(U, 3, PosSide::Long, 50, 1_000, PD, QD, None, None)
+        .expect("ордер поставлен");
     r.record(Origin::Client);
     r.b.check(&HashMap::from([(1, 48_000), (3, 900)]), false);
     r.record(Origin::System);
