@@ -109,7 +109,9 @@ fn losing_trade_reduces_balance() {
 #[test]
 fn pending_buy_triggers_when_price_drops() {
     let mut b = Broker::new(1_000_000, 1);
-    let pid = b.place_pending(ALICE, 1, PosSide::Long, 1000, 5_900_000, PD, QD, None, None);
+    let pid = b
+        .place_pending(ALICE, 1, PosSide::Long, 1000, 5_900_000, PD, QD, None, None)
+        .expect("ордер поставлен");
     assert_eq!(b.pendings(ALICE).len(), 1);
     b.check(&marks(1, 6_000_000), false); // цена выше лимита — не сработал
     assert_eq!(b.pendings(ALICE).len(), 1);
@@ -122,7 +124,9 @@ fn pending_buy_triggers_when_price_drops() {
 #[test]
 fn cancel_pending() {
     let mut b = Broker::new(1_000_000, 1);
-    let pid = b.place_pending(ALICE, 1, PosSide::Long, 1000, 5_900_000, PD, QD, None, None);
+    let pid = b
+        .place_pending(ALICE, 1, PosSide::Long, 1000, 5_900_000, PD, QD, None, None)
+        .expect("ордер поставлен");
     assert_eq!(b.cancel_pending(ALICE, pid), Ok(()));
     assert!(b.pendings(ALICE).is_empty());
     assert_eq!(
@@ -212,7 +216,8 @@ fn check_reports_only_changed_accounts() {
 #[test]
 fn check_reports_account_on_pending_fill() {
     let mut b = Broker::new(1_000_000, 1);
-    b.place_pending(ALICE, 1, PosSide::Long, 1000, 5_900_000, PD, QD, None, None);
+    b.place_pending(ALICE, 1, PosSide::Long, 1000, 5_900_000, PD, QD, None, None)
+        .expect("ордер поставлен");
     assert!(b.check(&marks(1, 6_000_000), false).is_empty()); // выше лимита — не сработал
     assert_eq!(b.check(&marks(1, 5_900_000), false), vec![ALICE]); // сработал
     assert_eq!(b.positions(ALICE).len(), 1);
@@ -234,7 +239,8 @@ fn snapshot_restore_roundtrip() {
         None,
     )
     .unwrap();
-    b.place_pending(ALICE, 2, PosSide::Short, 500, 7_000_000, PD, QD, None, None);
+    b.place_pending(ALICE, 2, PosSide::Short, 500, 7_000_000, PD, QD, None, None)
+        .expect("ордер поставлен");
     b.check(&marks(1, 5_950_000), false); // закрыли по SL → появилась история
     let snap = b.snapshot(ALICE);
     assert_eq!(snap.pendings.len(), 1);
@@ -253,7 +259,9 @@ fn snapshot_restore_roundtrip() {
 
     // next_id восстановлен: новый ордер не должен переиспользовать занятый id.
     let used: Vec<u64> = fresh.pendings(ALICE).iter().map(|p| p.id).collect();
-    let new_id = fresh.place_pending(ALICE, 3, PosSide::Long, 100, 1_000_000, PD, QD, None, None);
+    let new_id = fresh
+        .place_pending(ALICE, 3, PosSide::Long, 100, 1_000_000, PD, QD, None, None)
+        .expect("ордер поставлен");
     assert!(!used.contains(&new_id));
 }
 
@@ -564,7 +572,8 @@ fn manual_close_names_no_level() {
 #[test]
 fn pending_fill_on_a_gap_opens_at_the_market_not_at_the_level() {
     let mut b = Broker::new(1_000_000, 1);
-    b.place_pending(ALICE, 1, PosSide::Long, 100, 5_900_000, PD, QD, None, None);
+    b.place_pending(ALICE, 1, PosSide::Long, 100, 5_900_000, PD, QD, None, None)
+        .expect("ордер поставлен");
     b.check(&marks(1, 5_300_000), true);
 
     let pos = b.positions(ALICE);
@@ -1452,7 +1461,8 @@ fn a_reset_is_refused_while_the_account_is_not_flat() {
     // И с отложенным ордером тоже: он тоже обязательство счёта.
     let mut b2 = Broker::new(1_000_000, 1);
     b2.open_account_with(ALICE, AccountProfile::legacy_demo(ALICE));
-    b2.place_pending(ALICE, 1, PosSide::Long, 1000, 5_000_000, PD, QD, None, None);
+    b2.place_pending(ALICE, 1, PosSide::Long, 1000, 5_000_000, PD, QD, None, None)
+        .expect("ордер поставлен");
     assert_eq!(b2.reset_demo(ALICE), Err(BrokerError::AccountNotFlat));
 }
 
@@ -1471,4 +1481,123 @@ fn a_real_account_cannot_be_reset() {
 fn resetting_a_missing_account_says_so() {
     let mut b = Broker::new(1_000_000, 1);
     assert_eq!(b.reset_demo(ALICE), Err(BrokerError::UnknownAccount));
+}
+
+// ---- Уровень, уже достигнутый рынком (TRM-57) ------------------------------
+
+/// Позиция не открывается с уровнем, который закрыл бы её на первом же тике.
+///
+/// **Найдено при разборе TRM-56.** В ленте кабинета стояло `level: 820` рядом
+/// с `price: 80542.79`: человек поставил тейк 820 на покупку BTC по 80542,
+/// терминал это принял, и позиция закрылась на ближайшем прогоне триггеров.
+/// Данные не врали — врало то, что такой приказ вообще был принят.
+#[test]
+fn a_level_already_past_the_price_is_refused_not_opened() {
+    const MARK: i64 = 8_054_279; // 80542.79
+    let cases = [
+        (
+            PosSide::Long,
+            Some(8_100_000),
+            None,
+            BrokerError::StopLossAlreadyReached,
+        ),
+        (
+            PosSide::Long,
+            None,
+            Some(82_000),
+            BrokerError::TakeProfitAlreadyReached,
+        ),
+        (
+            PosSide::Short,
+            Some(8_000_000),
+            None,
+            BrokerError::StopLossAlreadyReached,
+        ),
+        (
+            PosSide::Short,
+            None,
+            Some(8_100_000),
+            BrokerError::TakeProfitAlreadyReached,
+        ),
+    ];
+    for (side, sl, tp, want) in cases {
+        let mut b = Broker::new(100_000_000, 1);
+        let got = b.open(ALICE, &marks(1, MARK), 1, side, 1000, MARK, PD, QD, sl, tp);
+        assert_eq!(got, Err(want), "{side:?} sl={sl:?} tp={tp:?}");
+        assert!(
+            b.positions(ALICE).is_empty(),
+            "отказ не оставляет позиции: {side:?} sl={sl:?} tp={tp:?}"
+        );
+    }
+}
+
+/// Здоровые уровни по обе стороны цены принимаются — отказ не задевает их.
+#[test]
+fn levels_on_the_right_side_of_the_price_are_accepted() {
+    const MARK: i64 = 8_054_279;
+    let mut b = Broker::new(100_000_000, 1);
+    b.open(
+        ALICE,
+        &marks(1, MARK),
+        1,
+        PosSide::Long,
+        1000,
+        MARK,
+        PD,
+        QD,
+        Some(8_000_000),
+        Some(8_100_000),
+    )
+    .expect("стоп ниже, тейк выше — обычная покупка");
+    assert_eq!(b.positions(ALICE).len(), 1);
+}
+
+/// Уровни отложенного ордера сверяются с ЕГО ценой, а не с рынком.
+///
+/// Лимит на покупку стоит ниже рынка по замыслу. Сверка с текущей ценой
+/// отвергала бы здоровый ордер (стоп ниже лимита, но выше рынка — нормально)
+/// и пропускала бы больной (стоп выше лимита, но ниже рынка — мгновенное
+/// закрытие при исполнении).
+#[test]
+fn pending_levels_are_checked_against_its_own_price() {
+    const MARKET: i64 = 8_054_279;
+    const LIMIT: i64 = 7_500_000; // лимит на покупку ниже рынка
+                                  // Предпосылка теста — про константы, и проверяется на сборке, а не в
+                                  // прогоне: `assert!` над двумя литералами ничего не доказывает во время
+                                  // работы (на это и указал clippy).
+    const _: () = assert!(MARKET > LIMIT);
+
+    let mut b = Broker::new(100_000_000, 1);
+    // Больной: стоп ВЫШЕ цены ордера, хотя ниже рынка. При исполнении закроется сразу.
+    assert_eq!(
+        b.place_pending(
+            ALICE,
+            1,
+            PosSide::Long,
+            1000,
+            LIMIT,
+            PD,
+            QD,
+            Some(7_600_000),
+            None
+        ),
+        Err(BrokerError::StopLossAlreadyReached),
+        "стоп выше цены ордера — позиция родилась бы уже закрытой"
+    );
+    assert!(b.pendings(ALICE).is_empty(), "отказ не оставляет ордера");
+
+    // Здоровый: стоп ниже цены ордера, но ВЫШЕ рынка — сверка с рынком его бы отвергла.
+    b.place_pending(
+        ALICE,
+        1,
+        PosSide::Long,
+        1000,
+        LIMIT,
+        PD,
+        QD,
+        Some(7_400_000),
+        None,
+    )
+    .expect("стоп ниже цены ордера — обычный лимитный ордер");
+    assert_eq!(b.pendings(ALICE).len(), 1);
 }

@@ -38,6 +38,14 @@
     tenant_instruments_unreadable:
       'The site instrument list contains an unknown symbol — trading is closed. The list itself is reachable; it needs correcting in the CMS.',
     insufficient_margin: 'Not enough free margin',
+    // TRM-57. Два кода, а не один: человек правит РАЗНЫЕ поля и в разные
+    // стороны, и «уровень задан неверно» на оба случая отправило бы его
+    // проверять оба. Текст называет поле и сторону, потому что действие
+    // именно в этом: сдвинуть уровень за текущую цену, а не передумать.
+    stop_loss_already_reached:
+      'Your stop loss is already on the other side of the price — the position would close immediately. Move it below the current price for a buy, above it for a sell.',
+    take_profit_already_reached:
+      'Your take profit is already reached — the position would close immediately. Move it above the current price for a buy, below it for a sell.',
   };
 
   // НЕ закрыты здесь намеренно, и названы, чтобы следующий не считал их

@@ -510,6 +510,27 @@ async fn account_lock(st: &AppState, user: UserId) -> Arc<Mutex<()>> {
 ///
 /// Владелец — сам `user`: счёт у человека один. Поле существует затем, чтобы
 /// перестать совпадать с ключом без миграции.
+/// Отказ брокера — в код границы, СВОИМ именем (TRM-57, КОНТРАКТЫ §4б).
+///
+/// **Прежде здесь стояло `.map_err(|_| insufficient_margin)`**: любой отказ
+/// брокера приезжал человеку как «не хватает маржи». Пока вариант отказа был
+/// один, это совпадало; первый же новый превратил бы совпадение во враньё —
+/// человек шёл бы пополнять счёт из-за стоп-лосса не на той стороне цены.
+fn deal_error(e: broker::BrokerError) -> ApiErr {
+    use broker::BrokerError as E;
+    match e {
+        E::InsufficientMargin => err(StatusCode::PAYMENT_REQUIRED, "insufficient_margin"),
+        E::StopLossAlreadyReached => err(StatusCode::CONFLICT, "stop_loss_already_reached"),
+        E::TakeProfitAlreadyReached => err(StatusCode::CONFLICT, "take_profit_already_reached"),
+        E::InsufficientFunds => err(StatusCode::PAYMENT_REQUIRED, "insufficient_funds"),
+        E::UnknownPosition => err(StatusCode::NOT_FOUND, "unknown_position"),
+        E::UnknownPending => err(StatusCode::NOT_FOUND, "unknown_pending"),
+        E::UnknownAccount => err(StatusCode::NOT_FOUND, "unknown_account"),
+        E::NotADemoAccount => err(StatusCode::CONFLICT, "not_a_demo_account"),
+        E::AccountNotFlat => err(StatusCode::CONFLICT, "account_not_flat"),
+    }
+}
+
 fn profile_for_new_account(user: UserId) -> AccountProfile {
     AccountProfile::legacy_demo(user)
 }
@@ -1723,7 +1744,7 @@ async fn open_deal(
             req.sl,
             req.tp,
         )
-        .map_err(|_| err(StatusCode::PAYMENT_REQUIRED, "insufficient_margin"))
+        .map_err(deal_error)
     })
     .await?;
     Ok(Json(DealDto {
@@ -1764,7 +1785,7 @@ async fn place_pending(
     let fi = feed_by_id(&st, req.instrument)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
     let id = with_account(&st, user, Origin::Client, |b| {
-        Ok(b.place_pending(
+        b.place_pending(
             user,
             req.instrument,
             side,
@@ -1774,7 +1795,8 @@ async fn place_pending(
             fi.qty_decimals,
             req.sl,
             req.tp,
-        ))
+        )
+        .map_err(deal_error)
     })
     .await?;
     Ok(Json(PendingDto {
@@ -3659,6 +3681,61 @@ mod journal_wiring_tests {
             kinds.iter().all(|k| !k.starts_with("position_opened")),
             "несостоявшаяся операция в журнал попасть не должна: {kinds:?}"
         );
+    }
+
+    /// Отказ по уровню приезжает СВОИМ именем, а не «не хватает маржи».
+    ///
+    /// До TRM-57 обработчик сворачивал любой отказ брокера в
+    /// `insufficient_margin` через `.map_err(|_| …)`. Пока вариант был один,
+    /// это совпадало. Первый же новый превратил бы совпадение во враньё:
+    /// человек с тейком не на той стороне цены шёл бы пополнять счёт.
+    #[tokio::test]
+    async fn a_level_already_reached_is_refused_by_its_own_name() {
+        let st = build_state();
+        with_price(&st, 1, 50_000).await;
+        let app = router(st.clone());
+
+        // Тейк НИЖЕ цены покупки — достигнут в момент постановки.
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/deals",
+            Some(serde_json::json!({
+                "instrument": 1, "side": "buy", "qty": 1000, "tp": 820
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "take_profit_already_reached", "{body}");
+        assert_ne!(
+            body["error"], "insufficient_margin",
+            "денег хватало — отказ не про них: {body}"
+        );
+
+        // Стоп ВЫШЕ цены покупки — сработал бы сразу, и это другая причина.
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/deals",
+            Some(serde_json::json!({
+                "instrument": 1, "side": "buy", "qty": 1000, "sl": 90_000
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "stop_loss_already_reached", "{body}");
+
+        // И здоровая сделка проходит — отказ не задел обычный случай.
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/deals",
+            Some(serde_json::json!({
+                "instrument": 1, "side": "buy", "qty": 1000, "sl": 40_000, "tp": 60_000
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     /// То же для закрытия несуществующей позиции: счёт заводится и этой операцией.

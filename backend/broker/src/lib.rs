@@ -218,6 +218,54 @@ pub enum BrokerError {
     NotADemoAccount,
     /// На счёте есть открытые позиции или ордера, а операция требует плоского.
     AccountNotFlat,
+    /// Стоп-лосс уже по ту сторону цены: позиция закрылась бы на первом же
+    /// тике (TRM-57).
+    StopLossAlreadyReached,
+    /// Тейк-профит уже достигнут: позиция закрылась бы на первом же тике.
+    TakeProfitAlreadyReached,
+}
+
+/// Сработал бы стоп-лосс `sl` при цене `m` у позиции стороны `side`.
+///
+/// **Одна формула на две надобности** (TRM-57): по ней прогон триггеров
+/// закрывает позицию, и по ней же граница отказывает в уровне, который
+/// закрыл бы её сразу. Будь их две, они разошлись бы — и граница принимала бы
+/// уровень, срабатывающий на следующем тике, или отказывала в том, что не
+/// сработало бы никогда. Та же защита, что у свободной маржи (TRM-41).
+pub fn stop_loss_reached(side: PosSide, m: i64, sl: i64) -> bool {
+    match side {
+        PosSide::Long => m <= sl,
+        PosSide::Short => m >= sl,
+    }
+}
+
+/// Сработал бы тейк-профит `tp` при цене `m`. См. [`stop_loss_reached`].
+pub fn take_profit_reached(side: PosSide, m: i64, tp: i64) -> bool {
+    match side {
+        PosSide::Long => m >= tp,
+        PosSide::Short => m <= tp,
+    }
+}
+
+/// Отказать, если уровень уже по ту сторону цены `at` (TRM-57).
+///
+/// `at` — цена, относительно которой уровень будет срабатывать: для открытия
+/// это **марк-цена** (по ней пойдёт ближайший прогон триггеров), для
+/// отложенного ордера — **его собственная цена**, потому что позиция родится
+/// именно там, а не там, где рынок сейчас.
+fn refuse_levels_already_reached(
+    side: PosSide,
+    at: i64,
+    sl: Option<i64>,
+    tp: Option<i64>,
+) -> Result<(), BrokerError> {
+    if sl.is_some_and(|sl| stop_loss_reached(side, at, sl)) {
+        return Err(BrokerError::StopLossAlreadyReached);
+    }
+    if tp.is_some_and(|tp| take_profit_reached(side, at, tp)) {
+        return Err(BrokerError::TakeProfitAlreadyReached);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default, Clone)]
@@ -381,6 +429,13 @@ impl Account {
         sl: Option<i64>,
         tp: Option<i64>,
     ) -> Result<u64, BrokerError> {
+        // Уровень, уже достигнутый рынком, — отказ, а не позиция, живущая до
+        // первого тика (TRM-57). Сверяемся с МАРК-ценой: по ней пойдёт
+        // ближайший прогон триггеров. Цены нет — судить не о чем, и
+        // выдумывать отказ не станем.
+        if let Some(&m) = marks.get(&instrument) {
+            refuse_levels_already_reached(side, m, sl, tp)?;
+        }
         match self.model {
             PositionModel::Hedging => {
                 self.open_new(lev, marks, instrument, side, qty, entry, pd, qd, sl, tp)
@@ -695,14 +750,10 @@ impl Account {
         let mut to_close: Vec<(u64, i64, i64, CloseCause)> = Vec::new();
         for pos in self.positions.values() {
             if let Some(&m) = marks.get(&pos.instrument) {
-                let sl_hit = pos.sl.is_some_and(|sl| match pos.side {
-                    PosSide::Long => m <= sl,
-                    PosSide::Short => m >= sl,
-                });
-                let tp_hit = pos.tp.is_some_and(|tp| match pos.side {
-                    PosSide::Long => m >= tp,
-                    PosSide::Short => m <= tp,
-                });
+                let sl_hit = pos.sl.is_some_and(|sl| stop_loss_reached(pos.side, m, sl));
+                let tp_hit = pos
+                    .tp
+                    .is_some_and(|tp| take_profit_reached(pos.side, m, tp));
                 // Исполняем по НАБЛЮДЁННОЙ цене `m` — решение владельца Р-178,
                 // проскальзывание. Гарантия уровня означала бы, что разницу на
                 // каждом скачке платит брокер: это отдельный продукт, который
@@ -1193,6 +1244,11 @@ impl Broker {
     }
 
     /// Разместить отложенный (лимитный) ордер. Возвращает его id.
+    ///
+    /// Уровни сверяются с **ценой самого ордера**, а не с рынком (TRM-57):
+    /// позиция родится там, где ордер исполнится. Лимит на покупку стоит ниже
+    /// рынка по замыслу, и сверка с текущей ценой отвергала бы здоровые
+    /// ордера, пропуская как раз больные.
     #[allow(clippy::too_many_arguments)]
     pub fn place_pending(
         &mut self,
@@ -1205,7 +1261,8 @@ impl Broker {
         qd: u8,
         sl: Option<i64>,
         tp: Option<i64>,
-    ) -> u64 {
+    ) -> Result<u64, BrokerError> {
+        refuse_levels_already_reached(side, price, sl, tp)?;
         let a = self.acct(user);
         a.next_id += 1;
         let id = a.next_id;
@@ -1234,7 +1291,7 @@ impl Broker {
             sl,
             tp,
         });
-        id
+        Ok(id)
     }
 
     pub fn cancel_pending(&mut self, user: UserId, id: u64) -> Result<(), BrokerError> {
@@ -1975,7 +2032,8 @@ mod invariant_tests {
             )
             .expect("открытие");
         assert_eq!(check_snapshot(&b.snapshot(u)), vec![], "после открытия");
-        b.place_pending(u, 2, PosSide::Short, 500, 40_000, 2, 3, None, None);
+        b.place_pending(u, 2, PosSide::Short, 500, 40_000, 2, 3, None, None)
+            .expect("ордер поставлен");
         assert_eq!(
             check_snapshot(&b.snapshot(u)),
             vec![],
@@ -2523,7 +2581,8 @@ mod netting_tests {
     fn pending_orders_do_not_block_model_change() {
         let mut b = Broker::new(10_000_000, 1);
         let u = UserId(1);
-        b.place_pending(u, 1, PosSide::Long, 100, 4000, PD, QD, None, None);
+        b.place_pending(u, 1, PosSide::Long, 100, 4000, PD, QD, None, None)
+            .expect("ордер поставлен");
         assert!(
             b.adopt_model(u, PositionModel::Netting),
             "ордер — не позиция"

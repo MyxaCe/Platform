@@ -86,3 +86,38 @@ test('код не затирается статусом', () => {
     Rejection.TEXT.instrument_not_allowed,
   );
 });
+
+// ---- Уровень, уже достигнутый рынком (TRM-57) -------------------------------
+
+/** Коды отказа по уровню, которые шлюз отдаёт на `/deals` и `/pending`. */
+const LEVEL_CODES = ['stop_loss_already_reached', 'take_profit_already_reached'];
+
+test('уровень, уже достигнутый рынком, объяснён, а не показан кодом', () => {
+  for (const code of LEVEL_CODES) {
+    const t = Rejection.text(409, code);
+    assert.ok(!t.includes(code), `«${code}» показывается сырым кодом: ${t}`);
+    assert.ok(
+      !/terminal does not know/i.test(t),
+      `«${code}» уехал в запасную ветку — объяснения нет: ${t}`,
+    );
+  }
+});
+
+test('стоп и тейк — РАЗНЫЕ тексты: человек правит разные поля', () => {
+  const [sl, tp] = LEVEL_CODES.map((c) => Rejection.text(409, c));
+  assert.notEqual(sl, tp, 'один текст на оба случая отправит проверять оба поля');
+  assert.match(sl, /stop loss/i, `текст обязан назвать поле: ${sl}`);
+  assert.match(tp, /take profit/i, `текст обязан назвать поле: ${tp}`);
+});
+
+test('текст говорит, ЧТО сделать, а не только что отказано', () => {
+  // Отказ без действия — это сообщение «нельзя», после которого человек
+  // пробует то же самое ещё раз. Здесь действие есть: сдвинуть уровень, и
+  // названа сторона — для покупки и для продажи она разная.
+  for (const code of LEVEL_CODES) {
+    const t = Rejection.text(409, code);
+    assert.match(t, /move it/i, `нет действия: ${t}`);
+    assert.match(t, /buy/i, `не названа сторона для покупки: ${t}`);
+    assert.match(t, /sell/i, `не названа сторона для продажи: ${t}`);
+  }
+});
