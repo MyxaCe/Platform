@@ -7,5 +7,6 @@
 
 pub mod account;
 pub mod instrument;
+pub mod leverage;
 pub mod money;
 pub mod order;

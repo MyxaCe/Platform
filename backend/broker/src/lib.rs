@@ -15,6 +15,7 @@ pub use domain::account::{
 };
 
 pub mod journal;
+pub mod leverage;
 
 use journal::{CloseCause, EventKind};
 
@@ -1194,7 +1195,10 @@ impl Broker {
 
     // ---- Операции ---------------------------------------------------------
 
-    /// Открыть позицию по рынку (с опциональными SL/TP).
+    /// Открыть позицию по рынку (с опциональными SL/TP) под плечом **площадки**.
+    ///
+    /// Частный случай [`Self::open_with_leverage`]: основа, когда снимок плеча
+    /// портфеля ещё не доехал (канал site→terminal не согласован, TRM-53).
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         &mut self,
@@ -1210,8 +1214,47 @@ impl Broker {
         tp: Option<i64>,
     ) -> Result<u64, BrokerError> {
         let lev = self.leverage;
-        self.acct(user)
-            .try_open(lev, marks, instrument, side, qty, entry, pd, qd, sl, tp)
+        self.open_with_leverage(user, lev, marks, instrument, side, qty, entry, pd, qd, sl, tp)
+    }
+
+    /// Открыть позицию под **явно разрешённым плечом** (TRM-53 шаг 3, Р-446).
+    ///
+    /// Плечо приходит снимком портфеля, разрешённым на момент открытия по
+    /// приоритету «override клиента › override класса › плечо портфеля»
+    /// ([`leverage::resolve_open_leverage`]), и **ложится снимком в позицию**:
+    /// маржа под ней считается этим плечом от открытия до закрытия, а смена
+    /// настройки задним числом её не трогает (денежный путь — TRM-53 шаг 2).
+    ///
+    /// `lev` приводится к минимуму 1: оно делит нотионал, и ноль уронил бы
+    /// расчёт. Это последняя страховка — разрешение снимка её уже обеспечивает,
+    /// но прямой вызов её мог бы обойти.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_with_leverage(
+        &mut self,
+        user: UserId,
+        lev: i128,
+        marks: &HashMap<u32, i64>,
+        instrument: u32,
+        side: PosSide,
+        qty: i64,
+        entry: i64,
+        pd: u8,
+        qd: u8,
+        sl: Option<i64>,
+        tp: Option<i64>,
+    ) -> Result<u64, BrokerError> {
+        self.acct(user).try_open(
+            lev.max(1),
+            marks,
+            instrument,
+            side,
+            qty,
+            entry,
+            pd,
+            qd,
+            sl,
+            tp,
+        )
     }
 
     /// Закрыть позицию по марк-цене. Возвращает реализованный P&L.

@@ -1078,6 +1078,120 @@ fn the_warning_is_visible_even_when_the_stop_out_happens_on_the_same_tick() {
     );
 }
 
+// ---- Плечо из снимка портфеля → две стадии маржи (TRM-53, Р-446) ----------
+
+/// **Критерий готовности владельца, целиком** (Р-446): позиция под плечом,
+/// разрешённым из снимка портфеля, просадка вниз → маржин-колл 100% с
+/// получателем → принудительное закрытие 50%, причина закрытия названа.
+///
+/// Снимок устроен так, чтобы доказать именно приоритет: основа портфеля 5,
+/// крипто-override 10, плечо площадки 1 — все три разные. В позицию обязан лечь
+/// именно override класса (10), и маржа обязана считаться им.
+///
+/// Счёт открыт **выше 100%** (150%), иначе колл и стоп-аут слиплись бы в один
+/// тик и как два события не читались бы (разбор в Р-446). Поэтому стадии
+/// разнесены по тикам: 9500 — колл, 9000 — закрытие.
+#[test]
+fn a_portfolio_snapshot_leverage_drives_a_call_at_100_then_a_force_close_at_50() {
+    use broker::leverage::{
+        resolve_open_leverage, AccountLeverageSnapshot, InMemoryInstrumentClasses,
+        InMemoryLeverageSnapshots, InstrumentClass,
+    };
+    use std::collections::BTreeMap;
+
+    // Снимок портфеля Standard: основа 5, крипте — своя планка 10 (Р-446).
+    let mut class_overrides = BTreeMap::new();
+    class_overrides.insert(InstrumentClass::new("crypto"), 10);
+    let mut snapshots = InMemoryLeverageSnapshots::new();
+    snapshots.ingest(
+        ALICE,
+        AccountLeverageSnapshot {
+            portfolio_key: "standard".into(),
+            base_leverage: 5,
+            class_overrides,
+            client_override: None,
+            resolved_at: 0,
+        },
+    );
+    // Класс символа приходит ПОРТОМ, источник не зашит (открытый вопрос владельцу).
+    let mut classes = InMemoryInstrumentClasses::new();
+    classes.set(1, InstrumentClass::new("crypto"));
+
+    // Плечо площадки — 1; снимок обязан его перебить (и перебить свою основу 5).
+    let mut b = Broker::new(15_000, 1)
+        .with_margin_call_pct(Some(100))
+        .with_stop_out_pct(Some(50));
+
+    let lev = resolve_open_leverage(&snapshots, &classes, ALICE, 1, b.leverage());
+    assert_eq!(lev, 10, "override класса crypto старше основы 5 и площадки 1");
+
+    b.open_with_leverage(
+        ALICE,
+        lev,
+        &no_marks(),
+        1,
+        PosSide::Long,
+        10,
+        10_000,
+        TPD,
+        TQD,
+        None,
+        None,
+    )
+    .expect("открытие под разрешённым плечом");
+    assert_eq!(
+        b.positions(ALICE)[0].leverage,
+        10,
+        "позиция хранит плечо, с которым открыта (снимок в позицию)"
+    );
+    assert_eq!(
+        b.used_margin(ALICE),
+        10_000,
+        "маржа посчитана плечом позиции: нотионал 100 000 / 10"
+    );
+    assert_eq!(
+        b.margin_level_pct(ALICE, &marks(1, 10_000)),
+        Some(150),
+        "счёт открыт выше 100% — две стадии будут различимы"
+    );
+
+    // Стадия 1 — просадка до 100%: предупреждение с получателем, но НЕ закрытие.
+    let call_tick = marks(1, 9_500);
+    assert_eq!(
+        b.margin_calls(&call_tick),
+        vec![(ALICE, 100)],
+        "маржин-колл ровно на 100% и с получателем"
+    );
+    assert!(
+        b.check(&call_tick, false).is_empty(),
+        "на уровне 100% принудительного закрытия ещё нет"
+    );
+    assert_eq!(b.positions(ALICE).len(), 1, "позиция на месте после колла");
+
+    // Стадия 2 — дальше вниз до 50%: принудительное закрытие.
+    let stop_tick = marks(1, 9_000);
+    assert_eq!(
+        b.check(&stop_tick, false),
+        vec![ALICE],
+        "на 50% счёт закрывается принудительно"
+    );
+    assert!(b.positions(ALICE).is_empty(), "позиция закрыта по стоп-ауту");
+
+    // Причина закрытия названа своей: закрыл риск-контроль, а не человек.
+    let ev = b.take_events(ALICE);
+    let (cause, level) = ev
+        .iter()
+        .find_map(|e| match e {
+            EventKind::PositionClosed { cause, level, .. } => Some((*cause, *level)),
+            _ => None,
+        })
+        .expect("закрытие обязано быть записано");
+    assert_eq!(cause, CloseCause::StopOut);
+    assert_eq!(level, None, "уровня человек здесь не ставил");
+    // Сделка ушла в историю — «история заполнена» из критерия владельца.
+    assert_eq!(b.closed_deals(ALICE).len(), 1, "закрытая сделка в истории");
+}
+
 // ---- Защита от отрицательного остатка (TRM-42) ----------------------------
 
 /// Стенд провала: позиция и разрыв, уносящий счёт ниже нуля.
