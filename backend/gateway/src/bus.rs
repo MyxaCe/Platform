@@ -1007,6 +1007,68 @@ mod tests {
         );
     }
 
+    /// СТОРОЖ РАСХОЖДЕНИЯ ЛИНИЙ (TRM-61 · Р-456 A).
+    ///
+    /// Контракт §5 / [[Р-441]]: `accountSeq` обязателен во ВСЕХ ЧЕТЫРЁХ
+    /// событиях о счёте — `account.opened`, `balance.changed`,
+    /// `trade.executed`, `margin.called`. Первые три рождает `envelopes_for`,
+    /// и их уже стережёт `every_account_event_carries_the_journal_position`.
+    /// ЧЕТВЁРТОЕ, `margin.called`, идёт ОТДЕЛЬНЫМ путём `margin_called(...)` и
+    /// в лёгком прогоне `bus.rs` до сих пор не проверялось — а это ровно тот
+    /// конверт, куда до TRM-60 уезжал `seq: 0`. Как поле на проводе ноль
+    /// означал бы начало истории счёта, и под правилом потребителя «строго
+    /// больший» предупреждение не применилось бы НИКОГДА.
+    ///
+    /// Сторож перечисляет все четыре и требует у каждого НЕнулевой
+    /// `accountSeq`, равный позиции журнала. Пропади номер в любом из них —
+    /// или вернись в `margin.called` ноль — прогон краснеет ЗДЕСЬ, а не
+    /// наблюдением на стенде. Это защита от повторного ТИХОГО расхождения
+    /// линий «шлюз ↔ §5-потребитель» (WEB-43 ↔ TRM-60), ради которого
+    /// заведена TRM-61.
+    #[test]
+    fn all_four_account_events_carry_account_seq_divergence_guard() {
+        // Живой номер из наблюдения владельца 31.10 (account_seq=12, Р-449).
+        const SEQ: u64 = 12;
+
+        // Три события пачки: заведение, сделка, остаток.
+        let mut evs = envelopes_for(
+            &who(SEQ),
+            &before_empty(),
+            &after_one_deal(None, None),
+            &[EventKind::AccountOpened {
+                balance: 1_000_000,
+                profile: Default::default(),
+            }],
+            &known,
+        );
+        // Четвёртое событие — предупреждение о марже — отдельным путём.
+        evs.push(margin_called(
+            &who(SEQ),
+            10_000,
+            Some(5_000),
+            50_000,
+            50_000,
+        ));
+
+        let required = [
+            EV_ACCOUNT_OPENED,
+            EV_BALANCE_CHANGED,
+            EV_TRADE_EXECUTED,
+            EV_MARGIN_CALLED,
+        ];
+        for want in required {
+            let e = evs.iter().find(|e| e.event == want).unwrap_or_else(|| {
+                panic!("событие {want} не рождено — перечень §5 неполон: {evs:?}")
+            });
+            assert_eq!(
+                e.data["accountSeq"],
+                serde_json::json!(SEQ),
+                "событие {want} уехало без позиции журнала (или с нулём): {:?}",
+                e.data
+            );
+        }
+    }
+
     fn trade_of(evs: &[Envelope]) -> &Envelope {
         evs.iter()
             .find(|e| e.event == EV_TRADE_EXECUTED)
