@@ -1123,7 +1123,10 @@ fn a_portfolio_snapshot_leverage_drives_a_call_at_100_then_a_force_close_at_50()
         .with_stop_out_pct(Some(50));
 
     let lev = resolve_open_leverage(&snapshots, &classes, ALICE, 1, b.leverage());
-    assert_eq!(lev, 10, "override класса crypto старше основы 5 и площадки 1");
+    assert_eq!(
+        lev, 10,
+        "override класса crypto старше основы 5 и площадки 1"
+    );
 
     b.open_with_leverage(
         ALICE,
@@ -1175,7 +1178,10 @@ fn a_portfolio_snapshot_leverage_drives_a_call_at_100_then_a_force_close_at_50()
         vec![ALICE],
         "на 50% счёт закрывается принудительно"
     );
-    assert!(b.positions(ALICE).is_empty(), "позиция закрыта по стоп-ауту");
+    assert!(
+        b.positions(ALICE).is_empty(),
+        "позиция закрыта по стоп-ауту"
+    );
 
     // Причина закрытия названа своей: закрыл риск-контроль, а не человек.
     let ev = b.take_events(ALICE);

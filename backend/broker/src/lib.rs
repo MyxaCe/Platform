@@ -1214,7 +1214,9 @@ impl Broker {
         tp: Option<i64>,
     ) -> Result<u64, BrokerError> {
         let lev = self.leverage;
-        self.open_with_leverage(user, lev, marks, instrument, side, qty, entry, pd, qd, sl, tp)
+        self.open_with_leverage(
+            user, lev, marks, instrument, side, qty, entry, pd, qd, sl, tp,
+        )
     }
 
     /// Открыть позицию под **явно разрешённым плечом** (TRM-53 шаг 3, Р-446).

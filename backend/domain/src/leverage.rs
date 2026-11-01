@@ -178,6 +178,10 @@ mod tests {
         s.base_leverage = 0;
         assert_eq!(s.resolve(None), None, "ноль уронил бы расчёт делением");
         s.base_leverage = -10;
-        assert_eq!(s.resolve(None), None, "отрицательное дало бы отрицательную маржу");
+        assert_eq!(
+            s.resolve(None),
+            None,
+            "отрицательное дало бы отрицательную маржу"
+        );
     }
 }
