@@ -27,6 +27,10 @@
       <div class="metric"><span class="metric__l">MARGIN</span><span id="mMargin" class="metric__v">&mdash;</span></div>
       <div class="metric"><span class="metric__l">FREE BALANCE</span><span id="mFree" class="metric__v">&mdash;</span></div>
       <div class="metric"><span class="metric__l">OPEN P&amp;L</span><span id="mPnl" class="metric__v">&mdash;</span></div>
+      <!-- Плечо СЧЁТА для новых позиций (Р-446): назначает сайт (портфель /
+           override клиента), без назначения — плечо площадки. Открытые позиции
+           держат своё плечо снимком. -->
+      <div class="metric"><span class="metric__l">LEVERAGE</span><span id="mLev" class="metric__v" title="Leverage for new positions. Open positions keep the leverage they were opened with.">&mdash;</span></div>
     </div>
     <!-- Явная причина, по которой цифр нет. Пусто и скрыто, пока счёт отвечает. -->
     <div id="acctWarn" class="acct-warn" hidden></div>

@@ -749,8 +749,15 @@ function showAccountKind(kind, frozen) {
   }
 }
 
+/** Плечо счёта для новых позиций: `1:N`. Не число — прочерк, а не выдумка. */
+function showLeverage(lev) {
+  const el = document.getElementById('mLev');
+  if (!el) return;
+  el.textContent = Number.isInteger(lev) && lev >= 1 ? `1:${lev}` : '—';
+}
+
 function blankMetrics() {
-  ['mBalance', 'mEquity', 'mMargin', 'mFree', 'mPnl'].forEach((id) => {
+  ['mBalance', 'mEquity', 'mMargin', 'mFree', 'mPnl', 'mLev'].forEach((id) => {
     const el = document.getElementById(id); if (el) { el.textContent = '—'; el.style.color = ''; }
   });
 }
@@ -766,12 +773,14 @@ async function pollAccount() {
       return;
     }
     showAccountKind(a.kind, a.trading_frozen);
+    showLeverage(a.leverage);
     if (a.opened === false) {
       // Счёта ещё нет: шлюз отдаёт `null` вместо цифр, и подставлять сюда ноль
       // нельзя — ноль правдоподобен, по нему принимают решение (BUG-011).
       // Показываем прочерки И называем причину: прочерк без слов неотличим от
       // сбоя связи, у которого прочерки те же.
       blankMetrics();
+      showLeverage(a.leverage);
       showPositionModel(null);
       const w = document.getElementById('acctWarn');
       if (w) { w.hidden = false; w.textContent = ACCT_MSG['not-opened']; }

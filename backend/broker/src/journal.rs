@@ -351,6 +351,39 @@ pub enum EventKind {
     ///
     /// Кто и почему — в `Origin::Operator` записи (who / reason / incident).
     TradingFreezeSet { frozen: bool },
+    /// Счёту назначено плечо для **новых** позиций (Р-446).
+    ///
+    /// Итог портфеля и override клиента считает сайт; сюда приезжает одно
+    /// число и основание (`Origin::Operator`: кто, почему, по какому делу).
+    /// Свёртка его применяет: плечо счёта лежит в слепке, и сверка обязана
+    /// сходиться. Открытые позиции запись не трогает — их плечо записано в
+    /// их собственном `PositionOpened`.
+    LeverageSet { lev: i128 },
+    /// Отложенный ордер сработал по цене, но **не исполнен** и снят.
+    ///
+    /// Отличается от `PendingCancelled` (снял человек) и от
+    /// `PendingTriggered` (исполнен): ордер достиг цены, позиции не было, и
+    /// причина названа. `exec` — цена, по которой ордер исполнился бы.
+    PendingRejected {
+        id: u64,
+        exec: Option<i64>,
+        reason: RejectReason,
+    },
+}
+
+/// Почему сработавший отложенный ордер не исполнен.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectReason {
+    /// Торговля по счёту заморожена оператором (`TradingFreezeSet`).
+    AccountFrozen,
+}
+
+impl RejectReason {
+    pub fn tag(self) -> &'static str {
+        match self {
+            RejectReason::AccountFrozen => "account_frozen",
+        }
+    }
 }
 
 impl EventKind {
@@ -378,7 +411,9 @@ impl EventKind {
             | EventKind::PendingTriggered { .. }
             | EventKind::NegativeBalanceCompensated { .. }
             | EventKind::DemoAccountReset { .. }
-            | EventKind::TradingFreezeSet { .. } => true,
+            | EventKind::TradingFreezeSet { .. }
+            | EventKind::LeverageSet { .. }
+            | EventKind::PendingRejected { .. } => true,
             EventKind::HistoryExcludedFromReporting { .. } => false,
         }
     }
@@ -617,6 +652,10 @@ impl EventKind {
             EventKind::TradingFreezeSet { frozen } => {
                 format!("trading_freeze_set frozen={}", flag(*frozen))
             }
+            EventKind::LeverageSet { lev } => format!("leverage_set lev={lev}"),
+            EventKind::PendingRejected { id, exec, reason } => {
+                format!("pending_rejected id={id} exec={} reason={}", opt(*exec), reason.tag())
+            }
         }
     }
 
@@ -722,6 +761,20 @@ impl EventKind {
                     "0" => false,
                     "1" => true,
                     _ => return Err(BadRecord("поле-признак не 0 и не 1")),
+                },
+            },
+            "leverage_set" => EventKind::LeverageSet {
+                lev: match num::<i128>(&f, "lev")? {
+                    l if (1..=crate::MAX_LEVERAGE).contains(&l) => l,
+                    _ => return Err(BadRecord("плечо записи вне 1..=1000")),
+                },
+            },
+            "pending_rejected" => EventKind::PendingRejected {
+                id: num(&f, "id")?,
+                exec: num_opt(&f, "exec")?,
+                reason: match pick(&f, "reason")? {
+                    "account_frozen" => RejectReason::AccountFrozen,
+                    _ => return Err(BadRecord("неизвестная причина отказа ордера")),
                 },
             },
             _ => return Err(BadRecord("неизвестный вид события")),
@@ -905,6 +958,9 @@ pub struct ReplayState {
     /// Заморожена ли торговля оператором (`TradingFreezeSet`). В сверку со
     /// слепком не входит: в слепке брокера заморозки нет, её держит шлюз.
     pub trading_frozen: bool,
+    /// Плечо счёта для новых позиций (`LeverageSet`). `None` — не назначали.
+    /// В сверку со слепком входит: плечо счёта лежит в слепке брокера.
+    pub leverage: Option<i128>,
 }
 
 impl ReplayState {
@@ -921,6 +977,7 @@ impl ReplayState {
             profile: AccountProfile::default(),
             excluded_from_reporting_through: None,
             trading_frozen: false,
+            leverage: None,
         }
     }
 
@@ -969,6 +1026,7 @@ impl ReplayState {
             // молча исправило бы испорченную запись при подъёме.
             EventKind::DemoAccountReset { adjustment } => self.balance += *adjustment,
             EventKind::TradingFreezeSet { frozen } => self.trading_frozen = *frozen,
+            EventKind::LeverageSet { lev } => self.leverage = Some(*lev),
             EventKind::Withdrawn { amount } => self.balance -= *amount,
             EventKind::PositionOpened {
                 id,
@@ -1110,7 +1168,9 @@ impl ReplayState {
                     tp: *tp,
                 });
             }
-            EventKind::PendingCancelled { id } | EventKind::PendingTriggered { id, .. } => {
+            EventKind::PendingCancelled { id }
+            | EventKind::PendingTriggered { id, .. }
+            | EventKind::PendingRejected { id, .. } => {
                 let before = self.pendings.len();
                 self.pendings.retain(|p| p.id != *id);
                 if self.pendings.len() == before {
@@ -1444,6 +1504,12 @@ pub fn reconcile(state: &ReplayState, snap: &AccountSnapshot) -> Vec<Divergence>
             state.model, snap.model
         ));
     }
+    if state.leverage != snap.leverage {
+        d(format!(
+            "плечо счёта: по журналу {:?}, в слепке {:?}",
+            state.leverage, snap.leverage
+        ));
+    }
     for id in &state.orphans {
         d(format!(
             "событие журнала ссылается на неизвестную позицию или ордер {id}"
@@ -1539,7 +1605,8 @@ pub fn audit(journal: &Journal, snap: &AccountSnapshot) -> JournalStatus {
             && snap.positions.is_empty()
             && snap.pendings.is_empty()
             && snap.closed.is_empty()
-            && snap.next_id == 0;
+            && snap.next_id == 0
+            && snap.leverage.is_none();
         return if fresh {
             JournalStatus::Reconciled
         } else {
@@ -1631,6 +1698,17 @@ mod tests {
             EventKind::HistoryExcludedFromReporting { through_seq: 11 },
             EventKind::TradingFreezeSet { frozen: true },
             EventKind::TradingFreezeSet { frozen: false },
+            EventKind::LeverageSet { lev: 50 },
+            EventKind::PendingRejected {
+                id: 2,
+                exec: Some(3990),
+                reason: RejectReason::AccountFrozen,
+            },
+            EventKind::PendingRejected {
+                id: 2,
+                exec: None,
+                reason: RejectReason::AccountFrozen,
+            },
         ]
     }
 
@@ -2384,6 +2462,7 @@ mod tests {
             pendings: s.pendings.clone(),
             closed: s.closed.clone(),
             model: s.model,
+            leverage: s.leverage,
         }
     }
 
@@ -2453,6 +2532,7 @@ mod tests {
             pendings: vec![],
             closed: vec![],
             model: PositionModel::Hedging,
+            leverage: None,
         };
         assert_eq!(audit(&j, &live), JournalStatus::NoEntries);
         assert_eq!(audit(&j, &live).tag(), "no_entries");

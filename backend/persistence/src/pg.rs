@@ -137,6 +137,12 @@ ALTER TABLE accounts ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'US
 -- Расхождение с перечнем кода ловится при чтении и даёт ОТКАЗ: «доллар с тремя
 -- знаками» — это испорченная строка, а не валюта.
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS currency_minor_units SMALLINT NOT NULL DEFAULT 2;
+-- Плечо СЧЁТА для новых позиций (Р-446). NULL — не назначали, действует плечо
+-- площадки (`PLATFORM_LEVERAGE`). NULL, а не DEFAULT 1: «не назначали» и
+-- «назначили 1:1» — разные вещи, и счёт, заведённый до столбца, обязан
+-- торговать так же, как торговал. Источник истины — запись `leverage_set`
+-- журнала; столбец — слепок, сверяемый с ней на старте.
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS leverage BIGINT;
 
 -- НЕИЗМЕНЯЕМОСТЬ ПРОФИЛЯ — МЕХАНИЗМОМ, А НЕ ДИСЦИПЛИНОЙ (TRM-55, требование
 -- владельца). Отсутствие профиля в `DO UPDATE` защищает только от нашего же
@@ -353,7 +359,7 @@ impl Persistence for PgStore {
     async fn load_all(&self) -> Result<LoadedState, StoreError> {
         // Счёт — самостоятельная сущность: перебираем то, что реально лежит в accounts.
         let acc_rows = sqlx::query(
-            "SELECT user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units
+            "SELECT user_id, balance, next_id, model, leverage, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units
                FROM accounts ORDER BY user_id",
         )
                 .fetch_all(&self.pool)
@@ -368,6 +374,7 @@ impl Persistence for PgStore {
             let next_id = acc.get::<i64, _>("next_id") as u64;
 
             let model = model_from_db(acc.get::<i16, _>("model"));
+            let leverage = acc.get::<Option<i64>, _>("leverage").map(i128::from);
             // Неизвестное значение в профиле — ОТКАЗ чтения, а не умолчание.
             // Род счёта решает, настоящие ли это деньги; прочитать непонятное
             // как «демо» значило бы угадывать, чьими деньгами торгуют.
@@ -485,6 +492,7 @@ impl Persistence for PgStore {
                     pendings,
                     closed,
                     model,
+                    leverage,
                 },
             ));
         }
@@ -530,9 +538,9 @@ impl Persistence for PgStore {
         // счёта, означали бы, что прошлые суммы посчитаны в одном, а читаются в
         // другом. Смена валюты — это новый счёт, а не правка поля.
         sqlx::query(
-            "INSERT INTO accounts (user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-             ON CONFLICT (user_id) DO UPDATE SET balance = EXCLUDED.balance, next_id = EXCLUDED.next_id, model = EXCLUDED.model",
+            "INSERT INTO accounts (user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units, leverage)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             ON CONFLICT (user_id) DO UPDATE SET balance = EXCLUDED.balance, next_id = EXCLUDED.next_id, model = EXCLUDED.model, leverage = EXCLUDED.leverage",
         )
         .bind(id_db)
         .bind(to_numeric(snap.balance))
@@ -544,6 +552,7 @@ impl Persistence for PgStore {
         .bind(snap.profile.category_at_open.0.tag())
         .bind(snap.profile.currency.code())
         .bind(snap.profile.currency.minor_units() as i16)
+        .bind(snap.leverage.map(|l| l as i64))
         .execute(&mut *tx)
         .await
         .map_err(db)?;

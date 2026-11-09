@@ -11,6 +11,7 @@
 //! * `POST /internal/sites/{tenant}/users/{sub}/real/deposit`
 //! * `POST /internal/sites/{tenant}/users/{sub}/real/withdraw`
 //! * `POST /internal/sites/{tenant}/users/{sub}/{demo|real}/trading-freeze`
+//! * `POST /internal/sites/{tenant}/users/{sub}/{demo|real}/leverage`
 //! * `GET  /internal/sites/{tenant}/users/{sub}/accounts`
 //!
 //! Человек адресуется той же парой, что и в SSO и на шине: сайт (`tenant`) и
@@ -107,6 +108,11 @@ pub(crate) fn routes() -> Router<AppState> {
         .route(
             "/internal/sites/:tenant/users/:sub/:kind/trading-freeze",
             post(trading_freeze),
+        )
+        // Плечо счёта для новых позиций (Р-446) — тоже на любом из двух.
+        .route(
+            "/internal/sites/:tenant/users/:sub/:kind/leverage",
+            post(set_leverage),
         )
         .route("/internal/sites/:tenant/users/:sub/accounts", get(accounts))
 }
@@ -621,6 +627,150 @@ async fn trading_freeze(
         .into_response()
 }
 
+// ============================ Плечо счёта ===================================
+
+#[derive(Deserialize)]
+struct LeverageReq {
+    /// Знаменатель 1:N, целое `1..=1000`. Итог портфеля / override клиента,
+    /// посчитанный сайтом (Р-446).
+    leverage: i64,
+    reason: String,
+    #[serde(alias = "initiator")]
+    operator: String,
+    /// Необязательная ссылка на дело на стороне сайта (заявка, запись журнала).
+    #[serde(default)]
+    external_ref: Option<String>,
+}
+
+/// Назначить счёту плечо одной записью журнала `LeverageSet` (через обычный
+/// путь мутации: инварианты, сверка, слепок и лента одной транзакцией).
+///
+/// Отдаёт `(плечо до, сменилось ли)`. Плечо «до» — **действующее**: если
+/// счёту плечо не назначали, это плечо площадки. Счёт, которого ещё нет в
+/// памяти, заводится тем же путём, что первой операцией (TRM-46).
+pub(crate) async fn apply_leverage(
+    st: &AppState,
+    user: UserId,
+    lev: i128,
+    operator: Operator,
+) -> Result<(i128, bool), super::ApiErr> {
+    with_account(st, user, Origin::Operator(operator), |b| {
+        let before = b.account_leverage(user);
+        b.set_account_leverage(user, lev)
+            .map(|changed| (before, changed))
+            .map_err(super::deal_error)
+    })
+    .await
+}
+
+/// `POST /internal/sites/{tenant}/users/{sub}/{kind}/leverage`.
+///
+/// Плечо **для новых позиций** счёта. Открытые позиции держат своё плечо
+/// снимком. Повтор того же значения записи не пишет (`changed: false`).
+///
+/// Счёт, у которого нет даже маппинга личности (человек ни разу не входил в
+/// терминал этим родом счёта), — `404 account_not_opened`: заводить счёт ради
+/// плеча незачем, своё плечо он получит claim-ом `leverage` при первом входе.
+async fn set_leverage(
+    State(st): State<AppState>,
+    Path((tenant, sub, kind)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    body: Result<Json<LeverageReq>, JsonRejection>,
+) -> Response {
+    if let Err(r) = authorize(&st, &headers) {
+        return *r;
+    }
+    let Some(kind) = AccountKind::parse(&kind) else {
+        return fail(StatusCode::NOT_FOUND, "unknown_account_kind", None);
+    };
+    let req = match body {
+        Ok(Json(r)) => r,
+        Err(rej) => {
+            return fail(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                Some(rej.body_text()),
+            )
+        }
+    };
+    let lev = i128::from(req.leverage);
+    if !(1..=broker::MAX_LEVERAGE).contains(&lev) {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "invalid_leverage",
+            Some(format!("leverage — целое от 1 до {}", broker::MAX_LEVERAGE)),
+        );
+    }
+    if req.operator.trim().is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "missing_operator", None);
+    }
+    if req.reason.trim().is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "missing_reason", None);
+    }
+    let incident = match req.external_ref.as_deref().map(str::trim) {
+        Some(r) if r.len() > MAX_REF_LEN => {
+            return fail(StatusCode::BAD_REQUEST, "invalid_external_ref", None)
+        }
+        Some(r) if !r.is_empty() => format!("{REF_PREFIX}{r}"),
+        _ => "leverage".to_string(),
+    };
+    let operator = match Operator::new(&req.operator, &req.reason, &incident) {
+        Ok(o) => o,
+        Err(e) => return fail(StatusCode::BAD_REQUEST, "bad_request", Some(e.to_string())),
+    };
+    let (tenant, sub) = (tenant.trim().to_string(), sub.trim().to_string());
+    if tenant.is_empty() || sub.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "bad_account", None);
+    }
+    let user = match st.store.find_account(&tenant, &sub, kind).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return fail(StatusCode::NOT_FOUND, "account_not_opened", None),
+        Err(e) => {
+            eprintln!(
+                "[money] счёт {tenant}/{sub}/{} не разрешён: {e}",
+                kind.tag()
+            );
+            return fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity_store_unavailable",
+                None,
+            );
+        }
+    };
+
+    let (previous, changed) = match apply_leverage(&st, user, lev, operator).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let seq = st
+        .journals
+        .lock()
+        .await
+        .get(&user)
+        .and_then(|j| j.events().last())
+        .map(|e| e.seq())
+        .unwrap_or(0);
+    if changed {
+        println!(
+            "[money] плечо счёта {} ({tenant}/{sub}/{}) 1:{previous} → 1:{lev} оператором {}: {}",
+            user.0,
+            kind.tag(),
+            req.operator.trim(),
+            req.reason.trim()
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "tenant": tenant, "sub": sub, "account_kind": kind.tag(),
+            "account_id": bus::account_uuid(&tenant, &sub, kind),
+            "leverage": lev, "previous_leverage": previous,
+            "changed": changed, "seq": seq,
+        })),
+    )
+        .into_response()
+}
+
 // ============================ Список счетов =================================
 
 /// `GET /internal/sites/{tenant}/users/{sub}/accounts` — счета человека.
@@ -665,6 +815,10 @@ async fn accounts(
             "used_margin_minor": opened.then(|| b.used_margin(user)),
             "open_positions": b.positions(user).len(),
             "trading_frozen": frozen,
+            // Плечо, с которым откроется СЛЕДУЮЩАЯ позиция: своё плечо счёта
+            // или, если не назначали, плечо площадки.
+            "leverage": b.account_leverage(user),
+            "leverage_assigned": b.assigned_leverage(user).is_some(),
         }));
     }
     (
@@ -1697,5 +1851,288 @@ mod tests {
         )
         .await;
         assert_eq!(s, StatusCode::NOT_FOUND);
+    }
+
+    // ---- Плечо счёта (Р-446) -----------------------------------------------
+
+    fn lev_uri(kind: &str) -> String {
+        format!("/internal/sites/{TENANT}/users/{SUB}/{kind}/leverage")
+    }
+
+    fn lev_body(leverage: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "leverage": leverage,
+            "reason": "смена портфеля: Standard → Pro",
+            "operator": "risk@site",
+            "external_ref": "adm-journal-42"
+        })
+    }
+
+    async fn position_levs(st: &AppState) -> Vec<i128> {
+        let mut v: Vec<(u64, i128)> = st
+            .broker
+            .lock()
+            .await
+            .positions(DEFAULT_USER)
+            .iter()
+            .map(|p| (p.id, p.leverage))
+            .collect();
+        v.sort_unstable();
+        v.into_iter().map(|(_, l)| l).collect()
+    }
+
+    #[tokio::test]
+    async fn the_leverage_route_is_behind_the_secret_and_validates() {
+        let app = router(state(None));
+        let (s, _) = call(&app, &lev_uri("real"), Some(TOKEN), lev_body(50.into())).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "без секрета маршрута нет");
+
+        let st = state(Some(TOKEN));
+        let app = router(st.clone());
+        let (s, v) = call(&app, &lev_uri("real"), None, lev_body(50.into())).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
+        let (s, _) = call(&app, &lev_uri("real"), Some("nope"), lev_body(50.into())).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+
+        // Счёт заводим пополнением — дальше проверяем только тело.
+        let (s, _) = call(&app, &uri("deposit"), Some(TOKEN), body(1, "seed-l")).await;
+        assert_eq!(s, StatusCode::OK);
+
+        for bad in [0, -5, 1001] {
+            let (s, v) = call(&app, &lev_uri("real"), Some(TOKEN), lev_body(bad.into())).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}: {v}");
+            assert_eq!(v["error"], "invalid_leverage", "{bad}");
+        }
+        let (s, v) = call(&app, &lev_uri("real"), Some(TOKEN), lev_body("20".into())).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "строка — не число: {v}");
+        let (s, v) = call(&app, &lev_uri("real"), Some(TOKEN), lev_body(2.5.into())).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "дробь — не плечо: {v}");
+        let (s, v) = call(
+            &app,
+            &lev_uri("real"),
+            Some(TOKEN),
+            serde_json::json!({"leverage": 20, "reason": " ", "operator": "x"}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"], "missing_reason");
+        let (s, v) = call(
+            &app,
+            &lev_uri("real"),
+            Some(TOKEN),
+            serde_json::json!({"leverage": 20, "reason": "r", "operator": ""}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"], "missing_operator");
+        let (s, _) = call(&app, &lev_uri("gold"), Some(TOKEN), lev_body(20.into())).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "неизвестный род счёта");
+
+        // Ни один отказ ничего не записал.
+        assert_eq!(st.broker.lock().await.assigned_leverage(DEFAULT_USER), None);
+
+        // Человек, ни разу не входивший демо-счётом: счёта нет, и ради плеча
+        // он не заводится — плечо приедет claim-ом при первом входе.
+        let (s, v) = call(&app, &lev_uri("demo"), Some(TOKEN), lev_body(20.into())).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+        assert_eq!(v["error"], "account_not_opened");
+    }
+
+    /// Плечо из маршрута: журналируется с оператором, достаётся только новым
+    /// позициям, повтор не пишет запись, рестарт переживает (свёртка ленты
+    /// сходится со слепком), видно в `/account` и в списке счетов.
+    #[tokio::test]
+    async fn leverage_reaches_new_positions_only_and_survives_a_restart() {
+        let store = linked();
+        let st = state_with(store.clone(), Some(TOKEN));
+        restore_state(&st).await.unwrap();
+        let app = router(st.clone());
+        price(&st, 1, 5_000_000).await;
+        let (s, _) = call(
+            &app,
+            &uri("deposit"),
+            Some(TOKEN),
+            body(100_000_000, "seed-lv"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let platform = st.broker.lock().await.leverage();
+
+        let (s, v) = send(&app, "POST", "/deals", deal(None)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let (_, acc) = send(&app, "GET", "/account", serde_json::Value::Null).await;
+        assert_eq!(
+            acc["leverage"],
+            serde_json::json!(platform),
+            "не назначено — плечо площадки"
+        );
+
+        let (s, v) = call(&app, &lev_uri("real"), Some(TOKEN), lev_body(50.into())).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["changed"], true);
+        assert_eq!(v["leverage"], 50);
+        assert_eq!(v["previous_leverage"], serde_json::json!(platform));
+        let seq = v["seq"].clone();
+        let (s, v) = call(&app, &lev_uri("real"), Some(TOKEN), lev_body(50.into())).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["changed"], false, "повтор — без записи");
+        assert_eq!(v["seq"], seq);
+
+        let (s, v) = send(&app, "POST", "/deals", deal(None)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(
+            position_levs(&st).await,
+            vec![platform, 50],
+            "старая позиция — со своим плечом, новая — с плечом счёта"
+        );
+        let (_, acc) = send(&app, "GET", "/account", serde_json::Value::Null).await;
+        assert_eq!(acc["leverage"], 50, "{acc}");
+
+        {
+            let js = st.journals.lock().await;
+            let e = js[&DEFAULT_USER]
+                .events()
+                .iter()
+                .find(|e| matches!(e.kind(), journal::EventKind::LeverageSet { lev: 50 }))
+                .expect("запись о смене плеча");
+            let op = e.origin().operator().unwrap();
+            assert_eq!(op.who(), "risk@site");
+            assert_eq!(op.incident(), "ext:adm-journal-42");
+        }
+
+        // Рестарт: лента и слепок из того же хранилища.
+        let st2 = state_with(store, Some(TOKEN));
+        restore_state(&st2).await.unwrap();
+        assert!(st2.quarantined.lock().await.is_empty(), "сверка сошлась");
+        assert_eq!(st2.broker.lock().await.account_leverage(DEFAULT_USER), 50);
+        assert_eq!(position_levs(&st2).await, vec![platform, 50]);
+        let (s, v) = get(&router(st2.clone()), &accounts_uri(), Some(TOKEN)).await;
+        assert_eq!(s, StatusCode::OK);
+        let real = v["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["account_kind"] == "real")
+            .expect("реальный счёт в списке")
+            .clone();
+        assert_eq!(real["leverage"], 50, "{real}");
+        assert_eq!(real["leverage_assigned"], true);
+    }
+
+    /// Дыра заморозки: ордер, поставленный ДО заморозки, при срабатывании не
+    /// открывает позицию — монитор снимает его записью с причиной.
+    #[tokio::test]
+    async fn a_pending_order_placed_before_a_freeze_is_rejected_when_it_fires() {
+        let st = state(Some(TOKEN));
+        let app = router(st.clone());
+        price(&st, 1, 5_000_000).await;
+        let (s, _) = call(
+            &app,
+            &uri("deposit"),
+            Some(TOKEN),
+            body(100_000_000, "seed-pf"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let pending = serde_json::json!({"instrument":1,"side":"buy","qty":1000,"price":4_900_000});
+        let (s, v) = send(&app, "POST", "/pending", pending).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let (s, v) = call(&app, &uri("trading-freeze"), Some(TOKEN), freeze_body(true)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+
+        price(&st, 1, 4_800_000).await;
+        monitor_tick(&st).await;
+        {
+            let b = st.broker.lock().await;
+            assert!(b.positions(DEFAULT_USER).is_empty(), "позиция не открыта");
+            assert!(b.pendings(DEFAULT_USER).is_empty(), "ордер снят");
+        }
+        {
+            let js = st.journals.lock().await;
+            let e = js[&DEFAULT_USER].events().last().expect("запись монитора");
+            assert!(
+                matches!(
+                    e.kind(),
+                    journal::EventKind::PendingRejected {
+                        reason: journal::RejectReason::AccountFrozen,
+                        exec: Some(4_800_000),
+                        ..
+                    }
+                ),
+                "{}",
+                e.canon()
+            );
+            assert_eq!(e.origin(), &journal::Origin::System);
+        }
+        assert!(st.quarantined.lock().await.is_empty(), "сверка сошлась");
+    }
+
+    /// Незамороженный счёт — тот же ордер исполняется (контроль: отказ выше
+    /// не случайность триггера).
+    #[tokio::test]
+    async fn the_same_pending_order_fires_on_an_unfrozen_account() {
+        let st = state(Some(TOKEN));
+        let app = router(st.clone());
+        price(&st, 1, 5_000_000).await;
+        let (s, _) = call(
+            &app,
+            &uri("deposit"),
+            Some(TOKEN),
+            body(100_000_000, "seed-pu"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let pending = serde_json::json!({"instrument":1,"side":"buy","qty":1000,"price":4_900_000});
+        let (s, _) = send(&app, "POST", "/pending", pending).await;
+        assert_eq!(s, StatusCode::OK);
+        price(&st, 1, 4_800_000).await;
+        monitor_tick(&st).await;
+        assert_eq!(st.broker.lock().await.positions(DEFAULT_USER).len(), 1);
+    }
+
+    /// Claim `leverage` токена входа: применяется записью журнала, повтор
+    /// молчит, вне диапазона — отказ входа, без claim-а — ничего.
+    #[tokio::test]
+    async fn the_sso_leverage_claim_syncs_the_account() {
+        let st = state(Some(TOKEN));
+        let user = st
+            .store
+            .resolve_account(TENANT, SUB, AccountKind::Demo)
+            .await
+            .unwrap();
+        sync_leverage_claim(&st, user, None).await.unwrap();
+        assert!(
+            !st.broker.lock().await.has_account(user),
+            "без claim-а ничего"
+        );
+
+        sync_leverage_claim(&st, user, Some(10)).await.unwrap();
+        assert_eq!(st.broker.lock().await.assigned_leverage(user), Some(10));
+        let n = st.journals.lock().await[&user].len();
+        sync_leverage_claim(&st, user, Some(10)).await.unwrap();
+        assert_eq!(st.journals.lock().await[&user].len(), n, "повтор не пишет");
+
+        for bad in [0, 1001] {
+            let e = sync_leverage_claim(&st, user, Some(bad)).await.unwrap_err();
+            assert_eq!(e.0, StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(st.broker.lock().await.assigned_leverage(user), Some(10));
+        let js = st.journals.lock().await;
+        let op = js[&user]
+            .events()
+            .iter()
+            .find(|e| matches!(e.kind(), journal::EventKind::LeverageSet { .. }))
+            .and_then(|e| e.origin().operator().cloned())
+            .expect("запись с основанием");
+        assert_eq!(op.who(), "cabinet-sso");
+    }
+
+    #[test]
+    fn the_leverage_claim_is_optional() {
+        let c: sso::Claims = serde_json::from_str(r#"{"sub":"u","tenant":"t","jti":"j"}"#).unwrap();
+        assert_eq!(c.leverage, None);
+        let c: sso::Claims =
+            serde_json::from_str(r#"{"sub":"u","tenant":"t","jti":"j","leverage":20}"#).unwrap();
+        assert_eq!(c.leverage, Some(20));
     }
 }

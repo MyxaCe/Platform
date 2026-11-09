@@ -604,3 +604,134 @@ async fn postgres_round_trips_the_position_leverage() {
         "поднятый счёт здоров: маржа отвечает плечу, которое доехало обратно"
     );
 }
+
+/// Плечо СЧЁТА (Р-446) переживает хранилище: столбец `accounts.leverage` и
+/// запись `leverage_set` в ленте поднимаются обратно и сходятся друг с другом.
+///
+/// Без базы не проверить: отображение живёт в SQL. Не доедь столбец обратно —
+/// сверка на старте увидит «плечо по журналу 50, в слепке None», и счёт уйдёт
+/// в карантин при первом же перезапуске. `None` обязан остаться `None`, а не
+/// стать единицей: «не назначали» — это плечо площадки.
+#[tokio::test]
+#[ignore = "нужна живая БД: TEST_DATABASE_URL=postgres://... cargo test -p persistence -- --ignored"]
+async fn postgres_round_trips_the_account_leverage() {
+    let url = std::env::var("TEST_DATABASE_URL")
+        .expect("TEST_DATABASE_URL не задан — тест запущен без базы, которую он проверяет");
+    let store = persistence::PgStore::connect(&url)
+        .await
+        .expect("подключение");
+    store.init().await.expect("DDL");
+
+    const W: UserId = UserId(79);
+    const N: UserId = UserId(80);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE account_events DISABLE TRIGGER account_events_no_update")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for u in [W, N] {
+        for t in ["positions", "pendings", "accounts", "account_events"] {
+            sqlx::query(&format!("DELETE FROM {t} WHERE user_id = $1"))
+                .bind(u.0 as i64)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+    sqlx::query("ALTER TABLE account_events ENABLE TRIGGER account_events_no_update")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let j = Journal::new(10_000_000);
+    let op = Origin::Operator(Operator::new("risk@site", "портфель Pro", "ext:adm-1").unwrap());
+    let mut events = j.seal(
+        1_700_000_000_000,
+        &Origin::System,
+        &[EventKind::AccountOpened {
+            balance: 10_000_000,
+            profile: Default::default(),
+        }],
+    );
+    let mut j2 = j.clone();
+    for e in events.clone() {
+        j2.commit(e).unwrap();
+    }
+    let tail = j2.seal(
+        1_700_000_001_000,
+        &op,
+        &[
+            EventKind::LeverageSet { lev: 50 },
+            EventKind::PendingPlaced {
+                id: 1,
+                instrument: 1,
+                side: PosSide::Long,
+                qty: 10,
+                price: 4_900,
+                pd: 2,
+                qd: 3,
+                sl: None,
+                tp: None,
+            },
+            EventKind::PendingRejected {
+                id: 1,
+                exec: Some(4_800),
+                reason: broker::journal::RejectReason::AccountFrozen,
+            },
+        ],
+    );
+    events.extend(tail);
+    let snap = AccountSnapshot {
+        balance: 10_000_000,
+        next_id: 1,
+        leverage: Some(50),
+        ..Default::default()
+    };
+    store
+        .save_account(W, &snap, &events, &[])
+        .await
+        .expect("запись в БД");
+    // Счёт без назначенного плеча — NULL в столбце.
+    let plain = AccountSnapshot {
+        balance: 10_000_000,
+        ..Default::default()
+    };
+    store
+        .save_account(N, &plain, &[], &[])
+        .await
+        .expect("запись в БД");
+
+    let loaded = store.load_all().await.expect("подъём из БД");
+    let back = |u: UserId| {
+        loaded
+            .accounts
+            .iter()
+            .find(|(id, _)| *id == u)
+            .expect("счёт поднялся")
+            .1
+            .clone()
+    };
+    assert_eq!(back(W).leverage, Some(50), "плечо счёта пережило хранилище");
+    assert_eq!(
+        back(N).leverage,
+        None,
+        "не назначали — остаётся не назначенным"
+    );
+
+    let lane = loaded
+        .journals
+        .into_iter()
+        .find(|(id, _)| *id == W)
+        .expect("лента поднялась")
+        .1;
+    let journal = Journal::load(10_000_000, lane).expect("цепочка цела");
+    assert_eq!(journal.state().leverage, Some(50));
+    assert!(
+        broker::journal::audit(&journal, &back(W)).ok(),
+        "лента и слепок сходятся после подъёма"
+    );
+}

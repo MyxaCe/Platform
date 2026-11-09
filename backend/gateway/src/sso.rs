@@ -35,6 +35,11 @@ pub struct Claims {
     /// Какой счёт открыть: `demo` | `real` (demo-money). Нет claim-а — демо.
     #[serde(default)]
     pub account_kind: Option<String>,
+    /// Плечо счёта (знаменатель 1:N), посчитанное кабинетом из портфеля и
+    /// override клиента на момент выпуска (Р-446). Нет claim-а — плечо счёта
+    /// входом не меняется.
+    #[serde(default)]
+    pub leverage: Option<i64>,
 }
 
 /// Ошибка входа. Наверх маппится в HTTP-код (см. `code()`).

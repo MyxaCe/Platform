@@ -650,6 +650,7 @@ fn deal_error(e: broker::BrokerError) -> ApiErr {
         E::UnknownAccount => err(StatusCode::NOT_FOUND, "unknown_account"),
         E::NotADemoAccount => err(StatusCode::CONFLICT, "not_a_demo_account"),
         E::AccountNotFlat => err(StatusCode::CONFLICT, "account_not_flat"),
+        E::InvalidLeverage => err(StatusCode::BAD_REQUEST, "invalid_leverage"),
     }
 }
 
@@ -1551,7 +1552,7 @@ pub fn router(state: AppState) -> Router {
 
 // ============================ DTO ==========================================
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct ErrResp {
     error: String,
 }
@@ -1698,8 +1699,10 @@ struct AccountDto {
     /// знать, рискует ли он остаться должным.
     negative_balance_protection: bool,
     open_pnl: Option<i128>,
-    /// Плечо, с которым откроется СЛЕДУЮЩАЯ позиция (`PLATFORM_LEVERAGE`).
-    /// У открытых позиций плечо своё, записанное при открытии.
+    /// Плечо, с которым откроется СЛЕДУЮЩАЯ позиция: плечо счёта (Р-446,
+    /// назначает сайт), а если его не назначали — плечо площадки
+    /// (`PLATFORM_LEVERAGE`). У открытых позиций плечо своё, записанное при
+    /// открытии.
     leverage: i128,
     /// Торговля заморожена оператором: открытие, новые ордера и вывод
     /// отклоняются (`account_frozen`), закрытие и стоп-аут работают.
@@ -2352,7 +2355,7 @@ async fn account(
             margin_call_level_pct: b.margin_call_pct(),
             negative_balance_protection: b.negative_balance_protection(),
             open_pnl: None,
-            leverage: b.leverage(),
+            leverage: b.account_leverage(user),
             trading_frozen: false,
             kind: kind.tag(),
             account_id,
@@ -2390,7 +2393,7 @@ async fn account(
         margin_call_level_pct: b.margin_call_pct(),
         negative_balance_protection: b.negative_balance_protection(),
         open_pnl: Some(open_pnl),
-        leverage: b.leverage(),
+        leverage: b.account_leverage(user),
         trading_frozen: frozen,
         kind: b.snapshot(user).profile.kind.tag(),
         account_id,
@@ -2557,6 +2560,7 @@ async fn session_create(
                 "identity store unavailable",
             )
         })?;
+    sync_leverage_claim(&st, user, claims.leverage).await?;
     let expires_in = st
         .sso
         .mint(claims.jti.clone(), user, claims.tenant.clone())
@@ -2565,6 +2569,49 @@ async fn session_create(
         token: claims.jti,
         expires_in,
     }))
+}
+
+/// Плечо счёта из токена входа (Р-446): кабинет кладёт в claim `leverage`
+/// итог портфеля / override клиента на момент выпуска. Это синхронизация, а
+/// не основной путь — основной путь у админки, внутренний маршрут
+/// `.../leverage`. Здесь догоняется то, что мимо него: новый клиент в
+/// портфеле по умолчанию, счёт, впервые заведённый этим входом, смена,
+/// случившаяся, пока терминал лежал. Терминал продлевает сессию повторным
+/// handoff-ом (≤ 15 мин), так что плечо догоняет сайт и без маршрута.
+///
+/// Нет claim-а — плечо счёта не трогаем (старый кабинет, standalone).
+/// Синхронизация не удалась — входа нет: торговать по плечу, которое сайт
+/// уже отменил, хуже, чем не войти (fail-closed). Счёт в карантине не
+/// мутируем — читать его можно и без синхронизации.
+async fn sync_leverage_claim(
+    st: &AppState,
+    user: UserId,
+    claim: Option<i64>,
+) -> Result<(), ApiErr> {
+    let Some(lev) = claim else {
+        return Ok(());
+    };
+    let lev = i128::from(lev);
+    if !(1..=broker::MAX_LEVERAGE).contains(&lev) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid_leverage"));
+    }
+    if st.quarantined.lock().await.contains(&user) {
+        return Ok(());
+    }
+    let op = journal::Operator::new(
+        "cabinet-sso",
+        "плечо счёта из токена входа кабинета (портфель/override клиента)",
+        "sso-login",
+    )
+    .expect("поля заданы константами");
+    if let Err(e) = money::apply_leverage(st, user, lev, op).await {
+        eprintln!(
+            "[sso] плечо счёта {} из токена не применено ({}): вход отклонён",
+            user.0, e.1 .0.error
+        );
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "leverage_sync_failed"));
+    }
+    Ok(())
 }
 
 /// Погасить сессию терминала (логаут из кабинета).
@@ -2621,7 +2668,23 @@ pub async fn monitor_tick(st: &AppState) {
     // снова непрерывен. Порог тот же, что у `/health`: два разных
     // числа для одного вопроса однажды разойдутся.
     let across_gap = st.note_feed_gap();
-    let changed = { st.broker.lock().await.check(&m, across_gap) };
+    // Замороженные счета — по свёртке журналов (заморозку держит шлюз, не
+    // брокер). Их сработавшие отложенные ордера снимаются, а не исполняются:
+    // проверка на постановке ордера не закрывает ордер, поставленный ДО
+    // заморозки. Порядок локов «журналы → брокер» — тот же, что у
+    // `commit_journal`.
+    let changed = {
+        let js = st.journals.lock().await;
+        let frozen: std::collections::HashSet<UserId> = js
+            .iter()
+            .filter(|(_, j)| j.state().trading_frozen)
+            .map(|(u, _)| *u)
+            .collect();
+        st.broker
+            .lock()
+            .await
+            .check_with_frozen(&m, across_gap, &frozen)
+    };
     for user in changed {
         let lock = account_lock(st, user).await;
         let _guard = lock.lock().await;
@@ -3248,6 +3311,7 @@ mod invariant_wiring_tests {
             pendings: vec![],
             closed: vec![],
             model: broker::PositionModel::Hedging,
+            leverage: None,
         }
     }
 

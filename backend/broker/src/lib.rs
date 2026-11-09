@@ -4,7 +4,7 @@
 //! (лимитные) ордера с триггером по цене, история закрытых сделок, маржа и P&L на реальных ценах.
 //! Деньги — в **центах** (`i128`). Реальных денег нет.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use domain::account::UserId;
 /// Реэкспорт словаря счёта: шлюз работает с ним через брокера, а не
@@ -16,7 +16,7 @@ pub use domain::account::{
 
 pub mod journal;
 
-use journal::{CloseCause, EventKind};
+use journal::{CloseCause, EventKind, RejectReason};
 
 /// Деньги в центах (1/100 USD).
 /// Денежная величина — целое в **наименьшей единице валюты счёта** (TRM-55).
@@ -223,7 +223,13 @@ pub enum BrokerError {
     StopLossAlreadyReached,
     /// Тейк-профит уже достигнут: позиция закрылась бы на первом же тике.
     TakeProfitAlreadyReached,
+    /// Плечо вне `1..=MAX_LEVERAGE`.
+    InvalidLeverage,
 }
+
+/// Верхняя граница плеча (знаменатель 1:N). Одна на площадку и на счёт: та же,
+/// что у `PLATFORM_LEVERAGE`.
+pub const MAX_LEVERAGE: i128 = 1000;
 
 /// Сработал бы стоп-лосс `sl` при цене `m` у позиции стороны `side`.
 ///
@@ -299,6 +305,17 @@ struct Account {
     /// повторно. Это повтор **верного** предупреждения, а не ложное, и он
     /// дешевле столбца в денежной таблице ради состояния переписки.
     margin_called: bool,
+    /// Плечо **этого счёта** для новых позиций (Р-446: итог портфеля и
+    /// override клиента считает сайт, сюда приезжает одно число).
+    ///
+    /// `None` — счёту плечо не назначали, действует плечо площадки
+    /// (`PLATFORM_LEVERAGE`). Это не «1», а «как у площадки»: счёт, заведённый
+    /// до появления поля, обязан торговать так же, как торговал.
+    ///
+    /// Смена касается только **новых** позиций: открытые держат своё плечо
+    /// снимком (`Position::leverage`). Меняется только записью журнала
+    /// `LeverageSet` — свёртка обязана сходиться со слепком.
+    leverage: Option<i128>,
     /// Исходящая очередь событий журнала (TRM-13): что произошло со счётом в текущей
     /// операции. **Не часть состояния** — в слепок не попадает и рестарта не переживает:
     /// её забирает вызывающий сразу после операции и записывает в журнал той же
@@ -686,6 +703,7 @@ impl Account {
     /// значило бы не исполнить стоп на реальном движении. Меняется только
     /// запись: закрытие на разрыве должно быть отличимо в журнале, потому что
     /// спорят именно о нём.
+    #[allow(clippy::too_many_arguments)]
     fn run_triggers(
         &mut self,
         lev: i128,
@@ -693,6 +711,7 @@ impl Account {
         across_gap: bool,
         stop_out_pct: Option<i128>,
         protect_negative: bool,
+        frozen: bool,
     ) -> bool {
         // Сработавшие лимитные ордера → открыть позицию.
         let mut fire: Vec<PendingOrder> = Vec::new();
@@ -723,6 +742,20 @@ impl Account {
             // и это не щедрость, а то же самое правило: исполняется то, что на
             // рынке, а не то, что мы пообещали нарисовать.
             let exec = marks.get(&p.instrument).copied().unwrap_or(p.price);
+            // Счёт заморожен оператором — ордер, поставленный ДО заморозки,
+            // позицию не открывает. Проверка на постановке есть, но ордер
+            // исполняется позже и без человека: заморозка, проверяемая только
+            // на входе, пропускала бы через монитор ровно то, что запрещает.
+            // Ордер снимается своей записью с причиной — не молча и не
+            // «сработал»: позиции не было, и лента обязана это сказать.
+            if frozen {
+                self.log(EventKind::PendingRejected {
+                    id: p.id,
+                    exec: Some(exec),
+                    reason: RejectReason::AccountFrozen,
+                });
+                continue;
+            }
             self.log(EventKind::PendingTriggered {
                 id: p.id,
                 price: p.price,
@@ -1209,9 +1242,12 @@ impl Broker {
         sl: Option<i64>,
         tp: Option<i64>,
     ) -> Result<u64, BrokerError> {
-        let lev = self.leverage;
-        self.acct(user)
-            .try_open(lev, marks, instrument, side, qty, entry, pd, qd, sl, tp)
+        // Плечо СЧЁТА, а если не назначено — площадки. Оно ложится снимком в
+        // позицию и дальше от счёта не зависит (TRM-53).
+        let platform = self.leverage;
+        let a = self.acct(user);
+        let lev = a.leverage.unwrap_or(platform);
+        a.try_open(lev, marks, instrument, side, qty, entry, pd, qd, sl, tp)
     }
 
     /// Закрыть позицию по марк-цене. Возвращает реализованный P&L.
@@ -1331,12 +1367,38 @@ impl Broker {
     /// `across_gap` — первый прогон после молчания фида (Р-073). Передаёт его
     /// вызывающий: о свежести цен знает тот, кто их принимает, а не брокер.
     pub fn check(&mut self, marks: &HashMap<u32, i64>, across_gap: bool) -> Vec<UserId> {
-        let lev = self.leverage;
+        self.check_with_frozen(marks, across_gap, &HashSet::new())
+    }
+
+    /// [`Self::check`] с перечнем счетов, торговля по которым заморожена.
+    ///
+    /// Заморозку держит шлюз (свёртка журнала, `TradingFreezeSet`), а не
+    /// брокер, поэтому она приходит аргументом. У замороженного счёта
+    /// сработавший отложенный ордер **снимается** (`PendingRejected`), а не
+    /// исполняется; стопы, тейки и стоп-аут работают как обычно — они
+    /// закрывают риск, а не открывают его.
+    ///
+    /// Плечо исполнения отложенного ордера — **действующее плечо счёта на
+    /// момент исполнения**, а не постановки. Ордер маржу не резервирует, допуск
+    /// по марже идёт при исполнении, и плечо — вход того же расчёта. Снимок
+    /// плеча в ордере пропускал бы через монитор решение, которое оператор уже
+    /// отменил (снизил плечо по риску), — та же дыра, что с заморозкой, только
+    /// в цифрах. Позиция, родившаяся из ордера, дальше держит своё плечо
+    /// снимком, как любая другая.
+    pub fn check_with_frozen(
+        &mut self,
+        marks: &HashMap<u32, i64>,
+        across_gap: bool,
+        frozen: &HashSet<UserId>,
+    ) -> Vec<UserId> {
+        let platform = self.leverage;
         let stop_out = self.stop_out_pct;
         let protect = self.protect_negative_balance;
         let mut changed = Vec::new();
         for (user, a) in self.accounts.iter_mut() {
-            if a.run_triggers(lev, marks, across_gap, stop_out, protect) {
+            let lev = a.leverage.unwrap_or(platform);
+            let is_frozen = frozen.contains(user);
+            if a.run_triggers(lev, marks, across_gap, stop_out, protect, is_frozen) {
                 changed.push(*user);
             }
         }
@@ -1361,6 +1423,7 @@ impl Broker {
                 pendings: a.pendings.values().cloned().collect(),
                 closed: a.closed.clone(),
                 model: a.model,
+                leverage: a.leverage,
             },
             None => AccountSnapshot {
                 profile: AccountProfile::legacy_demo(user),
@@ -1370,6 +1433,7 @@ impl Broker {
                 pendings: vec![],
                 closed: vec![],
                 model: PositionModel::default(),
+                leverage: None,
             },
         }
     }
@@ -1388,6 +1452,7 @@ impl Broker {
             pendings: snap.pendings.into_iter().map(|p| (p.id, p)).collect(),
             closed: snap.closed,
             model: snap.model,
+            leverage: snap.leverage,
             // Защёлка предупреждения состояние счёта не описывает и в слепке её
             // нет: после подъёма счёт, всё ещё лежащий ниже уровня, будет
             // предупреждён заново. Повтор верного предупреждения дешевле
@@ -1465,9 +1530,44 @@ impl Broker {
             .unwrap_or_default()
     }
 
-    /// Плечо брокера — нужно тем, кто проверяет инварианты по слепку.
+    /// Плечо площадки (`PLATFORM_LEVERAGE`) — умолчание для счёта, которому
+    /// своё плечо не назначали.
     pub fn leverage(&self) -> i128 {
         self.leverage
+    }
+
+    /// Плечо, с которым у этого счёта откроется **следующая** позиция: своё
+    /// плечо счёта, а если его не назначали — плечо площадки. Для счёта,
+    /// которого ещё нет, — плечо площадки: с ним он и откроется.
+    pub fn account_leverage(&self, user: UserId) -> i128 {
+        self.assigned_leverage(user).unwrap_or(self.leverage)
+    }
+
+    /// Назначено ли счёту своё плечо (`None` — действует плечо площадки).
+    pub fn assigned_leverage(&self, user: UserId) -> Option<i128> {
+        self.accounts.get(&user).and_then(|a| a.leverage)
+    }
+
+    /// Назначить плечо счёту (Р-446). Касается только **новых** позиций:
+    /// открытые держат своё плечо снимком, и маржа под ними не меняется.
+    ///
+    /// `Ok(true)` — плечо сменилось, в очереди лежит `LeverageSet`;
+    /// `Ok(false)` — оно уже такое, записи нет (повтор не шумит в журнал).
+    /// Счёта нет — отказ, а не заведение: счёт заводит шлюз своей записью.
+    pub fn set_account_leverage(&mut self, user: UserId, lev: i128) -> Result<bool, BrokerError> {
+        if !(1..=MAX_LEVERAGE).contains(&lev) {
+            return Err(BrokerError::InvalidLeverage);
+        }
+        let a = self
+            .accounts
+            .get_mut(&user)
+            .ok_or(BrokerError::UnknownAccount)?;
+        if a.leverage == Some(lev) {
+            return Ok(false);
+        }
+        a.leverage = Some(lev);
+        a.log(EventKind::LeverageSet { lev });
+        Ok(true)
     }
 
     /// Сменить плечо площадки (TRM-53 шаг 2).
@@ -1517,6 +1617,9 @@ pub struct AccountSnapshot {
     /// Модель ведения позиций счёта (ADR-025). Счета, заведённые до 2026-09-04,
     /// поднимаются как `Hedging` — другой модели в коде не существовало.
     pub model: PositionModel,
+    /// Плечо счёта для новых позиций (Р-446). `None` — не назначали, действует
+    /// плечо площадки.
+    pub leverage: Option<i128>,
 }
 
 // ======================= Инварианты денег (красная линия №5) =================
@@ -1723,6 +1826,7 @@ mod invariant_tests {
             pendings: vec![],
             closed: vec![],
             model: PositionModel::Hedging,
+            leverage: None,
         }
     }
 
@@ -2655,5 +2759,247 @@ mod netting_tests {
             restored.positions(u).is_empty(),
             "восстановленный счёт обязан неттить"
         );
+    }
+}
+
+// ============== Плечо счёта и заморозка на исполнении (Р-446) ===============
+#[cfg(test)]
+mod account_leverage_tests {
+    use super::journal::{self, Journal, Origin};
+    use super::*;
+
+    const U: UserId = UserId(7);
+
+    /// Брокер с открытым счётом и журналом, в который принята запись о заведении.
+    fn setup(platform_lev: i128) -> (Broker, Journal) {
+        let mut b = Broker::new(1_000_000_000, platform_lev);
+        assert!(b.open_account(U));
+        let mut j = Journal::new(b.start_balance());
+        commit(&mut b, &mut j);
+        (b, j)
+    }
+
+    /// Забрать события операции, свериться со слепком и принять их в ленту —
+    /// тот же порядок, что у шлюза.
+    fn commit(b: &mut Broker, j: &mut Journal) {
+        let kinds = b.take_events(U);
+        let sealed = j.seal(1, &Origin::System, &kinds);
+        let snap = b.snapshot(U);
+        assert_eq!(
+            journal::reconcile(&j.preview(&sealed), &snap),
+            vec![],
+            "лента сходится со слепком"
+        );
+        for e in sealed {
+            j.commit(e).expect("запись продолжает ленту");
+        }
+    }
+
+    fn marks(px: i64) -> HashMap<u32, i64> {
+        HashMap::from([(1u32, px)])
+    }
+
+    fn lev_of(b: &Broker, id: u64) -> i128 {
+        b.positions(U)
+            .into_iter()
+            .find(|p| p.id == id)
+            .expect("позиция есть")
+            .leverage
+    }
+
+    #[test]
+    fn unassigned_account_trades_at_platform_leverage() {
+        let (mut b, mut j) = setup(20);
+        assert_eq!(b.assigned_leverage(U), None);
+        assert_eq!(b.account_leverage(U), 20, "умолчание — плечо площадки");
+        let id = b
+            .open(
+                U,
+                &marks(5000),
+                1,
+                PosSide::Long,
+                1000,
+                5000,
+                2,
+                3,
+                None,
+                None,
+            )
+            .unwrap();
+        commit(&mut b, &mut j);
+        assert_eq!(lev_of(&b, id), 20);
+    }
+
+    /// Новое плечо — новым позициям; старая держит снимок. Смена журналируется
+    /// и переживает рестарт: свёртка ленты даёт то же плечо, что слепок.
+    #[test]
+    fn new_position_takes_new_leverage_old_keeps_its_own_and_survives_restart() {
+        let (mut b, mut j) = setup(20);
+        let old = b
+            .open(
+                U,
+                &marks(5000),
+                1,
+                PosSide::Long,
+                1000,
+                5000,
+                2,
+                3,
+                None,
+                None,
+            )
+            .unwrap();
+        commit(&mut b, &mut j);
+        let old_margin = b.used_margin(U);
+
+        assert_eq!(b.set_account_leverage(U, 50), Ok(true));
+        assert_eq!(
+            b.take_events_peek(),
+            vec![EventKind::LeverageSet { lev: 50 }],
+            "смена плеча — своя запись"
+        );
+        commit(&mut b, &mut j);
+        assert_eq!(
+            b.used_margin(U),
+            old_margin,
+            "маржа открытой позиции не двинулась"
+        );
+
+        let new = b
+            .open(
+                U,
+                &marks(5000),
+                1,
+                PosSide::Long,
+                1000,
+                5000,
+                2,
+                3,
+                None,
+                None,
+            )
+            .unwrap();
+        commit(&mut b, &mut j);
+        assert_eq!(lev_of(&b, old), 20, "старая позиция — со старым плечом");
+        assert_eq!(lev_of(&b, new), 50, "новая — с плечом счёта");
+
+        // «Рестарт»: лента поднимается из записей, слепок — из хранилища.
+        let events = j.events().to_vec();
+        let reloaded = Journal::load(b.start_balance(), events).expect("лента цела");
+        assert_eq!(reloaded.state().leverage, Some(50), "плечо в свёртке");
+        let snap = b.snapshot(U);
+        assert_eq!(snap.leverage, Some(50), "плечо в слепке");
+        assert!(
+            journal::audit(&reloaded, &snap).ok(),
+            "сверка после рестарта"
+        );
+        let mut b2 = Broker::new(b.start_balance(), 20);
+        b2.restore(U, snap);
+        assert_eq!(
+            b2.account_leverage(U),
+            50,
+            "после подъёма плечо счёта прежнее"
+        );
+    }
+
+    /// Плечо в слепке без записи в ленте — расхождение, а не тихая правка.
+    #[test]
+    fn leverage_without_a_journal_entry_is_a_divergence() {
+        let (mut b, j) = setup(20);
+        b.set_account_leverage(U, 50).unwrap();
+        let _ = b.take_events(U); // запись «потерялась»
+        let ds = journal::reconcile(j.state(), &b.snapshot(U));
+        assert!(
+            ds.iter().any(|d| d.0.contains("плечо счёта")),
+            "расхождение названо: {ds:?}"
+        );
+    }
+
+    #[test]
+    fn leverage_is_validated_and_a_repeat_writes_nothing() {
+        let (mut b, _j) = setup(20);
+        for bad in [0, -1, MAX_LEVERAGE + 1] {
+            assert_eq!(
+                b.set_account_leverage(U, bad),
+                Err(BrokerError::InvalidLeverage),
+                "плечо {bad} не принимается"
+            );
+        }
+        assert_eq!(b.set_account_leverage(U, MAX_LEVERAGE), Ok(true));
+        let _ = b.take_events(U);
+        assert_eq!(b.set_account_leverage(U, MAX_LEVERAGE), Ok(false));
+        assert_eq!(b.pending_events(U), 0, "повтор не пишет запись");
+        assert_eq!(
+            b.set_account_leverage(UserId(999), 10),
+            Err(BrokerError::UnknownAccount),
+            "счёт не заводится ради плеча"
+        );
+    }
+
+    /// Отложенный ордер исполняется по плечу счёта НА МОМЕНТ ИСПОЛНЕНИЯ:
+    /// маржу он не резервирует, допуск идёт при исполнении.
+    #[test]
+    fn pending_order_executes_at_the_leverage_in_force_when_it_fires() {
+        let (mut b, mut j) = setup(20);
+        b.place_pending(U, 1, PosSide::Long, 1000, 4900, 2, 3, None, None)
+            .unwrap();
+        commit(&mut b, &mut j);
+        b.set_account_leverage(U, 5).unwrap();
+        commit(&mut b, &mut j);
+
+        assert_eq!(b.check(&marks(4890), false), vec![U]);
+        commit(&mut b, &mut j);
+        let p = b.positions(U);
+        assert_eq!(p.len(), 1, "ордер исполнен");
+        assert_eq!(p[0].leverage, 5, "плечо — действующее при исполнении");
+    }
+
+    /// Дыра заморозки: ордер, поставленный до заморозки, при срабатывании
+    /// позицию НЕ открывает — снимается записью с причиной.
+    #[test]
+    fn frozen_account_pending_is_rejected_on_fire_not_executed() {
+        let (mut b, mut j) = setup(20);
+        let id = b
+            .place_pending(U, 1, PosSide::Long, 1000, 4900, 2, 3, None, None)
+            .unwrap();
+        commit(&mut b, &mut j);
+
+        let frozen = HashSet::from([U]);
+        assert_eq!(b.check_with_frozen(&marks(4890), false, &frozen), vec![U]);
+        assert_eq!(
+            b.take_events_peek(),
+            vec![EventKind::PendingRejected {
+                id,
+                exec: Some(4890),
+                reason: RejectReason::AccountFrozen,
+            }]
+        );
+        commit(&mut b, &mut j);
+        assert!(b.positions(U).is_empty(), "позиция не открыта");
+        assert!(b.pendings(U).is_empty(), "ордер снят");
+        assert!(j.state().pendings.is_empty(), "и в свёртке тоже");
+    }
+
+    /// Не сработавший ордер замороженного счёта остаётся стоять: снимается он
+    /// только при срабатывании, разморозка до него — и он исполнится.
+    #[test]
+    fn frozen_account_pending_that_does_not_fire_stays() {
+        let (mut b, mut j) = setup(20);
+        b.place_pending(U, 1, PosSide::Long, 1000, 4900, 2, 3, None, None)
+            .unwrap();
+        commit(&mut b, &mut j);
+        let frozen = HashSet::from([U]);
+        assert!(b.check_with_frozen(&marks(5000), false, &frozen).is_empty());
+        assert_eq!(b.pendings(U).len(), 1);
+    }
+
+    impl Broker {
+        /// Посмотреть события очереди, не забирая их.
+        fn take_events_peek(&self) -> Vec<EventKind> {
+            self.accounts
+                .get(&U)
+                .map(|a| a.outbox.clone())
+                .unwrap_or_default()
+        }
     }
 }

@@ -927,6 +927,7 @@ mod tests {
             pendings: Vec::new(),
             closed: Vec::new(),
             model: PositionModel::Hedging,
+            leverage: None,
         }
     }
 
