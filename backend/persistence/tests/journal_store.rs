@@ -56,7 +56,12 @@ fn trade_events(j: &Journal) -> Vec<broker::journal::AccountEvent> {
     all.extend(j2.seal(
         1_700_000_050_000,
         &op,
-        &[EventKind::Deposited { amount: 250_000 }],
+        // Заморозка торговли (demo-money) едет в той же ленте и обязана
+        // подниматься из хранилища: другого места у неё нет.
+        &[
+            EventKind::Deposited { amount: 250_000 },
+            EventKind::TradingFreezeSet { frozen: true },
+        ],
     ));
     all
 }
@@ -93,6 +98,7 @@ async fn memory_store_round_trips_the_journal() {
     // И цепочка сходится после подъёма — иначе хранилище что-то потеряло по дороге.
     let rebuilt = Journal::load(10_000_000, lane).expect("цепочка обязана сойтись");
     assert_eq!(rebuilt.replay().balance, 10_250_000);
+    assert!(rebuilt.state().trading_frozen, "заморозка поднялась из хранилища");
     let op = rebuilt
         .events()
         .last()

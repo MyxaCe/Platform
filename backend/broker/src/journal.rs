@@ -340,6 +340,17 @@ pub enum EventKind {
     /// завтра нечем проверить, и оно тихо распространится на то, чего мы не имели
     /// в виду. Значение равно номеру предыдущей записи ленты.
     HistoryExcludedFromReporting { through_seq: u64 },
+    /// Торговля по счёту заморожена (`frozen = true`) или разморожена оператором.
+    ///
+    /// Денег не трогает, но **меняет состояние счёта** — что ему разрешено:
+    /// замороженный счёт не открывает позиций, не ставит ордеров и не выводит
+    /// средства; закрытие, стоп-аут, SL/TP и пополнение работают. Поэтому это
+    /// не второй «пропускаемый» вид рядом с `HistoryExcludedFromReporting`, а
+    /// обычная запись, которую свёртка применяет: состояние заморозки
+    /// восстанавливается из ленты при рестарте и другого хранилища не имеет.
+    ///
+    /// Кто и почему — в `Origin::Operator` записи (who / reason / incident).
+    TradingFreezeSet { frozen: bool },
 }
 
 impl EventKind {
@@ -366,7 +377,8 @@ impl EventKind {
             | EventKind::PendingCancelled { .. }
             | EventKind::PendingTriggered { .. }
             | EventKind::NegativeBalanceCompensated { .. }
-            | EventKind::DemoAccountReset { .. } => true,
+            | EventKind::DemoAccountReset { .. }
+            | EventKind::TradingFreezeSet { .. } => true,
             EventKind::HistoryExcludedFromReporting { .. } => false,
         }
     }
@@ -602,6 +614,9 @@ impl EventKind {
             EventKind::DemoAccountReset { adjustment } => {
                 format!("demo_account_reset adjustment={adjustment}")
             }
+            EventKind::TradingFreezeSet { frozen } => {
+                format!("trading_freeze_set frozen={}", flag(*frozen))
+            }
         }
     }
 
@@ -701,6 +716,13 @@ impl EventKind {
             },
             "demo_account_reset" => EventKind::DemoAccountReset {
                 adjustment: num(&f, "adjustment")?,
+            },
+            "trading_freeze_set" => EventKind::TradingFreezeSet {
+                frozen: match pick(&f, "frozen")? {
+                    "0" => false,
+                    "1" => true,
+                    _ => return Err(BadRecord("поле-признак не 0 и не 1")),
+                },
             },
             _ => return Err(BadRecord("неизвестный вид события")),
         })
@@ -880,6 +902,9 @@ pub struct ReplayState {
     /// сверку денег не входит: свёртка держит его, чтобы читателю было где
     /// увидеть заявление.
     pub excluded_from_reporting_through: Option<u64>,
+    /// Заморожена ли торговля оператором (`TradingFreezeSet`). В сверку со
+    /// слепком не входит: в слепке брокера заморозки нет, её держит шлюз.
+    pub trading_frozen: bool,
 }
 
 impl ReplayState {
@@ -895,6 +920,7 @@ impl ReplayState {
             orphans: Vec::new(),
             profile: AccountProfile::default(),
             excluded_from_reporting_through: None,
+            trading_frozen: false,
         }
     }
 
@@ -942,6 +968,7 @@ impl ReplayState {
             // суммы: свёртка обязана получать остаток из проводок. Присвоение
             // молча исправило бы испорченную запись при подъёме.
             EventKind::DemoAccountReset { adjustment } => self.balance += *adjustment,
+            EventKind::TradingFreezeSet { frozen } => self.trading_frozen = *frozen,
             EventKind::Withdrawn { amount } => self.balance -= *amount,
             EventKind::PositionOpened {
                 id,
@@ -1602,6 +1629,8 @@ mod tests {
                 across_gap: false,
             },
             EventKind::HistoryExcludedFromReporting { through_seq: 11 },
+            EventKind::TradingFreezeSet { frozen: true },
+            EventKind::TradingFreezeSet { frozen: false },
         ]
     }
 

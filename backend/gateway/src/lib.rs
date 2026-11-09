@@ -16,6 +16,8 @@ pub mod feed;
 /// вызывается сегодня только из тестов: он участник сверки реализаций между
 /// репозиториями, и прятать его значило бы прятать сам факт сверки.
 pub mod jurisdiction;
+/// Внутренние денежные ручки: пополнение и вывод от имени сайта (демо-деньги).
+mod money;
 mod sso;
 
 use std::collections::HashMap;
@@ -130,6 +132,15 @@ pub struct AppState {
     /// копится, потому что слать некуда» — разные состояния, и чинятся разными
     /// людьми.
     bus_enabled: bool,
+    /// Общий секрет внутренних денежных ручек (`INTERNAL_MONEY_TOKEN`).
+    ///
+    /// `None` — ручки **выключены** и отвечают `404`, как несуществующие:
+    /// fail-closed. Незаданный секрет не может означать «пускать всех».
+    internal_money_token: Option<Arc<str>>,
+    /// Сериализует денежные ручки целиком: «нет ли уже такого `external_ref`
+    /// → провести → записать». Без него два одновременных повтора одного
+    /// крипто-депозита оба увидели бы «ещё не было» и зачислили дважды.
+    money_lock: Arc<Mutex<()>>,
 }
 
 pub fn build_state() -> AppState {
@@ -255,6 +266,13 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
             "[gateway] ВНИМАНИЕ: MARGIN_STOP_OUT_LEVEL_PERCENT не задан — принудительного закрытия по марже НЕТ. Счёт может уйти в минус без ограничения сверху. Порог задаёт юрисдикция (CMS-24), выдумывать его здесь нельзя."
         ),
     }
+    // Плечо площадки. Умолчание 1 — поведение без переменной прежнее.
+    // Плечо записывается В ПОЗИЦИЮ при открытии, поэтому смена значения
+    // между выпусками не трогает маржу уже открытых позиций (TRM-53).
+    let leverage = leverage_from_env(std::env::var("PLATFORM_LEVERAGE").ok().as_deref());
+    println!("[gateway] плечо площадки: 1:{leverage}");
+    let internal_money_token =
+        money::token_from_env(std::env::var("INTERNAL_MONEY_TOKEN").ok().as_deref());
     let feed_instruments = feed::instruments();
     let symbols = symbol_index(&feed_instruments);
     let tenant_instruments = TenantSource::from_env(&symbols);
@@ -270,12 +288,12 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         stats_cache: Arc::new(Mutex::new(HashMap::new())),
         tenant_instruments: Arc::new(tenant_instruments),
         broker: Arc::new(Mutex::new(
-            Broker::new(start_cents, 1)
+            Broker::new(start_cents, leverage)
                 .with_stop_out_pct(stop_out_pct)
                 .with_margin_call_pct(margin_call_pct)
                 .with_margin_call_rearm_band_pct(rearm_band_pct)
                 .with_negative_balance_protection(protect_negative),
-        )), // старт из env, leverage 1
+        )), // старт и плечо — из env
         store,
         acct_locks: Arc::new(Mutex::new(HashMap::new())),
         quarantined: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -284,6 +302,30 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         sso_enabled,
         identities: Arc::new(Mutex::new(HashMap::new())),
         bus_enabled: false,
+        internal_money_token,
+        money_lock: Arc::new(Mutex::new(())),
+    }
+}
+
+/// Плечо площадки из окружения (`PLATFORM_LEVERAGE`).
+///
+/// Не задано — `1`, как было до переменной. Неразборчивое, ноль, отрицательное
+/// или больше 1000 — тоже `1`, и громко: испорченная настройка плеча не должна
+/// молча превращаться ни в «без маржи», ни в деление на ноль.
+fn leverage_from_env(raw: Option<&str>) -> i128 {
+    const DEFAULT: i128 = 1;
+    const MAX: i128 = 1000;
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => DEFAULT,
+        Some(s) => match s.parse::<i128>() {
+            Ok(l) if (1..=MAX).contains(&l) => l,
+            _ => {
+                eprintln!(
+                    "[gateway] PLATFORM_LEVERAGE=«{s}» не целое от 1 до {MAX} — взято плечо {DEFAULT}"
+                );
+                DEFAULT
+            }
+        },
     }
 }
 
@@ -736,6 +778,38 @@ async fn with_account<T>(
     origin: Origin,
     f: impl FnOnce(&mut Broker) -> Result<T, ApiErr>,
 ) -> Result<T, ApiErr> {
+    with_account_gated(st, user, origin, Gate::Any, f).await
+}
+
+/// Что операции нужно от счёта сверх «не в карантине».
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    /// Закрытие, снятие ордера, пополнение — разрешены и замороженному счёту.
+    Any,
+    /// Открытие позиции, новый ордер, вывод, сброс демо — замороженному нельзя.
+    NotFrozen,
+}
+
+/// Заморожена ли торговля по счёту оператором. Источник — свёртка журнала
+/// (`TradingFreezeSet`): другого хранилища у заморозки нет, и после рестарта
+/// она поднимается вместе с лентой.
+async fn trading_frozen(st: &AppState, user: UserId) -> bool {
+    st.journals
+        .lock()
+        .await
+        .get(&user)
+        .is_some_and(|j| j.state().trading_frozen)
+}
+
+/// [`with_account`] с проверкой заморозки **под локом счёта**: проверка до лока
+/// пропустила бы операцию, пришедшую одновременно с заморозкой.
+async fn with_account_gated<T>(
+    st: &AppState,
+    user: UserId,
+    origin: Origin,
+    gate: Gate,
+    f: impl FnOnce(&mut Broker) -> Result<T, ApiErr>,
+) -> Result<T, ApiErr> {
     // Счёт в карантине не мутируем: его состояние уже неверно, и любая операция
     // поверх него закрепила бы порчу. Читать при этом можно.
     if st.quarantined.lock().await.contains(&user) {
@@ -749,6 +823,10 @@ async fn with_account<T>(
     // операция уже не может родить счёт, а значит и уронить его рождение своим
     // отказом: `f` ниже работает по заведомо существующему счёту.
     ensure_account_opened(st, user).await?;
+
+    if gate == Gate::NotFrozen && trading_frozen(st, user).await {
+        return Err(err(StatusCode::FORBIDDEN, "account_frozen"));
+    }
 
     let (out, before, snap, kinds, start_balance) = {
         let mut b = st.broker.lock().await;
@@ -1387,6 +1465,9 @@ pub fn router(state: AppState) -> Router {
         // SSO платформы (ADR-023, Т2): обмен handoff-JWT на сессию терминала и логаут.
         .route("/v1/session", post(session_create))
         .route("/v1/session/logout", post(session_logout))
+        // Внутренние денежные ручки. Наружу не публикуются: nginx терминала
+        // проксирует только явный список префиксов и `/internal` закрывает сам.
+        .merge(money::routes())
         .with_state(state)
 }
 
@@ -1539,6 +1620,12 @@ struct AccountDto {
     /// знать, рискует ли он остаться должным.
     negative_balance_protection: bool,
     open_pnl: Option<i128>,
+    /// Плечо, с которым откроется СЛЕДУЮЩАЯ позиция (`PLATFORM_LEVERAGE`).
+    /// У открытых позиций плечо своё, записанное при открытии.
+    leverage: i128,
+    /// Торговля заморожена оператором: открытие, новые ордера и вывод
+    /// отклоняются (`account_frozen`), закрытие и стоп-аут работают.
+    trading_frozen: bool,
 }
 #[derive(Serialize)]
 struct InstrumentDto {
@@ -1620,6 +1707,8 @@ struct HealthDto {
     /// хранилища (КОНТРАКТЫ §5в), и по той же причине: снаружи общий счёт
     /// неотличим от своего, пока на нём не окажется чужая сделка.
     shared_account: bool,
+    /// Включены ли внутренние денежные ручки (задан ли `INTERNAL_MONEY_TOKEN`).
+    internal_money: bool,
 }
 
 /// Насколько старым может быть последнее сообщение Binance, чтобы фид считался живым.
@@ -1640,6 +1729,7 @@ async fn health(State(st): State<AppState>) -> Json<HealthDto> {
         bus: st.bus_enabled,
         outbox_pending: st.store.outbox_backlog().await.ok(),
         shared_account: !st.sso_enabled,
+        internal_money: st.internal_money_token.is_some(),
     })
 }
 
@@ -1905,7 +1995,7 @@ async fn open_deal(
     // Снимаются ДО лока счёта: тикеры живут под своим локом, и брать два лока
     // во вложенном порядке — способ получить взаимную блокировку.
     let m = marks(&st).await;
-    let id = with_account(&st, user, Origin::Client, |b| {
+    let id = with_account_gated(&st, user, Origin::Client, Gate::NotFrozen, |b| {
         b.open(
             user,
             &m,
@@ -1958,7 +2048,7 @@ async fn place_pending(
     }
     let fi = feed_by_id(&st, req.instrument)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
-    let id = with_account(&st, user, Origin::Client, |b| {
+    let id = with_account_gated(&st, user, Origin::Client, Gate::NotFrozen, |b| {
         b.place_pending(
             user,
             req.instrument,
@@ -2147,6 +2237,8 @@ async fn account(
 ) -> Result<Json<AccountDto>, ApiErr> {
     let user = require_user(&st, &headers).await?;
     let m = marks(&st).await;
+    // До лока брокера: журналы и брокер вложенно не берём.
+    let frozen = trading_frozen(&st, user).await;
     let b = st.broker.lock().await;
 
     // Счёт заводится лениво — при первой операции (TRM-46). Пока его нет,
@@ -2171,6 +2263,8 @@ async fn account(
             margin_call_level_pct: b.margin_call_pct(),
             negative_balance_protection: b.negative_balance_protection(),
             open_pnl: None,
+            leverage: b.leverage(),
+            trading_frozen: false,
         }));
     }
 
@@ -2205,6 +2299,8 @@ async fn account(
         margin_call_level_pct: b.margin_call_pct(),
         negative_balance_protection: b.negative_balance_protection(),
         open_pnl: Some(open_pnl),
+        leverage: b.leverage(),
+        trading_frozen: frozen,
     }))
 }
 
@@ -2310,7 +2406,7 @@ async fn demo_reset(
     headers: HeaderMap,
 ) -> Result<Json<AccountDto>, ApiErr> {
     let user = require_user(&st, &headers).await?;
-    with_account(&st, user, Origin::Client, |b| {
+    with_account_gated(&st, user, Origin::Client, Gate::NotFrozen, |b| {
         b.reset_demo(user).map(|_| ()).map_err(|e| match e {
             // Коды различимы: «не демо» чинит не тот, кто «закройте позиции».
             broker::BrokerError::NotADemoAccount => {
@@ -4993,5 +5089,25 @@ mod margin_wiring_tests {
             "нотионал 0.01 × $50 000 = $500: {acc}"
         );
         assert_eq!(acc["margin_level_pct"], 20_000, "{acc}");
+    }
+}
+
+#[cfg(test)]
+mod leverage_env_tests {
+    use super::leverage_from_env;
+
+    #[test]
+    fn leverage_defaults_to_one_and_refuses_nonsense() {
+        assert_eq!(
+            leverage_from_env(None),
+            1,
+            "без переменной поведение прежнее"
+        );
+        assert_eq!(leverage_from_env(Some("")), 1);
+        assert_eq!(leverage_from_env(Some(" 20 ")), 20);
+        assert_eq!(leverage_from_env(Some("1000")), 1000);
+        for bad in ["0", "-5", "1001", "20x", "1.5"] {
+            assert_eq!(leverage_from_env(Some(bad)), 1, "«{bad}»");
+        }
     }
 }
