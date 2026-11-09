@@ -40,6 +40,11 @@
     <!-- Модель ведения позиций (ADR-025). Она меняет смысл встречной сделки, поэтому
          показывается всегда, а не прячется в настройки. -->
     <div id="modelBadge" class="volatile-warn" hidden></div>
+    <!-- Род счёта (demo-money): демо и реальный — разные счета с разными
+         деньгами, и человек обязан видеть, на каком он торгует, ВСЕГДА.
+         Переключает счёт кабинет: повторный вход с другим account_kind. -->
+    <div id="kindBadge" class="kind-badge" hidden></div>
+    <div id="frozenBadge" class="acct-warn" hidden></div>
     <div class="top__right">
       <button class="btn" id="themeToggle" data-tip="Light / Dark" title="Light / Dark">◐</button>
       <span id="status" class="status status--off">●</span>

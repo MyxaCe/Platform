@@ -42,6 +42,7 @@ use std::sync::Arc;
 
 use broker::journal::EventKind;
 use broker::{AccountSnapshot, Cents, ClosedDeal, Currency, PosSide};
+use domain::account::AccountKind;
 use persistence::{OutboxRecord, Persistence};
 use serde::Serialize;
 
@@ -148,6 +149,16 @@ impl Envelope {
 /// имени), поэтому значение воспроизводимо и проверяется тестом по константе.
 pub fn event_id(kind: &str, key: &str) -> String {
     let name = format!("urn:terminal:{kind}:{key}");
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, name.as_bytes()).to_string()
+}
+
+/// Внешний идентификатор счёта (`accountId` на шине и во внутренних ручках).
+///
+/// Выводится из ключа счёта `(tenant, sub, kind)`, а не хранится: UUIDv5 от
+/// имени воспроизводим, и хранить второй источник правды о том же незачем.
+/// Внутренний номер наружу не уходит — он наша деталь.
+pub fn account_uuid(tenant: &str, sub: &str, kind: AccountKind) -> String {
+    let name = format!("urn:terminal:account:{tenant}:{sub}:{}", kind.tag());
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, name.as_bytes()).to_string()
 }
 
@@ -309,6 +320,12 @@ pub struct Addressee<'a> {
     pub seq: u64,
     /// Момент запечатывания записей журнала.
     pub at_ms: i64,
+    /// Род счёта (demo-money). У человека до двух счетов — демо и реальный —
+    /// с ОДНОЙ парой `(tenant, userId)`, и различает их только это поле и
+    /// `accountId`. Едут во всех событиях: `accountKind`, `accountId`.
+    pub kind: AccountKind,
+    /// [`account_uuid`] этого счёта.
+    pub account_id: &'a str,
 }
 
 /// Собрать конверты по изменению счёта. Чистая функция: сеть, время и хранилище —
@@ -350,12 +367,23 @@ pub fn envelopes_for(
             "tenant": who.tenant,
             "userId": who.sub,
             "accountSeq": who.seq,
+            "accountKind": who.kind.tag(),
+            "accountId": who.account_id,
             "currency": after.profile.currency.code(),
             "balanceCents": cents(*balance),
         });
         money(&mut data, "balance", *balance, after.profile.currency);
         out.push(Envelope {
-            event_id: event_id(EV_ACCOUNT_OPENED, &format!("{}:{}", who.tenant, who.sub)),
+            // Ключ демо-счёта прежний (`tenant:sub`) — уже опубликованные
+            // события остаются теми же. Реальный — со своим суффиксом: иначе
+            // его заведение склеилось бы дедупом с заведением демо.
+            event_id: event_id(
+                EV_ACCOUNT_OPENED,
+                &match who.kind {
+                    AccountKind::Demo => format!("{}:{}", who.tenant, who.sub),
+                    AccountKind::Real => format!("{}:{}:real", who.tenant, who.sub),
+                },
+            ),
             event: EV_ACCOUNT_OPENED.to_string(),
             version: EVENT_VERSION,
             occurred_at: occurred_at.clone(),
@@ -398,6 +426,8 @@ pub fn envelopes_for(
             "tenant": who.tenant,
             "userId": who.sub,
             "accountSeq": who.seq,
+            "accountKind": who.kind.tag(),
+            "accountId": who.account_id,
             "balanceCents": cents(after.balance),
             "positions": positions_json(after, instrument),
         });
@@ -547,6 +577,8 @@ fn trade_executed(
         "tenant": who.tenant,
         "userId": who.sub,
         "accountSeq": who.seq,
+        "accountKind": who.kind.tag(),
+        "accountId": who.account_id,
         // Номер сделки в истории счёта — он же её адрес в `GET /deals/closed`.
         // Устойчив между перезапусками: история только дописывается.
         "tradeId": format!("{}:{}", who.user, idx),
@@ -597,6 +629,8 @@ pub fn margin_called(
         "tenant": who.tenant,
         "userId": who.sub,
         "accountSeq": who.seq,
+        "accountKind": who.kind.tag(),
+        "accountId": who.account_id,
         "marginLevelPct": cents(level_pct),
         "equityCents": cents(equity),
         "usedMarginCents": cents(used_margin),
@@ -907,6 +941,8 @@ mod tests {
             user: 7,
             seq,
             at_ms: 1_767_225_600_123,
+            kind: AccountKind::Demo,
+            account_id: "00000000-0000-0000-0000-000000000000",
         }
     }
 

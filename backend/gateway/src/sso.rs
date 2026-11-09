@@ -32,6 +32,9 @@ pub struct Claims {
     pub sub: String,
     pub tenant: String,
     pub jti: String,
+    /// Какой счёт открыть: `demo` | `real` (demo-money). Нет claim-а — демо.
+    #[serde(default)]
+    pub account_kind: Option<String>,
 }
 
 /// Ошибка входа. Наверх маппится в HTTP-код (см. `code()`).

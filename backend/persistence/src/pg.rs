@@ -13,7 +13,7 @@ use sqlx::{Pool, Postgres, Row};
 
 use broker::journal::{AccountEvent, Operator, Origin};
 use broker::{AccountSnapshot, ClosedDeal, PendingOrder, PosSide, Position};
-use domain::account::UserId;
+use domain::account::{AccountKind, UserId};
 
 use crate::money::{from_numeric, to_numeric};
 use crate::{LoadedState, OutboxClaim, OutboxRecord, Persistence, StoreError};
@@ -95,6 +95,11 @@ CREATE TABLE IF NOT EXISTS identities (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (tenant, sub)
 );
+-- Демо и реальный счёт одного человека (demo-money): ключ (tenant, sub, kind).
+-- Все существующие строки — демо: другого рода до этой колонки не было.
+ALTER TABLE identities ADD COLUMN IF NOT EXISTS account_kind TEXT NOT NULL DEFAULT 'demo';
+ALTER TABLE identities DROP CONSTRAINT IF EXISTS identities_tenant_sub_key;
+CREATE UNIQUE INDEX IF NOT EXISTS identities_tenant_sub_kind ON identities (tenant, sub, account_kind);
 CREATE TABLE IF NOT EXISTS accounts (
   user_id     BIGINT PRIMARY KEY,
   balance     NUMERIC(38,0) NOT NULL,
@@ -784,18 +789,64 @@ impl Persistence for PgStore {
     }
 
     async fn resolve_identity(&self, tenant: &str, sub: &str) -> Result<UserId, StoreError> {
-        // Найти-или-создать одним запросом: конфликт по (tenant, sub) => RETURNING
-        // существующего user_id (DO UPDATE фиктивный, чтобы RETURNING сработал).
+        self.resolve_account(tenant, sub, AccountKind::Demo).await
+    }
+
+    async fn resolve_account(
+        &self,
+        tenant: &str,
+        sub: &str,
+        kind: AccountKind,
+    ) -> Result<UserId, StoreError> {
+        // Найти-или-создать одним запросом: конфликт по (tenant, sub, kind) =>
+        // RETURNING существующего user_id (DO UPDATE фиктивный, чтобы RETURNING
+        // сработал). Два одновременных первых входа получают один номер.
         let row = sqlx::query(
-            "INSERT INTO identities (tenant, sub) VALUES ($1, $2)
-             ON CONFLICT (tenant, sub) DO UPDATE SET tenant = EXCLUDED.tenant
+            "INSERT INTO identities (tenant, sub, account_kind) VALUES ($1, $2, $3)
+             ON CONFLICT (tenant, sub, account_kind) DO UPDATE SET tenant = EXCLUDED.tenant
              RETURNING user_id",
         )
         .bind(tenant)
         .bind(sub)
+        .bind(kind.tag())
         .fetch_one(&self.pool)
         .await
         .map_err(db)?;
         Ok(UserId(row.get::<i64, _>("user_id") as u64))
+    }
+
+    async fn find_account(
+        &self,
+        tenant: &str,
+        sub: &str,
+        kind: AccountKind,
+    ) -> Result<Option<UserId>, StoreError> {
+        let row = sqlx::query(
+            "SELECT user_id FROM identities WHERE tenant = $1 AND sub = $2 AND account_kind = $3",
+        )
+        .bind(tenant)
+        .bind(sub)
+        .bind(kind.tag())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(row.map(|r| UserId(r.get::<i64, _>("user_id") as u64)))
+    }
+
+    async fn account_kind_of(&self, user: UserId) -> Result<AccountKind, StoreError> {
+        let row = sqlx::query("SELECT account_kind FROM identities WHERE user_id = $1")
+            .bind(user.0 as i64)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db)?;
+        match row {
+            None => Ok(AccountKind::Demo),
+            Some(r) => {
+                let tag = r.get::<String, _>("account_kind");
+                AccountKind::parse(&tag).ok_or_else(|| {
+                    StoreError(format!("неизвестный род счёта «{tag}» в identities"))
+                })
+            }
+        }
     }
 }

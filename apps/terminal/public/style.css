@@ -55,6 +55,11 @@ button { font-family: inherit; }
    acct-warn: это режим работы, а не отказ. Закрыть её нельзя (BUG-011). */
 .volatile-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 600;
   color: var(--muted); border: 1px dashed var(--border); border-radius: 6px; padding: 4px 8px; }
+/* Род счёта (demo-money): демо — спокойно, реальный — цветом бренда, чтобы
+   перепутать было нельзя. */
+.kind-badge { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 700; letter-spacing: .04em;
+  color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+.kind-badge--real { color: var(--on-accent); background: var(--brand); border-color: var(--brand); }
 .top__right { display: flex; align-items: center; gap: 12px; }
 .btn { cursor: pointer; border: 1px solid var(--border); background: var(--panel2); color: var(--text);
   border-radius: 6px; padding: 7px 12px; }

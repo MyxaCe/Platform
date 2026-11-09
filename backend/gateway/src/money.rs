@@ -8,13 +8,18 @@
 //!
 //! ## Граница
 //!
-//! * `POST /internal/accounts/{tenant}/{sub}/deposit`
-//! * `POST /internal/accounts/{tenant}/{sub}/withdraw`
+//! * `POST /internal/sites/{tenant}/users/{sub}/real/deposit`
+//! * `POST /internal/sites/{tenant}/users/{sub}/real/withdraw`
+//! * `POST /internal/sites/{tenant}/users/{sub}/{demo|real}/trading-freeze`
+//! * `GET  /internal/sites/{tenant}/users/{sub}/accounts`
 //!
-//! Счёт адресуется той же парой, что и в SSO и на шине: сайт (`tenant`) и
-//! пользователь сайта (`sub`). Внутренний номер счёта за границей терминала не
-//! значит ничего, и требовать его от сайта значило бы вынести нашу нумерацию
-//! в межсистемный контракт.
+//! Человек адресуется той же парой, что и в SSO и на шине: сайт (`tenant`) и
+//! пользователь сайта (`sub`); счёт — ещё и родом. У человека до двух счетов:
+//! демо (бумажные деньги, стартовая сумма площадки) и реальный (открывается
+//! нулём, деньги — только через эти ручки). Деньги ходят **только** на
+//! реальный: у демо-счёта пополнения и вывода нет. Реальный счёт заводится
+//! первым пополнением. Внутренний номер счёта наружу не уходит — вместо него
+//! `account_id` (UUIDv5 от ключа счёта).
 //!
 //! ## Авторизация — fail-closed
 //!
@@ -41,17 +46,17 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
 use broker::journal::{EventKind, Operator, Origin};
 use broker::Cents;
-use domain::account::UserId;
+use domain::account::{AccountKind, UserId};
 
 use super::{
-    account_lock, commit_journal, ensure_account_opened, journal, marks, now_ms, trading_frozen,
-    with_account, with_account_gated, AppState, Gate,
+    account_lock, bus, commit_journal, ensure_account_opened, journal, marks, now_ms,
+    trading_frozen, with_account, with_account_gated, AppState, Gate,
 };
 
 /// Заголовок с общим секретом.
@@ -88,12 +93,22 @@ pub(crate) fn token_from_env(raw: Option<&str>) -> Option<Arc<str>> {
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
-        .route("/internal/accounts/:tenant/:sub/deposit", post(deposit))
-        .route("/internal/accounts/:tenant/:sub/withdraw", post(withdraw))
+        // Деньги — ТОЛЬКО на реальном счёте: у демо-счёта пополнения и вывода
+        // нет по определению (бумажные деньги).
         .route(
-            "/internal/accounts/:tenant/:sub/trading-freeze",
+            "/internal/sites/:tenant/users/:sub/real/deposit",
+            post(deposit),
+        )
+        .route(
+            "/internal/sites/:tenant/users/:sub/real/withdraw",
+            post(withdraw),
+        )
+        // Заморозка — на любом из двух счетов: `{kind}` = demo | real.
+        .route(
+            "/internal/sites/:tenant/users/:sub/:kind/trading-freeze",
             post(trading_freeze),
         )
+        .route("/internal/sites/:tenant/users/:sub/accounts", get(accounts))
 }
 
 /// Сравнение за постоянное время: длительность не зависит от того, в каком
@@ -295,10 +310,25 @@ async fn run(
         return fail(StatusCode::BAD_REQUEST, "bad_account", None);
     }
 
-    let user = match st.store.resolve_identity(&tenant, &sub).await {
-        Ok(u) => u,
+    // Реальный счёт заводится по требованию — первым пополнением (идемпотентно:
+    // маппинг найти-или-создать). Вывод счёта не заводит: выводить неоткуда.
+    let found = match op {
+        Op::Deposit => st
+            .store
+            .resolve_account(&tenant, &sub, AccountKind::Real)
+            .await
+            .map(Some),
+        Op::Withdraw => {
+            st.store
+                .find_account(&tenant, &sub, AccountKind::Real)
+                .await
+        }
+    };
+    let user = match found {
+        Ok(Some(u)) => u,
+        Ok(None) => return fail(StatusCode::NOT_FOUND, "account_not_opened", None),
         Err(e) => {
-            eprintln!("[money] личность {tenant}/{sub} не разрешена: {e}");
+            eprintln!("[money] реальный счёт {tenant}/{sub} не разрешён: {e}");
             return fail(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "identity_store_unavailable",
@@ -417,6 +447,8 @@ async fn ok(
         "operation": op.tag(),
         "tenant": tenant,
         "sub": sub,
+        "account_kind": "real",
+        "account_id": bus::account_uuid(tenant, sub, AccountKind::Real),
         "external_ref": v.external_ref,
         "amount_minor": v.amount,
         "currency": CURRENCY,
@@ -443,20 +475,23 @@ struct FreezeReq {
     external_ref: Option<String>,
 }
 
-/// `POST /internal/accounts/{tenant}/{sub}/trading-freeze`.
+/// `POST /internal/sites/{tenant}/users/{sub}/{kind}/trading-freeze`.
 ///
 /// Заморозка — запись журнала `TradingFreezeSet` с оператором и основанием:
 /// персистентна (лента переживает рестарт) и видна в журнале счёта. Повтор
 /// того же состояния новой записи не пишет (`changed: false`).
 async fn trading_freeze(
     State(st): State<AppState>,
-    Path((tenant, sub)): Path<(String, String)>,
+    Path((tenant, sub, kind)): Path<(String, String, String)>,
     headers: HeaderMap,
     body: Result<Json<FreezeReq>, JsonRejection>,
 ) -> Response {
     if let Err(r) = authorize(&st, &headers) {
         return *r;
     }
+    let Some(kind) = AccountKind::parse(&kind) else {
+        return fail(StatusCode::NOT_FOUND, "unknown_account_kind", None);
+    };
     let req = match body {
         Ok(Json(r)) => r,
         Err(rej) => {
@@ -488,10 +523,13 @@ async fn trading_freeze(
     if tenant.is_empty() || sub.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "bad_account", None);
     }
-    let user = match st.store.resolve_identity(&tenant, &sub).await {
+    let user = match st.store.resolve_account(&tenant, &sub, kind).await {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("[money] личность {tenant}/{sub} не разрешена: {e}");
+            eprintln!(
+                "[money] счёт {tenant}/{sub}/{} не разрешён: {e}",
+                kind.tag()
+            );
             return fail(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "identity_store_unavailable",
@@ -524,8 +562,9 @@ async fn trading_freeze(
         return (
             StatusCode::OK,
             Json(serde_json::json!({
-                "tenant": tenant, "sub": sub, "frozen": req.frozen,
-                "changed": false, "seq": seq,
+                "tenant": tenant, "sub": sub, "account_kind": kind.tag(),
+                "account_id": bus::account_uuid(&tenant, &sub, kind),
+                "frozen": req.frozen, "changed": false, "seq": seq,
             })),
         )
             .into_response();
@@ -574,9 +613,63 @@ async fn trading_freeze(
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "tenant": tenant, "sub": sub, "frozen": req.frozen,
-            "changed": true, "seq": seq,
+            "tenant": tenant, "sub": sub, "account_kind": kind.tag(),
+            "account_id": bus::account_uuid(&tenant, &sub, kind),
+            "frozen": req.frozen, "changed": true, "seq": seq,
         })),
+    )
+        .into_response()
+}
+
+// ============================ Список счетов =================================
+
+/// `GET /internal/sites/{tenant}/users/{sub}/accounts` — счета человека.
+///
+/// Только чтение: ничего не заводит. Счёт, которого нет, в списке отсутствует;
+/// счёт, у которого есть маппинг, но ещё нет ни одной записи (`opened: false`),
+/// — с `null` вместо денег, как в `/account` (денег у него нет, а не ноль).
+async fn accounts(
+    State(st): State<AppState>,
+    Path((tenant, sub)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = authorize(&st, &headers) {
+        return *r;
+    }
+    let m = marks(&st).await;
+    let mut out = Vec::new();
+    for kind in [AccountKind::Demo, AccountKind::Real] {
+        let user = match st.store.find_account(&tenant, &sub, kind).await {
+            Ok(Some(u)) => u,
+            Ok(None) => continue,
+            Err(e) => {
+                eprintln!("[money] счета {tenant}/{sub} не прочитаны: {e}");
+                return fail(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "identity_store_unavailable",
+                    None,
+                );
+            }
+        };
+        let frozen = trading_frozen(&st, user).await;
+        let b = st.broker.lock().await;
+        let opened = b.has_account(user);
+        out.push(serde_json::json!({
+            "account_kind": kind.tag(),
+            "account_id": bus::account_uuid(&tenant, &sub, kind),
+            "opened": opened,
+            "currency": CURRENCY,
+            "balance_minor": b.balance(user),
+            "equity_minor": b.equity(user, &m),
+            "free_margin_minor": b.free_margin(user, &m),
+            "used_margin_minor": opened.then(|| b.used_margin(user)),
+            "open_positions": b.positions(user).len(),
+            "trading_frozen": frozen,
+        }));
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "tenant": tenant, "sub": sub, "accounts": out })),
     )
         .into_response()
 }
@@ -603,7 +696,7 @@ mod tests {
     /// выключен, и она работает с `DEFAULT_USER`).
     struct Linked {
         inner: persistence::MemoryStore,
-        ids: StdMutex<Vec<(String, String)>>,
+        ids: StdMutex<Vec<(String, String, AccountKind)>>,
     }
 
     #[async_trait::async_trait]
@@ -638,20 +731,50 @@ mod tests {
             u: UserId,
         ) -> Result<Option<(String, String)>, persistence::StoreError> {
             let ids = self.ids.lock().unwrap();
-            Ok(ids.get((u.0 as usize).wrapping_sub(1)).cloned())
+            Ok(ids
+                .get((u.0 as usize).wrapping_sub(1))
+                .map(|(t, s, _)| (t.clone(), s.clone())))
         }
         async fn resolve_identity(
             &self,
             tenant: &str,
             sub: &str,
         ) -> Result<UserId, persistence::StoreError> {
+            self.resolve_account(tenant, sub, AccountKind::Demo).await
+        }
+        async fn resolve_account(
+            &self,
+            tenant: &str,
+            sub: &str,
+            kind: AccountKind,
+        ) -> Result<UserId, persistence::StoreError> {
             let mut ids = self.ids.lock().unwrap();
-            let key = (tenant.to_string(), sub.to_string());
+            let key = (tenant.to_string(), sub.to_string(), kind);
             if let Some(i) = ids.iter().position(|k| *k == key) {
                 return Ok(UserId(i as u64 + 1));
             }
             ids.push(key);
             Ok(UserId(ids.len() as u64))
+        }
+        async fn find_account(
+            &self,
+            tenant: &str,
+            sub: &str,
+            kind: AccountKind,
+        ) -> Result<Option<UserId>, persistence::StoreError> {
+            let ids = self.ids.lock().unwrap();
+            let key = (tenant.to_string(), sub.to_string(), kind);
+            Ok(ids
+                .iter()
+                .position(|k| *k == key)
+                .map(|i| UserId(i as u64 + 1)))
+        }
+        async fn account_kind_of(&self, u: UserId) -> Result<AccountKind, persistence::StoreError> {
+            let ids = self.ids.lock().unwrap();
+            Ok(ids
+                .get((u.0 as usize).wrapping_sub(1))
+                .map(|k| k.2)
+                .unwrap_or_default())
         }
     }
 
@@ -665,6 +788,10 @@ mod tests {
     fn state_with(store: Arc<dyn Persistence>, token: Option<&str>) -> AppState {
         let mut st = build_state_with(store);
         st.internal_money_token = token.map(Arc::from);
+        // Стенд демо: торговля на реальном счёте открыта, события реальных
+        // счетов публикуются. Выключенные ворота проверяются отдельно.
+        st.real_trading_enabled = true;
+        st.bus_real_events = true;
         st
     }
 
@@ -715,7 +842,7 @@ mod tests {
     }
 
     fn uri(op: &str) -> String {
-        format!("/internal/accounts/{TENANT}/{SUB}/{op}")
+        format!("/internal/sites/{TENANT}/users/{SUB}/real/{op}")
     }
 
     fn body(amount: i64, r: &str) -> serde_json::Value {
@@ -810,7 +937,7 @@ mod tests {
 
         let (s, first) = call(&app, &uri("deposit"), Some(TOKEN), body(25_000, "0xabc")).await;
         assert_eq!(s, StatusCode::OK, "{first}");
-        let start = st.broker.lock().await.start_balance();
+        let start = 0; // реальный счёт открывается нулём
         assert_eq!(first["balance_minor"], serde_json::json!(start + 25_000));
         assert_eq!(first["replayed"], false);
         let seq = first["seq"].as_u64().expect("seq");
@@ -838,7 +965,7 @@ mod tests {
         // И на чужой счёт.
         let (s, _) = call(
             &app,
-            &format!("/internal/accounts/{TENANT}/someone-else/deposit"),
+            &format!("/internal/sites/{TENANT}/users/someone-else/real/deposit"),
             Some(TOKEN),
             body(25_000, "0xabc"),
         )
@@ -956,7 +1083,7 @@ mod tests {
         let app = router(st.clone());
 
         // Заводим счёт пополнением — тем же путём, каким его заведёт сайт.
-        let (s, _) = call(&app, &uri("deposit"), Some(TOKEN), body(1, "seed")).await;
+        let (s, _) = call(&app, &uri("deposit"), Some(TOKEN), body(10_000_000, "seed")).await;
         assert_eq!(s, StatusCode::OK);
         let balance = st.broker.lock().await.balance(DEFAULT_USER).unwrap();
 
@@ -1200,7 +1327,7 @@ mod tests {
             }
         }
         assert_eq!(fresh, 1, "проводка ровно одна");
-        let start = st.broker.lock().await.start_balance();
+        let start = 0; // реальный счёт открывается нулём
         assert_eq!(
             st.broker.lock().await.balance(DEFAULT_USER),
             Some(start + 123_456)
@@ -1277,7 +1404,13 @@ mod tests {
         let st = state(Some(TOKEN));
         let app = router(st.clone());
         price(&st, 1, 5_000_000).await;
-        let (s, _) = call(&app, &uri("deposit"), Some(TOKEN), body(100, "seed-f")).await;
+        let (s, _) = call(
+            &app,
+            &uri("deposit"),
+            Some(TOKEN),
+            body(10_000_000, "seed-f"),
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
 
         // Две позиции до заморозки: одну закроем руками, вторую закроет SL.
@@ -1382,5 +1515,190 @@ mod tests {
         let (s, v) = send(&app2, "POST", "/deals", deal(None)).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
         assert_eq!(v["error"], "account_frozen");
+    }
+
+    // ---- Демо и реальный счёт ----------------------------------------------
+
+    async fn get(app: &Router, uri: &str, token: Option<&str>) -> (StatusCode, serde_json::Value) {
+        let mut req = Request::builder().method("GET").uri(uri);
+        if let Some(t) = token {
+            req = req.header(TOKEN_HEADER, t);
+        }
+        let resp = app
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let s = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (
+            s,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    fn accounts_uri() -> String {
+        format!("/internal/sites/{TENANT}/users/{SUB}/accounts")
+    }
+
+    /// Пополнение заводит РЕАЛЬНЫЙ счёт с нуля; демо-счёт человека — другой
+    /// счёт со своим номером, своим `accountId` и своими деньгами.
+    #[tokio::test]
+    async fn money_lands_on_the_real_account_only() {
+        let store = linked();
+        let st = state_with(store.clone(), Some(TOKEN));
+        let app = router(st.clone());
+
+        // До первого пополнения счетов нет — список пуст, ничего не заведено.
+        let (s, v) = get(&app, &accounts_uri(), Some(TOKEN)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["accounts"], serde_json::json!([]));
+
+        let (s, dep) = call(&app, &uri("deposit"), Some(TOKEN), body(2_500, "tx-real")).await;
+        assert_eq!(s, StatusCode::OK, "{dep}");
+        assert_eq!(dep["account_kind"], "real");
+        assert_eq!(
+            dep["balance_minor"], 2_500,
+            "реальный счёт открыт нулём: {dep}"
+        );
+        let real = store
+            .find_account(TENANT, SUB, AccountKind::Real)
+            .await
+            .unwrap()
+            .expect("реальный счёт заведён пополнением");
+        assert_eq!(
+            st.broker.lock().await.snapshot(real).profile.kind,
+            AccountKind::Real
+        );
+
+        // Демо-счёт того же человека — отдельный номер; деньги на нём не те.
+        let demo = store
+            .resolve_account(TENANT, SUB, AccountKind::Demo)
+            .await
+            .unwrap();
+        assert_ne!(demo, real);
+        let (_, v) = get(&app, &accounts_uri(), Some(TOKEN)).await;
+        let list = v["accounts"].as_array().unwrap();
+        assert_eq!(list.len(), 2, "{v}");
+        let by = |k: &str| {
+            list.iter()
+                .find(|a| a["account_kind"] == k)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(by("real")["balance_minor"], 2_500);
+        assert_eq!(by("real")["account_id"], dep["account_id"]);
+        assert_eq!(by("demo")["opened"], false);
+        assert!(by("demo")["balance_minor"].is_null(), "{v}");
+        assert_ne!(by("demo")["account_id"], by("real")["account_id"]);
+
+        // У демо-счёта денежных ручек нет вовсе.
+        for op in ["deposit", "withdraw"] {
+            let (s, _) = call(
+                &app,
+                &format!("/internal/sites/{TENANT}/users/{SUB}/demo/{op}"),
+                Some(TOKEN),
+                body(1, "tx-demo"),
+            )
+            .await;
+            assert_eq!(s, StatusCode::NOT_FOUND, "{op} на демо");
+        }
+        // Список — под тем же секретом.
+        let (s, _) = get(&app, &accounts_uri(), None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+
+    /// События несут род и идентификатор счёта; у реального — свой ключ
+    /// `account.opened`, иначе дедуп потребителя склеил бы его с демо.
+    #[tokio::test]
+    async fn bus_events_name_the_account() {
+        let st = state(Some(TOKEN));
+        let app = router(st.clone());
+        let (s, dep) = call(&app, &uri("deposit"), Some(TOKEN), body(700, "tx-kind")).await;
+        assert_eq!(s, StatusCode::OK, "{dep}");
+        let all = queued(&st).await;
+        let opened = all
+            .iter()
+            .find(|e| e["event"] == bus::EV_ACCOUNT_OPENED)
+            .expect("account.opened");
+        assert_eq!(opened["data"]["accountKind"], "real");
+        assert_eq!(opened["data"]["accountId"], dep["account_id"]);
+        assert_eq!(opened["data"]["balanceCents"], 0);
+        assert_ne!(
+            opened["event_id"],
+            serde_json::Value::from(bus::event_id(
+                bus::EV_ACCOUNT_OPENED,
+                &format!("{TENANT}:{SUB}")
+            )),
+            "ключ демо-счёта занят демо-счётом"
+        );
+        let changed = balance_changes(&all);
+        assert_eq!(changed.last().unwrap()["data"]["accountKind"], "real");
+    }
+
+    /// Пока потребитель не различает род счёта, события реального счёта не
+    /// собираются вовсе: иначе они легли бы в строку демо-счёта.
+    #[tokio::test]
+    async fn real_account_events_stay_home_until_enabled() {
+        let mut st = state(Some(TOKEN));
+        st.bus_real_events = false;
+        let app = router(st.clone());
+        let (s, _) = call(&app, &uri("deposit"), Some(TOKEN), body(700, "tx-quiet")).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(queued(&st).await.is_empty(), "реальный счёт молчит на шине");
+    }
+
+    /// Ворота реальной торговли закрыты, пока площадка их явно не открыла.
+    #[tokio::test]
+    async fn real_trading_is_closed_unless_enabled() {
+        let mut st = state(Some(TOKEN));
+        st.real_trading_enabled = false;
+        price(&st, 1, 5_000_000).await;
+        let app = router(st.clone());
+        let (s, _) = call(
+            &app,
+            &uri("deposit"),
+            Some(TOKEN),
+            body(10_000_000, "tx-gate"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, v) = send(&app, "POST", "/deals", deal(None)).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+        assert_eq!(v["error"], "identity_not_verified");
+    }
+
+    /// `/account` называет род счёта — по нему фронт рисует бейдж.
+    #[tokio::test]
+    async fn the_account_names_its_kind() {
+        let st = state(Some(TOKEN));
+        let app = router(st.clone());
+        let (_, dep) = call(&app, &uri("deposit"), Some(TOKEN), body(1, "tx-badge")).await;
+        let (_, acc) = send(&app, "GET", "/account", serde_json::Value::Null).await;
+        assert_eq!(acc["kind"], "real", "{acc}");
+        assert_eq!(acc["account_id"], dep["account_id"]);
+    }
+
+    #[tokio::test]
+    async fn the_demo_account_can_be_frozen_too() {
+        let st = state(Some(TOKEN));
+        let app = router(st.clone());
+        let (s, v) = call(
+            &app,
+            &format!("/internal/sites/{TENANT}/users/{SUB}/demo/trading-freeze"),
+            Some(TOKEN),
+            freeze_body(true),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["account_kind"], "demo");
+        let (s, _) = call(
+            &app,
+            &format!("/internal/sites/{TENANT}/users/{SUB}/gold/trading-freeze"),
+            Some(TOKEN),
+            freeze_body(true),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
     }
 }

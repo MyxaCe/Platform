@@ -55,7 +55,15 @@ type DepthCache = HashMap<(u32, usize), (Instant, feed::Depth)>;
 /// Кэш статистики: инструмент → (время, изменения по таймфреймам).
 type StatsCache = HashMap<u32, (Instant, Vec<StatDto>)>;
 /// Счёт → внешняя личность `(tenant, sub)`; `None` — счёт не привязан к сайту.
-type IdentityCache = HashMap<UserId, Option<(String, String)>>;
+type IdentityCache = HashMap<UserId, Option<BusIdentity>>;
+
+/// Внешняя личность счёта для шины: сайт, пользователь сайта, род счёта.
+#[derive(Clone)]
+struct BusIdentity {
+    tenant: String,
+    sub: String,
+    kind: AccountKind,
+}
 
 /// Таймфреймы для статистики актива.
 const STAT_TFS: [u32; 8] = [60, 300, 900, 1800, 3600, 14400, 86400, 604800];
@@ -141,6 +149,22 @@ pub struct AppState {
     /// → провести → записать». Без него два одновременных повтора одного
     /// крипто-депозита оба увидели бы «ещё не было» и зачислили дважды.
     money_lock: Arc<Mutex<()>>,
+    /// Разрешена ли торговля на РЕАЛЬНЫХ счетах (`REAL_TRADING_ENABLED=1`).
+    ///
+    /// Критерий владельца (TRM-44): реальными средствами не торгуют, пока
+    /// личность не проверена, а состояния проверки у терминала нет. Ворота
+    /// стоят закрытыми по умолчанию; открывает их площадка явной настройкой —
+    /// тогда за проверку отвечает кабинет, выпускающий токен с
+    /// `account_kind = real` только проверенным.
+    real_trading_enabled: bool,
+    /// Публиковать ли события РЕАЛЬНЫХ счетов на шину (`BUS_REAL_ACCOUNT_EVENTS=1`).
+    ///
+    /// Потребитель сайта ключует проекцию парой `(tenant, userId)` и про род
+    /// счёта не знает: событие реального счёта легло бы в строку демо-счёта и
+    /// испортило бы её. Пока потребитель не научился различать `accountKind`,
+    /// события реальных счетов не собираются вовсе; деньги реального счёта
+    /// сайт видит в ответах внутренних ручек и в `GET .../accounts`.
+    bus_real_events: bool,
 }
 
 pub fn build_state() -> AppState {
@@ -273,6 +297,22 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
     println!("[gateway] плечо площадки: 1:{leverage}");
     let internal_money_token =
         money::token_from_env(std::env::var("INTERNAL_MONEY_TOKEN").ok().as_deref());
+    let env_flag = |name: &str| {
+        matches!(
+            std::env::var(name).ok().as_deref().map(str::trim),
+            Some("1") | Some("true")
+        )
+    };
+    let real_trading_enabled = env_flag("REAL_TRADING_ENABLED");
+    let bus_real_events = env_flag("BUS_REAL_ACCOUNT_EVENTS");
+    if real_trading_enabled {
+        println!("[gateway] торговля на реальных счетах: РАЗРЕШЕНА (проверку личности обеспечивает кабинет)");
+    } else {
+        eprintln!("[gateway] торговля на реальных счетах закрыта (REAL_TRADING_ENABLED не задан): открытие позиций на real — 403 identity_not_verified");
+    }
+    if !bus_real_events {
+        eprintln!("[gateway] события реальных счетов на шину НЕ публикуются (BUS_REAL_ACCOUNT_EVENTS не задан): потребитель ещё не различает accountKind");
+    }
     let feed_instruments = feed::instruments();
     let symbols = symbol_index(&feed_instruments);
     let tenant_instruments = TenantSource::from_env(&symbols);
@@ -304,6 +344,8 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         bus_enabled: false,
         internal_money_token,
         money_lock: Arc::new(Mutex::new(())),
+        real_trading_enabled,
+        bus_real_events,
     }
 }
 
@@ -462,11 +504,18 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
 /// (standalone), и событие по нему никому не адресовано; отказ означает «мы не
 /// знаем», и выдавать его за первое значило бы тихо терять события при моргнувшей
 /// базе. Поэтому отказ громкий и не кешируется.
-async fn identity_for_bus(st: &AppState, user: UserId) -> Option<(String, String)> {
+async fn identity_for_bus(st: &AppState, user: UserId) -> Option<BusIdentity> {
     if let Some(found) = st.identities.lock().await.get(&user) {
         return found.clone();
     }
-    match st.store.identity_of(user).await {
+    let read = async {
+        let Some((tenant, sub)) = st.store.identity_of(user).await? else {
+            return Ok(None);
+        };
+        let kind = st.store.account_kind_of(user).await?;
+        Ok::<_, persistence::StoreError>(Some(BusIdentity { tenant, sub, kind }))
+    };
+    match read.await {
         Ok(found) => {
             st.identities.lock().await.insert(user, found.clone());
             found
@@ -498,18 +547,24 @@ async fn bus_envelopes(
     if kinds.is_empty() {
         return Vec::new();
     }
-    let Some((tenant, sub)) = identity_for_bus(st, user).await else {
+    let Some(id) = identity_for_bus(st, user).await else {
         return Vec::new();
     };
+    if id.kind == AccountKind::Real && !st.bus_real_events {
+        return Vec::new();
+    }
     let Some(last) = sealed.last() else {
         return Vec::new();
     };
+    let account_id = bus::account_uuid(&id.tenant, &id.sub, id.kind);
     let who = bus::Addressee {
-        tenant: &tenant,
-        sub: &sub,
+        tenant: &id.tenant,
+        sub: &id.sub,
         user: user.0,
         seq: last.seq(),
         at_ms: last.at_ms(),
+        kind: id.kind,
+        account_id: &account_id,
     };
     let by_id = |id: u32| feed_by_id(st, id);
     bus::envelopes_for(&who, &before, snap, kinds, &by_id)
@@ -598,8 +653,11 @@ fn deal_error(e: broker::BrokerError) -> ApiErr {
     }
 }
 
-fn profile_for_new_account(user: UserId) -> AccountProfile {
-    AccountProfile::legacy_demo(user)
+fn profile_for_new_account(user: UserId, kind: AccountKind) -> AccountProfile {
+    AccountProfile {
+        kind,
+        ..AccountProfile::legacy_demo(user)
+    }
 }
 
 /// Завести счёт отдельной записью журнала — **до** первой операции и
@@ -676,17 +734,35 @@ async fn ensure_account_opened(st: &AppState, user: UserId) -> Result<(), ApiErr
         return Ok(());
     }
 
+    // Род счёта — из маппинга личности (demo-money). Не прочитали — счёт не
+    // заводим: завести реальный счёт демо-счётом значило бы выдать бумажные
+    // деньги за настоящие.
+    let kind = st.store.account_kind_of(user).await.map_err(|e| {
+        eprintln!(
+            "[gateway] род счёта {} не прочитан — счёт НЕ заводится: {e}",
+            user.0
+        );
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "identity_store_unavailable",
+        )
+    })?;
+
     // Сумму спрашиваем ДО лока брокера: чтение сетевое, и держать под ним лок
     // незачем. Отказ здесь означает, что счёт не заведён вовсе, — и это
-    // правильнее, чем завести его выдуманной суммой.
-    let demo_start = demo_start_for(st, user).await?;
+    // правильнее, чем завести его выдуманной суммой. Реальный счёт открывается
+    // нулём (`start_balance_for`), и сайт о сумме не спрашиваем вовсе.
+    let demo_start = match kind {
+        AccountKind::Demo => demo_start_for(st, user).await?,
+        AccountKind::Real => 0,
+    };
 
     let (kinds, snap, start_balance) = {
         let mut b = st.broker.lock().await;
         // Повторная проверка под локом: между быстрым путём и этим местом счёт мог
         // завести соседний запрос. `open_account` отдаёт `false` — уходим, запись
         // уже сделана тем, кто успел первым.
-        if !b.open_account_with(user, profile_for_new_account(user), demo_start) {
+        if !b.open_account_with(user, profile_for_new_account(user, kind), demo_start) {
             return Ok(());
         }
         (b.take_events(user), b.snapshot(user), b.start_balance())
@@ -1376,7 +1452,9 @@ async fn ensure_can_open(st: &AppState, who: &Principal, instrument: u32) -> Res
     //
     // Сегодня ветка недостижима — реальных счетов терминал не открывает. Она
     // стоит здесь затем, чтобы путь к ним нельзя было открыть, не увидев её.
-    if st.broker.lock().await.snapshot(who.user).profile.kind == AccountKind::Real {
+    if st.broker.lock().await.snapshot(who.user).profile.kind == AccountKind::Real
+        && !st.real_trading_enabled
+    {
         return Err(err(StatusCode::FORBIDDEN, "identity_not_verified"));
     }
 
@@ -1626,6 +1704,12 @@ struct AccountDto {
     /// Торговля заморожена оператором: открытие, новые ордера и вывод
     /// отклоняются (`account_frozen`), закрытие и стоп-аут работают.
     trading_frozen: bool,
+    /// Род счёта: `demo` | `real`. По нему фронт рисует бейдж.
+    kind: &'static str,
+    /// Внешний идентификатор счёта (тот же `accountId`, что на шине). `null` —
+    /// счёт не привязан к сайту (автономный терминал).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_id: Option<String>,
 }
 #[derive(Serialize)]
 struct InstrumentDto {
@@ -2239,6 +2323,11 @@ async fn account(
     let m = marks(&st).await;
     // До лока брокера: журналы и брокер вложенно не берём.
     let frozen = trading_frozen(&st, user).await;
+    let ident = identity_for_bus(&st, user).await;
+    let kind = ident.as_ref().map(|i| i.kind).unwrap_or_default();
+    let account_id = ident
+        .as_ref()
+        .map(|i| bus::account_uuid(&i.tenant, &i.sub, i.kind));
     let b = st.broker.lock().await;
 
     // Счёт заводится лениво — при первой операции (TRM-46). Пока его нет,
@@ -2265,6 +2354,8 @@ async fn account(
             open_pnl: None,
             leverage: b.leverage(),
             trading_frozen: false,
+            kind: kind.tag(),
+            account_id,
         }));
     }
 
@@ -2301,6 +2392,8 @@ async fn account(
         open_pnl: Some(open_pnl),
         leverage: b.leverage(),
         trading_frozen: frozen,
+        kind: b.snapshot(user).profile.kind.tag(),
+        account_id,
     }))
 }
 
@@ -2446,9 +2539,17 @@ async fn session_create(
         .validate(&req.token, &req.site)
         .await
         .map_err(sso_err)?;
+    // Какой счёт открыть — называет кабинет claim-ом `account_kind`; нет его —
+    // демо, как было до разделения. Незнакомое значение — отказ, а не демо:
+    // род счёта решает, настоящие ли это деньги.
+    let kind = match claims.account_kind.as_deref() {
+        None => AccountKind::Demo,
+        Some(k) => AccountKind::parse(k)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "unknown_account_kind"))?,
+    };
     let user = st
         .store
-        .resolve_identity(&claims.tenant, &claims.sub)
+        .resolve_account(&claims.tenant, &claims.sub, kind)
         .await
         .map_err(|_| {
             err(
@@ -2608,7 +2709,10 @@ async fn send_margin_calls(st: &AppState, marks: &HashMap<u32, i64>) {
                 b.stop_out_pct(),
             )
         };
-        let Some((tenant, sub)) = identity_for_bus(st, user).await else {
+        let Some(id) = identity_for_bus(st, user)
+            .await
+            .filter(|id| id.kind == AccountKind::Demo || st.bus_real_events)
+        else {
             // Адресата нет — предупреждать некого. Молчим не потому, что
             // неважно, а потому что отправить некуда: счёт не привязан к сайту.
             eprintln!(
@@ -2629,12 +2733,15 @@ async fn send_margin_calls(st: &AppState, marks: &HashMap<u32, i64>) {
                 .map(|e| e.seq())
                 .unwrap_or(0)
         };
+        let account_id = bus::account_uuid(&id.tenant, &id.sub, id.kind);
         let who = bus::Addressee {
-            tenant: &tenant,
-            sub: &sub,
+            tenant: &id.tenant,
+            sub: &id.sub,
             user: user.0,
             seq,
             at_ms: now_ms(),
+            kind: id.kind,
+            account_id: &account_id,
         };
         // Предупреждение бывает только у счёта с открытыми позициями —
         // значит счёт существует. `expect` здесь документирует это условие, а

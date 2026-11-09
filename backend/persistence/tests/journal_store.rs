@@ -98,7 +98,10 @@ async fn memory_store_round_trips_the_journal() {
     // И цепочка сходится после подъёма — иначе хранилище что-то потеряло по дороге.
     let rebuilt = Journal::load(10_000_000, lane).expect("цепочка обязана сойтись");
     assert_eq!(rebuilt.replay().balance, 10_250_000);
-    assert!(rebuilt.state().trading_frozen, "заморозка поднялась из хранилища");
+    assert!(
+        rebuilt.state().trading_frozen,
+        "заморозка поднялась из хранилища"
+    );
     let op = rebuilt
         .events()
         .last()

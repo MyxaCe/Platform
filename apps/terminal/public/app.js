@@ -723,6 +723,32 @@ function showPositionModel(model) {
     : 'Opposite trade opens a second, separate position — it does not close this one';
 }
 
+/**
+ * Бейдж рода счёта и заморозки (demo-money). Род известен и у незаведённого
+ * счёта — его называет вход, а не первая сделка, — поэтому показывается всегда,
+ * когда ответ счёта есть.
+ * @param {string | undefined} kind `demo` | `real`
+ * @param {boolean | undefined} frozen торговля заморожена оператором
+ */
+function showAccountKind(kind, frozen) {
+  const el = document.getElementById('kindBadge');
+  if (el) {
+    const real = kind === 'real';
+    el.hidden = !kind;
+    el.textContent = real ? 'REAL ACCOUNT' : 'DEMO';
+    el.classList.toggle('kind-badge--real', real);
+    el.title = real
+      ? 'Real money. Deposits and withdrawals go through your cabinet.'
+      : 'Demo account: virtual money, real prices. Switch to your real account in the cabinet.';
+  }
+  const f = document.getElementById('frozenBadge');
+  if (f) {
+    f.hidden = !frozen;
+    f.textContent = 'BLOCKED BY OPERATOR';
+    f.title = 'Opening positions, new orders and withdrawals are disabled. Closing positions is allowed.';
+  }
+}
+
 function blankMetrics() {
   ['mBalance', 'mEquity', 'mMargin', 'mFree', 'mPnl'].forEach((id) => {
     const el = document.getElementById(id); if (el) { el.textContent = '—'; el.style.color = ''; }
@@ -739,6 +765,7 @@ async function pollAccount() {
       if (st === 'no-session' || st === 'unknown') blankMetrics();
       return;
     }
+    showAccountKind(a.kind, a.trading_frozen);
     if (a.opened === false) {
       // Счёта ещё нет: шлюз отдаёт `null` вместо цифр, и подставлять сюда ноль
       // нельзя — ноль правдоподобен, по нему принимают решение (BUG-011).
