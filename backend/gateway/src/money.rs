@@ -1167,10 +1167,7 @@ mod tests {
         let changes = balance_changes(&all);
         let last = changes.last().expect("вывод дал balance.changed");
         assert_eq!(last["data"]["accountSeq"], wd["seq"]);
-        // Причины `withdrawal` в закрытом перечне потребителя НЕТ, а незнакомое
-        // значение роняет разбор всего события вместе с остатком. Поэтому вывод
-        // уезжает без причины — остаток важнее подписи (см. bus::CONSUMER_KNOWN_REASONS).
-        assert!(last["data"].get("reason").is_none(), "{last}");
+        assert_eq!(last["data"]["reason"], "withdrawal", "{last}");
         assert_eq!(last["data"]["balanceCents"], wd["balance_minor"]);
 
         // Повтор события не порождает.

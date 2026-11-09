@@ -57,9 +57,12 @@ button { font-family: inherit; }
   color: var(--muted); border: 1px dashed var(--border); border-radius: 6px; padding: 4px 8px; }
 /* Род счёта (demo-money): демо — спокойно, реальный — цветом бренда, чтобы
    перепутать было нельзя. */
-.kind-badge { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 700; letter-spacing: .04em;
-  color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
-.kind-badge--real { color: var(--on-accent); background: var(--brand); border-color: var(--brand); }
+/* Крупно и цветом: на показе бейдж читают с проектора. Цвета заданы явно, а
+   не токенами темы, — род счёта не должен перекрашиваться вместе с брендом. */
+.kind-badge { flex: 0 0 auto; white-space: nowrap; font-size: 15px; font-weight: 800; letter-spacing: .08em;
+  color: #fff; background: #2563eb; border: 2px solid #1d4ed8; border-radius: 8px; padding: 6px 14px; }
+.kind-badge--real { color: #1a1200; background: #f59e0b; border-color: #b45309;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, .35); }
 .top__right { display: flex; align-items: center; gap: 12px; }
 .btn { cursor: pointer; border: 1px solid var(--border); background: var(--panel2); color: var(--text);
   border-radius: 6px; padding: 7px 12px; }

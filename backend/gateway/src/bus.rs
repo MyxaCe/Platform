@@ -480,7 +480,12 @@ pub fn envelopes_for(
 ///
 /// То есть добавить поле можно в одиночку, а значение причины — нельзя: цена
 /// ошибки не «причину не покажут», а «деньги в кабинете не обновятся».
-pub const CONSUMER_KNOWN_REASONS: [&str; 4] = ["trade", "deposit", "reset", "adjustment"];
+/// `withdrawal` добавлен по согласованию с сайтом (demo-money): сайт вносит
+/// его в перечень и делает разбор терпимым. Выводы бывают только у реальных
+/// счетов, а их события без `BUS_REAL_ACCOUNT_EVENTS=1` не собираются вовсе —
+/// значит, до выкатки потребителя значение на шину не попадёт.
+pub const CONSUMER_KNOWN_REASONS: [&str; 5] =
+    ["trade", "deposit", "reset", "adjustment", "withdrawal"];
 
 /// Причина, пригодная к отправке, или `None` — если потребитель её не знает.
 ///
@@ -511,6 +516,12 @@ fn balance_reason(
         .any(|k| matches!(k, EventKind::Deposited { .. }))
     {
         return Some("deposit");
+    }
+    if kinds
+        .iter()
+        .any(|k| matches!(k, EventKind::Withdrawn { .. }))
+    {
+        return Some("withdrawal");
     }
     // Сброс демо-счёта (TRM-54). `reset` уже есть в перечне потребителя, так
     // что причина доедет и ничего не сломает.
