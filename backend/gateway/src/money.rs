@@ -1128,6 +1128,7 @@ mod tests {
                 high: px,
                 bid: px,
                 ask: px,
+                ..Default::default()
             },
         );
     }

@@ -36,6 +36,15 @@ pub struct Ticker {
     pub high: i64,
     pub bid: i64,
     pub ask: i64,
+    /// 24ч-минимум (raw цены). Поля шапки инструмента, а не цены исполнения:
+    /// поэтому `Option` и разбираются **отдельно** от котировки — битый объём
+    /// не должен отнимать у счёта марк-цену, а битая марк-цена и так отвергает
+    /// котировку целиком (см. `ticker_from_data`).
+    pub low: Option<i64>,
+    /// 24ч-объём в базовой валюте (raw объёма, `qty_decimals`).
+    pub volume: Option<i64>,
+    /// 24ч-оборот в котируемой валюте (raw цены, `price_decimals`).
+    pub quote_volume: Option<i64>,
 }
 
 /// Свеча (raw-единицы).
@@ -335,7 +344,7 @@ fn parse_envelope(text: &str) -> Result<(String, Value), String> {
 /// Пропускаем **всю** котировку, а не отдельное поле: прежний `unwrap_or("0")` клал
 /// в тикер цену 0, а тикер — источник марк-цены, по которой считаются P&L, маржа и
 /// триггеры SL/TP. Нулевой bid означал бы сделку по цене ноль (BUG-011).
-fn ticker_from_data(data: &Value, pd: u8) -> Option<Ticker> {
+fn ticker_from_data(data: &Value, pd: u8, qd: u8) -> Option<Ticker> {
     let raw = |k: &str| data[k].as_str().and_then(|s| to_raw(s, pd));
     Some(Ticker {
         last: raw("c")?,
@@ -343,6 +352,9 @@ fn ticker_from_data(data: &Value, pd: u8) -> Option<Ticker> {
         bid: raw("b")?,
         ask: raw("a")?,
         change: data["P"].as_str()?.parse::<f64>().ok()?,
+        low: raw("l"),
+        volume: data["v"].as_str().and_then(|s| to_raw(s, qd)),
+        quote_volume: raw("q"),
     })
 }
 
@@ -377,7 +389,7 @@ async fn handle_msg(state: &AppState, index: &HashMap<String, (u32, u8, u8)>, te
     state.mark_feed_alive();
 
     if stream.ends_with("@ticker") {
-        match ticker_from_data(&data, pd) {
+        match ticker_from_data(&data, pd, qd) {
             Some(t) => {
                 state.tickers.lock().await.insert(id, t);
             }
@@ -573,9 +585,34 @@ mod tests {
 
     #[test]
     fn ticker_parses_valid() {
-        let t = ticker_from_data(&ticker_data(), 2).expect("здоровая котировка разбирается");
+        let t = ticker_from_data(&ticker_data(), 2, 3).expect("здоровая котировка разбирается");
         assert_eq!((t.last, t.high, t.bid, t.ask), (10000, 11000, 9999, 10001));
         assert!((t.change - 1.5).abs() < 1e-9);
+    }
+
+    /// Поля шапки инструмента (24ч мин/объём/оборот) разбираются, и их порча
+    /// **не отнимает котировку**: марк-цена важнее подписи в шапке.
+    #[test]
+    fn ticker_24h_fields_parse_and_do_not_veto_quote() {
+        let mut d = ticker_data();
+        d["l"] = json!("90.50");
+        d["v"] = json!("1234.567");
+        d["q"] = json!("123456.78");
+        let t = ticker_from_data(&d, 2, 3).expect("котировка разбирается");
+        assert_eq!(
+            (t.low, t.volume, t.quote_volume),
+            (Some(9050), Some(1_234_567), Some(12_345_678))
+        );
+
+        d["l"] = json!("не число");
+        d["v"] = Value::Null;
+        let t = ticker_from_data(&d, 2, 3).expect("битые поля шапки котировку не отменяют");
+        assert_eq!(
+            (t.low, t.volume),
+            (None, None),
+            "битое — прочерк, а не ноль"
+        );
+        assert_eq!(t.last, 10000);
     }
 
     /// Битое поле → котировки нет вовсе. Именно «нет», а не Ticker с нулём в этом
@@ -586,21 +623,21 @@ mod tests {
             let mut d = ticker_data();
             d[key] = json!("не число");
             assert!(
-                ticker_from_data(&d, 2).is_none(),
+                ticker_from_data(&d, 2, 3).is_none(),
                 "поле {key}: котировка обязана быть пропущена целиком"
             );
 
             let mut d = ticker_data();
             d[key] = Value::Null;
             assert!(
-                ticker_from_data(&d, 2).is_none(),
+                ticker_from_data(&d, 2, 3).is_none(),
                 "поле {key} = null: котировка обязана быть пропущена"
             );
 
             let mut d = ticker_data();
             d.as_object_mut().unwrap().remove(key);
             assert!(
-                ticker_from_data(&d, 2).is_none(),
+                ticker_from_data(&d, 2, 3).is_none(),
                 "поле {key} отсутствует: котировка обязана быть пропущена"
             );
         }
@@ -612,7 +649,7 @@ mod tests {
     fn ticker_rejects_wrong_type() {
         let mut d = ticker_data();
         d["b"] = json!(99.99);
-        assert!(ticker_from_data(&d, 2).is_none());
+        assert!(ticker_from_data(&d, 2, 3).is_none());
     }
 
     // ---- Сделка ------------------------------------------------------------

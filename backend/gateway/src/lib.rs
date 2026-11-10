@@ -1748,6 +1748,12 @@ struct InstrumentDto {
     /// То же решение, что у `/stats`, где `change` обнуляем с самого начала:
     /// два ответа одного сервиса про одну величину обязаны говорить одинаково.
     change: Option<f64>,
+    /// 24ч-минимум, объём (база, raw `qty_decimals`) и оборот (котируемая,
+    /// raw `price_decimals`) — для шапки инструмента. `null` — тикера нет или
+    /// поле не разобралось: прочерк, а не ноль (BUG-011).
+    low: Option<i64>,
+    volume: Option<i64>,
+    quote_volume: Option<i64>,
 }
 #[derive(Serialize)]
 struct DepthResp {
@@ -1899,6 +1905,9 @@ async fn list_instruments(
                 ask: t.map(|t| t.ask),
                 high: t.map(|t| t.high),
                 change: t.map(|t| t.change),
+                low: t.and_then(|t| t.low),
+                volume: t.and_then(|t| t.volume),
+                quote_volume: t.and_then(|t| t.quote_volume),
             }
         })
         .collect();
@@ -3620,6 +3629,7 @@ mod journal_wiring_tests {
                 high: px,
                 bid: px,
                 ask: px,
+                ..Default::default()
             },
         );
     }
@@ -4758,6 +4768,7 @@ mod bus_wiring_tests {
                 high: px,
                 bid: px,
                 ask: px,
+                ..Default::default()
             },
         );
     }
@@ -5179,6 +5190,7 @@ mod margin_wiring_tests {
                 high: px,
                 bid: px,
                 ask: px,
+                ..Default::default()
             },
         );
     }
