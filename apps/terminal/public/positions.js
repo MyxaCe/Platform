@@ -45,7 +45,7 @@
   const TABS = [
     { key: 'deals', title: 'OPEN DEALS', head: ['INSTR.', 'SIDE', 'QTY', 'ENTRY', 'PRICE', 'P&L', ''] },
     { key: 'pending', title: 'LIMIT ORDERS', head: ['INSTR.', 'SIDE', 'QTY', 'PRICE', 'SL', 'TP', ''] },
-    { key: 'closed', title: 'CLOSED DEALS', head: ['INSTR.', 'SIDE', 'QTY', 'ENTRY', 'EXIT', 'P&L', ''] },
+    { key: 'closed', title: 'CLOSED DEALS', head: ['INSTR.', 'SIDE', 'QTY', 'ENTRY', 'EXIT', 'P&L', 'COMM.'] },
     { key: 'signals', title: 'SIGNALS', head: ['INSTR.', 'SIGNAL', 'TF', 'DIRECTION'] },
   ];
   const defUsd = (c) => `${c < 0 ? '-' : ''}$${(Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -88,6 +88,10 @@
 
     const lotOf = (d) => (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals);
     const pxOf = (d) => (raw) => (raw == null ? '—' : (raw / 10 ** d.price_decimals).toFixed(d.price_decimals));
+    // Комиссия сделки (10.11): вся — открытия и закрытия. Поля нет (старый
+    // шлюз) или ноль (тарифа не было) — пусто, а не «$0.00»: нулевая строка
+    // читалась бы как «комиссию посчитали и она ноль» у сделки без тарифа.
+    const commissionOf = (d) => (Number.isFinite(d.commission) && d.commission > 0 ? fmtUsd(d.commission) : '');
     // Устойчивый отказ (сессии нет) — пишем причину. Сетевой блип не трогает строки:
     // прежние позиции ещё верны, а «нет позиций» при живых позициях — опаснее.
     const denied = () => (ctx.api.tradingStatus ? ctx.api.tradingStatus() === 'no-session' : false);
@@ -115,7 +119,7 @@
       if (!list) { if (denied()) rowsEl('closed').innerHTML = empty(NO_SESSION); return; }
       rowsEl('closed').innerHTML = list.map((d) => {
         const pos = d.pnl >= 0, f = pxOf(d);
-        return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lotOf(d)}</span><span>${f(d.entry)}</span><span>${f(d.exit)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${fmtUsd(d.pnl)}</span><span></span></div>`;
+        return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lotOf(d)}</span><span>${f(d.entry)}</span><span>${f(d.exit)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${fmtUsd(d.pnl)}</span><span>${commissionOf(d)}</span></div>`;
       }).join('') || empty('No history');
     }
     function refreshSignals() {

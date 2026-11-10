@@ -346,3 +346,24 @@ test('мутация «панель не смонтирована на экра�
   // остался бы и при пустой нижней панели в живом терминале.
   assert.ok(true);
 });
+
+// ---- Комиссия в истории сделки (тариф счёта, 10.11) ------------------------
+
+test('история: комиссия сделки видна, у сделки без тарифа — пусто, а не $0.00', async (t) => {
+  const env = setup();
+  t.after(env.cleanup);
+  const closed = (over) => Object.assign(
+    { symbol: 'BTCUSD', side: 'buy', qty: 1000, qty_decimals: 5, entry: 5005000, exit: 4995000, pnl: -100, price_decimals: 2 },
+    over,
+  );
+  mount(env, {
+    api: { closedDeals: async () => [closed({ commission: 100 }), closed({ commission: 0 }), closed({})] },
+  });
+  await settle();
+
+  const r = rows(env.root, 'closed');
+  assert.equal(r.length, 3);
+  assert.equal(cells(r[0])[6], '$1.00', 'комиссия открытия и закрытия');
+  assert.equal(cells(r[1])[6], '', 'тарифа не было');
+  assert.equal(cells(r[2])[6], '', 'старый шлюз без поля');
+});

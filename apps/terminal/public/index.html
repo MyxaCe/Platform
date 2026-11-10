@@ -209,6 +209,10 @@
           <div><label class="lbl">TAKE PROFIT</label><input id="tp" type="number" step="0.01" placeholder="—" /></div>
         </div>
         <div id="pipsInfo" class="muted small hidden"></div>
+        <!-- Комиссия сделки по тарифу счёта (10.11) — до подтверждения. Цена на
+             кнопках — цена исполнения с наценкой тарифа; отдельной строки
+             «наценка» нет, как на любом spread-счёте. Нет комиссии — строки нет. -->
+        <div id="feeInfo" class="muted small hidden"></div>
         <button id="btnBuy" class="orderbtn buy">BUY <span id="askPx">—</span></button>
         <button id="btnSell" class="orderbtn sell">SELL <span id="bidPx">—</span></button>
         <div id="dealMsg" class="dealmsg"></div>
@@ -235,6 +239,7 @@
   <script src="/config.js"></script>
   <script src="/diag.js"></script>
   <script src="/rejection.js"></script>
+  <script src="/tariff.js"></script>
   <script src="/theming.js"></script>
   <script src="/sso.js"></script>
   <script src="/api.js"></script>

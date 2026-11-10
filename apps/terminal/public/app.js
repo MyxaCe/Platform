@@ -302,8 +302,13 @@ function updateDealPanel() {
   const chgUp = chgKnown && it.change >= 0;
   chg.textContent = chgKnown ? `${chgUp ? '+' : ''}${it.change.toFixed(2)}%` : '—';
   chg.className = `deal__change${chgKnown ? (chgUp ? ' up' : ' down') : ''}`;
-  document.getElementById('askPx').textContent = it.ask != null ? fmtP(it.id, it.ask) : '—';
-  document.getElementById('bidPx').textContent = it.bid != null ? fmtP(it.id, it.bid) : '—';
+  // Цена на кнопках — цена ИСПОЛНЕНИЯ: рынок плюс наценка тарифа счёта
+  // (10.11). Её и получит человек; показывать голый ask значило бы обещать
+  // цену, по которой шлюз не исполнит.
+  const mk = tariff.markup_bps;
+  document.getElementById('askPx').textContent = it.ask != null ? fmtP(it.id, Tariff.execPrice(true, it.ask, mk)) : '—';
+  document.getElementById('bidPx').textContent = it.bid != null ? fmtP(it.id, Tariff.execPrice(false, it.bid, mk)) : '—';
+  updateFeeInfo();
   document.getElementById('watermark').textContent = it.symbol;
   const pips = document.getElementById('pipsInfo');
   if (showPips && it.bid != null && it.ask != null) { pips.classList.remove('hidden'); pips.textContent = `Spread: ${it.ask - it.bid} pips`; } else pips.classList.add('hidden');
@@ -611,7 +616,40 @@ function sizeBaseQty(id) { const v = parseFloat(/** @type {HTMLInputElement} */ 
  * знаем», и стоит это в панели ввода ордера, где человек принимает решение о
  * деньгах. Та же семья, что `change` с нулём вместо прочерка.
  */
+/**
+ * Тариф счёта для новых сделок (10.11), из `/account`. Нули — без тарифа:
+ * так и ведёт себя шлюз, пока сайт тариф не назначил.
+ * @type {{ markup_bps: number, commission_bps: number }}
+ */
+let tariff = { markup_bps: 0, commission_bps: 0 };
+
+/**
+ * «Commission ≈ X USD» в тикете — ДО подтверждения. Считается по цене
+ * исполнения покупки (ask с наценкой; у лимитного — по цене ордера) и
+ * текущему объёму. Цены нет — прочерк, а не ноль.
+ */
+function updateFeeInfo() {
+  const el = document.getElementById('feeInfo');
+  if (!el) return;
+  const it = META[selected];
+  const bps = tariff.commission_bps;
+  if (!it || !(bps > 0)) { el.classList.add('hidden'); el.textContent = ''; return; }
+  const qty = Math.round(sizeBaseQty(it.id) * qscale(it.id));
+  let px = null;
+  if (orderMode === 'limit') {
+    const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('price')).value);
+    if (v > 0) px = Math.round(v * pscale(it.id));
+  } else if (it.ask != null) {
+    px = Tariff.execPrice(true, it.ask, tariff.markup_bps);
+  }
+  const minor = px == null ? NaN : Tariff.commissionMinor(px, qty, pdec(it.id), qdec(it.id), bps);
+  el.textContent = Tariff.commissionText(minor, bps);
+  el.title = `Commission ${bps / 100}% of the trade notional, charged on opening and again on closing.`;
+  el.classList.remove('hidden');
+}
+
 function updateSizeEq() {
+  updateFeeInfo();
   const it = META[selected];
   const el = document.getElementById('sizeEq');
   if (!it) { el.textContent = ''; el.title = ''; return; }
@@ -774,6 +812,13 @@ async function pollAccount() {
     }
     showAccountKind(a.kind, a.trading_frozen);
     showLeverage(a.leverage);
+    // Тариф для следующей сделки — в тикет (10.11). Поля нет (старый шлюз) —
+    // нули: так он и исполняет.
+    tariff = {
+      markup_bps: Number.isInteger(a.markup_bps) ? a.markup_bps : 0,
+      commission_bps: Number.isInteger(a.commission_bps) ? a.commission_bps : 0,
+    };
+    updateDealPanel();
     if (a.opened === false) {
       // Счёта ещё нет: шлюз отдаёт `null` вместо цифр, и подставлять сюда ноль
       // нельзя — ноль правдоподобен, по нему принимают решение (BUG-011).
