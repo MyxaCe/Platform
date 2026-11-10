@@ -1,92 +1,136 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Exchange Terminal</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Terminal</title>
   <!-- Дизайн-токены платформы (theming-pack v1) — подключаются ПЕРВЫМИ: style.css
        строит семантические цвета терминала поверх них (ADR-023, фаза Т1). -->
   <link rel="stylesheet" href="/tokens.v1.css" />
   <link rel="stylesheet" href="/style.css" />
   <script src="/vendor/lightweight-charts.js"></script>
 </head>
-<body>
+<body data-mtab="chart">
+  <!-- ===================== Шапка: бренд, род счёта, счёт ===================== -->
   <header class="top">
     <!-- «LIVE» — утверждение о состоянии, поэтому оно не статичное: подпись не должна
      утверждать больше, чем состояние знает. Слово меняется вместе с индикатором. -->
-    <div class="logo"><span class="logo__mark">E</span> <span id="brandName">Exchange</span><span class="muted">Pro · Binance <span id="feedLabel">…</span></span></div>
-    <!-- Стартовые значения — прочерк, а не $0: до первого успешного ответа счёта
-         у нас нет никаких цифр, и ноль выглядел бы настоящим балансом (BUG-011). -->
-    <div class="metrics">
-      <div class="metric"><span class="metric__l">BALANCE</span><span id="mBalance" class="metric__v">&mdash;</span></div>
-      <!-- CREDIT: источника данных нет вовсе — в API кредита не существует. Пока он
-           не появится, показываем прочерк: нарисованный «$0» неотличим от настоящей
-           цифры и читается как «кредит равен нулю» (BUG-011). -->
-      <div class="metric"><span class="metric__l">CREDIT</span><span id="mCredit" class="metric__v" title="no data source">&mdash;</span></div>
-      <div class="metric"><span class="metric__l">EQUITY</span><span id="mEquity" class="metric__v">&mdash;</span></div>
-      <div class="metric"><span class="metric__l">MARGIN</span><span id="mMargin" class="metric__v">&mdash;</span></div>
-      <div class="metric"><span class="metric__l">FREE BALANCE</span><span id="mFree" class="metric__v">&mdash;</span></div>
-      <div class="metric"><span class="metric__l">OPEN P&amp;L</span><span id="mPnl" class="metric__v">&mdash;</span></div>
-      <!-- Плечо СЧЁТА для новых позиций (Р-446): назначает сайт (портфель /
-           override клиента), без назначения — плечо площадки. Открытые позиции
-           держат своё плечо снимком. -->
-      <div class="metric"><span class="metric__l">LEVERAGE</span><span id="mLev" class="metric__v" title="Leverage for new positions. Open positions keep the leverage they were opened with.">&mdash;</span></div>
-    </div>
-    <!-- Явная причина, по которой цифр нет. Пусто и скрыто, пока счёт отвечает. -->
-    <div id="acctWarn" class="acct-warn" hidden></div>
-    <!-- Рыночные данные (свечи/стакан/статистика) не пришли — говорим об этом. -->
-    <div id="dataWarn" class="acct-warn" hidden></div>
-    <!-- Состояние живёт только в памяти (NoopStore). Пометка ПОСТОЯННАЯ и без крестика:
-         закрытая пометка — та же тишина, только с согласия, о котором завтра не помнят.
-         Опасность не в том, что счёт демонстрационный, а в том, что после рестарта
-         человек видит исправный счёт с круглой суммой вместо пустого места. -->
-    <div id="volatileWarn" class="volatile-warn" hidden></div>
-    <!-- Модель ведения позиций (ADR-025). Она меняет смысл встречной сделки, поэтому
-         показывается всегда, а не прячется в настройки. -->
-    <div id="modelBadge" class="volatile-warn" hidden></div>
+    <div class="logo"><span class="logo__mark">E</span><span id="brandName" class="logo__name">Exchange</span><span id="feedLabel" class="feed">…</span></div>
     <!-- Род счёта (demo-money): демо и реальный — разные счета с разными
          деньгами, и человек обязан видеть, на каком он торгует, ВСЕГДА.
          Переключает счёт кабинет: повторный вход с другим account_kind. -->
     <div id="kindBadge" class="kind-badge" hidden></div>
-    <div id="frozenBadge" class="acct-warn" hidden></div>
+    <div id="frozenBadge" class="frozen-badge" hidden></div>
+    <!-- Стартовые значения — прочерк, а не $0: до первого успешного ответа счёта
+         у нас нет никаких цифр, и ноль выглядел бы настоящим балансом (BUG-011). -->
+    <div class="metrics">
+      <div class="metric"><span class="metric__l" data-i18n="acct.balance">Balance</span><span id="mBalance" class="metric__v">&mdash;</span></div>
+      <!-- CREDIT: источника данных нет вовсе — в API кредита не существует. Узел
+           остаётся в разметке (на него опираются проверки), но не показывается:
+           столбик с вечным прочерком на витрине читается как поломка. -->
+      <div class="metric" hidden><span class="metric__l" data-i18n="acct.credit">Credit</span><span id="mCredit" class="metric__v" title="no data source">&mdash;</span></div>
+      <div class="metric"><span class="metric__l" data-i18n="acct.equity">Equity</span><span id="mEquity" class="metric__v">&mdash;</span></div>
+      <div class="metric"><span class="metric__l" data-i18n="acct.pnl">Open P&amp;L</span><span id="mPnl" class="metric__v">&mdash;</span></div>
+      <div class="metric"><span class="metric__l" data-i18n="acct.margin">Margin</span><span id="mMargin" class="metric__v">&mdash;</span></div>
+      <div class="metric"><span class="metric__l" data-i18n="acct.free">Free margin</span><span id="mFree" class="metric__v">&mdash;</span></div>
+      <!-- Уровень маржи: equity / занятая маржа. Красится по порогам площадки
+           (маржин-колл / стоп-аут), которые отдаёт /account. -->
+      <div class="metric"><span class="metric__l" data-i18n="acct.level">Margin level</span><span id="mLevel" class="metric__v" data-i18n-title="acct.level.tip">&mdash;</span></div>
+      <!-- Плечо СЧЁТА для новых позиций (Р-446): назначает сайт (портфель /
+           override клиента), без назначения — плечо площадки. Открытые позиции
+           держат своё плечо снимком. -->
+      <div class="metric"><span class="metric__l" data-i18n="acct.leverage">Leverage</span><span id="mLev" class="metric__v" data-i18n-title="acct.leverage.tip">&mdash;</span></div>
+    </div>
+    <!-- Модель ведения позиций (ADR-025). Она меняет смысл встречной сделки, поэтому
+         показывается всегда, а не прячется в настройки. -->
+    <div id="modelBadge" class="chip" hidden></div>
     <div class="top__right">
-      <button class="btn" id="themeToggle" data-tip="Light / Dark" title="Light / Dark">◐</button>
+      <div class="lang" role="group" data-i18n-title="top.lang">
+        <button type="button" data-lang="ru">RU</button><button type="button" data-lang="en">EN</button>
+      </div>
+      <button class="iconbtn-top" id="themeToggle" data-i18n-tip="top.theme" data-i18n-title="top.theme">◐</button>
+      <!-- «В кабинет» и «Выйти» — только когда терминал открыт верхним уровнем:
+           во фрейме кабинет и так вокруг. Адрес — из белого списка конфига. -->
+      <a id="toCabinet" class="btn-top" hidden data-i18n-title="top.cabinet.tip"><span data-i18n="top.cabinet">Cabinet</span></a>
+      <button id="logoutBtn" class="btn-top btn-top--ghost" hidden data-i18n="top.logout">Log out</button>
       <span id="status" class="status status--off">●</span>
     </div>
   </header>
 
-  <div class="app">
-  <main class="grid">
-    <!-- Список инструментов строит watchlist.js (ADR-015): страница даёт пустой контейнер. -->
-    <!-- Слева — биржевой стакан (DOM строит orderbook.js) -->
+  <!-- ===================== Баннеры состояния (только когда есть) ============ -->
+  <div id="banners" class="banners">
+    <div id="frozenBanner" class="banner banner--danger" hidden></div>
+    <div id="mcBanner" class="banner banner--danger" hidden></div>
+    <div id="ssoBanner" class="banner banner--warn" hidden><span id="ssoBannerText"></span><button id="ssoBannerBtn" class="banner__btn" hidden></button></div>
+    <div class="chips">
+      <!-- Явная причина, по которой цифр нет. Пусто и скрыто, пока счёт отвечает. -->
+      <div id="acctWarn" class="acct-warn" hidden></div>
+      <!-- Рыночные данные (свечи/стакан/статистика) не пришли — говорим об этом. -->
+      <div id="dataWarn" class="acct-warn" hidden></div>
+      <!-- Состояние живёт только в памяти (NoopStore). Пометка ПОСТОЯННАЯ и без крестика:
+           закрытая пометка — та же тишина, только с согласия, о котором завтра не помнят. -->
+      <div id="volatileWarn" class="volatile-warn" hidden></div>
+    </div>
+  </div>
+
+  <!-- ===================== Шапка инструмента ===================== -->
+  <section class="ihead" id="ihead">
+    <button id="ihPair" class="ih-pair" type="button" data-i18n-title="ih.pairs">
+      <span id="ihCoin" class="ih-coin"></span>
+      <span class="ih-sym"><b id="ihBase">—</b><span id="ihQuote" class="muted">/—</span></span>
+      <span class="ih-caret">▾</span>
+    </button>
+    <div class="ih-price"><span id="ihLast" class="ih-last">—</span><span id="ihMid" class="ih-sub muted"></span></div>
+    <div class="ih-stats">
+      <div class="ih-stat"><span class="ih-l" data-i18n="ih.change">24h change</span><span id="ihChg" class="ih-v">—</span></div>
+      <div class="ih-stat"><span class="ih-l" data-i18n="ih.high">24h high</span><span id="ihHigh" class="ih-v">—</span></div>
+      <div class="ih-stat"><span class="ih-l" data-i18n="ih.low">24h low</span><span id="ihLow" class="ih-v">—</span></div>
+      <div class="ih-stat"><span id="ihVolL" class="ih-l">24h vol</span><span id="ihVol" class="ih-v">—</span></div>
+      <div class="ih-stat"><span id="ihQVolL" class="ih-l">24h vol</span><span id="ihQVol" class="ih-v">—</span></div>
+      <div class="ih-stat"><span class="ih-l" data-i18n="ih.spread">Spread</span><span id="ihSpread" class="ih-v">—</span></div>
+    </div>
+    <span class="ih-source chip" data-i18n="ih.source" data-i18n-title="ih.source.tip">Prices: Binance</span>
+  </section>
+
+  <!-- ===================== Мобильные вкладки ===================== -->
+  <nav class="mtabs" id="mtabs">
+    <button data-m="chart" class="active" data-i18n="m.chart">Chart</button>
+    <button data-m="book" data-i18n="m.book">Book</button>
+    <button data-m="order" data-i18n="m.order">Order</button>
+    <button data-m="positions" data-i18n="m.positions">Positions</button>
+  </nav>
+
+  <main class="grid" id="grid">
+    <!-- Слева — глубина рынка-источника (DOM строит orderbook.js) -->
     <div id="book" class="col-book"></div>
 
-    <div class="rsz rsz-v" data-rsz="left"></div>
+    <div class="rsz rsz-v rsz-left" data-rsz="left"></div>
 
     <section class="center">
       <div class="toolbar">
         <div id="tfs" class="tfs">
-          <button data-tf="60">1M</button><button data-tf="300">5M</button>
-          <button data-tf="900">15M</button><button data-tf="1800">30M</button>
+          <button data-tf="60">1m</button><button data-tf="300">5m</button>
+          <button data-tf="900">15m</button><button data-tf="1800">30m</button>
           <button data-tf="3600" class="active">1H</button><button data-tf="14400">4H</button>
           <button data-tf="86400">1D</button><button data-tf="604800">1W</button>
         </div>
         <span class="tb-sep"></span>
         <div class="tb-dd">
-          <button id="ctBtn" class="tbbtn" data-tip="Chart type"><span class="ic" data-icon="candles"></span><span id="ctLabel">Candles</span><span class="caret" data-icon="caret"></span></button>
+          <button id="ctBtn" class="tbbtn" data-i18n-tip="tb.chartType"><span class="ic" data-icon="candles"></span><span id="ctLabel" data-i18n="ct.candles">Candles</span><span class="caret" data-icon="caret"></span></button>
           <div id="ctMenu" class="dd hidden">
-            <div class="dd-item active" data-ct="candles"><span class="ic" data-icon="candles"></span> Candles</div>
-            <div class="dd-item" data-ct="hollow"><span class="ic" data-icon="hollow"></span> Hollow Candles</div>
-            <div class="dd-item" data-ct="bars"><span class="ic" data-icon="bars"></span> Bars</div>
-            <div class="dd-item" data-ct="line"><span class="ic" data-icon="line"></span> Line</div>
-            <div class="dd-item" data-ct="area"><span class="ic" data-icon="area"></span> Area</div>
-            <div class="dd-item" data-ct="heikin"><span class="ic" data-icon="candles"></span> Heikin Ashi</div>
+            <div class="dd-item active" data-ct="candles"><span class="ic" data-icon="candles"></span> <span data-i18n="ct.candles">Candles</span></div>
+            <div class="dd-item" data-ct="hollow"><span class="ic" data-icon="hollow"></span> <span data-i18n="ct.hollow">Hollow Candles</span></div>
+            <div class="dd-item" data-ct="bars"><span class="ic" data-icon="bars"></span> <span data-i18n="ct.bars">Bars</span></div>
+            <div class="dd-item" data-ct="line"><span class="ic" data-icon="line"></span> <span data-i18n="ct.line">Line</span></div>
+            <div class="dd-item" data-ct="area"><span class="ic" data-icon="area"></span> <span data-i18n="ct.area">Area</span></div>
+            <div class="dd-item" data-ct="heikin"><span class="ic" data-icon="candles"></span> <span data-i18n="ct.heikin">Heikin Ashi</span></div>
           </div>
         </div>
         <div class="tb-dd">
-          <button id="indBtn" class="tbbtn iconbtn" data-tip="Indicators"><span class="ic" data-icon="indicators"></span></button>
+          <button id="indBtn" class="tbbtn iconbtn" data-i18n-tip="tb.indicators"><span class="ic" data-icon="indicators"></span></button>
           <div id="indMenu" class="dd dd--wide hidden">
-            <div class="dd-cat">Trend</div>
+            <div class="dd-cat" data-i18n="ind.trend">Trend</div>
+            <div class="dd-toggle" data-ov="ma">MA 7 / 25 / 99</div>
             <div class="dd-toggle" data-ov="sma">Moving Average (SMA 20)</div>
             <div class="dd-toggle" data-ov="ema">EMA 20</div>
             <div class="dd-toggle" data-ov="wma">WMA 20</div>
@@ -94,15 +138,15 @@
             <div class="dd-toggle" data-ov="psar">Parabolic SAR</div>
             <div class="dd-toggle" data-ov="ichimoku">Ichimoku</div>
             <div class="dd-toggle" data-ov="alligator">Alligator</div>
-            <div class="dd-cat">Volatility</div>
+            <div class="dd-cat" data-i18n="ind.vola">Volatility</div>
             <div class="dd-toggle" data-ov="boll">Bollinger Bands</div>
             <div class="dd-toggle" data-ov="keltner">Keltner Channels</div>
             <div class="dd-toggle" data-ov="donchian">Donchian Channels</div>
-            <div class="dd-cat">Volume</div>
+            <div class="dd-cat" data-i18n="ind.volume">Volume</div>
             <div class="dd-toggle" data-ov="vwap">VWAP</div>
-            <div class="dd-cat">Oscillator (bottom, one)</div>
+            <div class="dd-cat" data-i18n="ind.osc">Oscillator (bottom, one)</div>
             <div class="osc-list">
-              <div class="dd-toggle osc active" data-osc="">None</div>
+              <div class="dd-toggle osc active" data-osc="" data-i18n="ind.none">None</div>
               <div class="dd-toggle osc" data-osc="rsi">RSI</div>
               <div class="dd-toggle osc" data-osc="stoch">Stochastic</div>
               <div class="dd-toggle osc" data-osc="cci">CCI</div>
@@ -122,54 +166,54 @@
               <div class="dd-toggle osc" data-osc="ac">Accelerator</div>
               <div class="dd-toggle osc" data-osc="gator">Gator</div>
             </div>
-            <div class="note">Soon: Volume Profile, TPO, Delta, Fibonacci, ZigZag, Pivot Points.</div>
+            <div class="note" data-i18n="ind.soon">Soon: Volume Profile, TPO, Delta, Fibonacci, ZigZag, Pivot Points.</div>
           </div>
         </div>
         <div class="tb-dd">
-          <button id="ptBtn" class="tbbtn tbtext" data-tip="Price type"><span id="ptLabel">MID</span><span class="caret" data-icon="caret"></span></button>
+          <button id="ptBtn" class="tbbtn tbtext" data-i18n-tip="tb.priceType"><span id="ptLabel">MID</span><span class="caret" data-icon="caret"></span></button>
           <div id="ptMenu" class="dd hidden">
             <div class="dd-item active" data-pt="mid">Mid</div>
             <div class="dd-item" data-pt="ask">Ask</div>
             <div class="dd-item" data-pt="bid">Bid</div>
           </div>
         </div>
-        <button id="sltpBtn" class="tbbtn tbtext on" data-tip="Show SL/TP lines">SL/TP</button>
-        <button id="pipsBtn" class="tbbtn iconbtn" data-tip="Display PIPS"><span class="ic" data-icon="wallet"></span></button>
+        <button id="sltpBtn" class="tbbtn tbtext on" data-i18n-tip="tb.sltp">SL/TP</button>
+        <button id="pipsBtn" class="tbbtn iconbtn" data-i18n-tip="tb.pips"><span class="ic" data-icon="wallet"></span></button>
 
         <div class="tb-right">
-          <button id="resetBtn" class="tbbtn iconbtn" data-tip="Reset chart"><span class="ic" data-icon="reset"></span></button>
-          <button id="fullBtn" class="tbbtn iconbtn" data-tip="Fullscreen"><span class="ic" data-icon="fullscreen"></span></button>
+          <button id="resetBtn" class="tbbtn iconbtn" data-i18n-tip="tb.reset"><span class="ic" data-icon="reset"></span></button>
+          <button id="fullBtn" class="tbbtn iconbtn" data-i18n-tip="tb.full"><span class="ic" data-icon="fullscreen"></span></button>
           <div class="tb-dd">
-            <button id="setBtn" class="tbbtn iconbtn" data-tip="Settings"><span class="ic" data-icon="settings"></span></button>
+            <button id="setBtn" class="tbbtn iconbtn" data-i18n-tip="tb.settings"><span class="ic" data-icon="settings"></span></button>
             <div id="setMenu" class="dd setmenu dd--right hidden">
-              <div class="dd-cat">Candles</div>
-              <label class="setrow"><span>Hollow candle color</span><input type="color" id="sHollow" value="#26a69a"></label>
-              <label class="setrow"><span>Candle shadows</span><input type="checkbox" id="sShadows" class="sw" checked></label>
-              <label class="setrow"><span>Custom shadow color</span><span class="setrow__r"><input type="checkbox" id="sShadowCustom" class="sw"><input type="color" id="sShadowColor" value="#787b86"></span></label>
-              <div class="dd-cat">Price lines</div>
-              <label class="setrow"><span>Price line width</span><input type="number" id="sPlw" min="0" max="4" step="1" value="1"></label>
-              <label class="setrow"><span>Additional price line</span><input type="checkbox" id="sAddLine" class="sw"></label>
-              <label class="setrow"><span>Additional line width</span><input type="number" id="sAlw" min="1" max="4" step="1" value="1"></label>
-              <div class="dd-cat">Minimal price change</div>
-              <label class="setrow"><span>Step</span><select id="sMinChange"><option value="default">Default</option><option value="1:1">1 : 1</option><option value="1:10">1 : 10</option></select></label>
-              <div class="dd-cat">Watchlist columns</div>
-              <label class="setrow"><span>Change</span><input type="checkbox" id="cChange" class="sw" checked></label>
-              <label class="setrow"><span>Sell</span><input type="checkbox" id="cSell" class="sw" checked></label>
-              <label class="setrow"><span>Buy</span><input type="checkbox" id="cBuy" class="sw" checked></label>
-              <label class="setrow"><span>Spread</span><input type="checkbox" id="cSpread" class="sw" checked></label>
-              <label class="setrow"><span>High</span><input type="checkbox" id="cHigh" class="sw" checked></label>
+              <div class="dd-cat" data-i18n="set.candles">Candles</div>
+              <label class="setrow"><span data-i18n="set.hollow">Hollow candle color</span><input type="color" id="sHollow" value="#26a69a"></label>
+              <label class="setrow"><span data-i18n="set.shadows">Candle shadows</span><input type="checkbox" id="sShadows" class="sw" checked></label>
+              <label class="setrow"><span data-i18n="set.shadowCustom">Custom shadow color</span><span class="setrow__r"><input type="checkbox" id="sShadowCustom" class="sw"><input type="color" id="sShadowColor" value="#787b86"></span></label>
+              <div class="dd-cat" data-i18n="set.lines">Price lines</div>
+              <label class="setrow"><span data-i18n="set.plw">Price line width</span><input type="number" id="sPlw" min="0" max="4" step="1" value="1"></label>
+              <label class="setrow"><span data-i18n="set.addLine">Additional price line</span><input type="checkbox" id="sAddLine" class="sw"></label>
+              <label class="setrow"><span data-i18n="set.alw">Additional line width</span><input type="number" id="sAlw" min="1" max="4" step="1" value="1"></label>
+              <div class="dd-cat" data-i18n="set.minChange">Minimal price change</div>
+              <label class="setrow"><span data-i18n="set.step">Step</span><select id="sMinChange"><option value="default" data-i18n="set.default">Default</option><option value="1:1">1 : 1</option><option value="1:10">1 : 10</option></select></label>
+              <div class="dd-cat" data-i18n="set.cols">Watchlist columns</div>
+              <label class="setrow"><span data-i18n="wl.price">Price</span><input type="checkbox" id="cLast" class="sw" checked></label>
+              <label class="setrow"><span data-i18n="wl.change">Change</span><input type="checkbox" id="cChange" class="sw" checked></label>
+              <label class="setrow"><span data-i18n="wl.sell">Sell</span><input type="checkbox" id="cSell" class="sw" checked></label>
+              <label class="setrow"><span data-i18n="wl.buy">Buy</span><input type="checkbox" id="cBuy" class="sw" checked></label>
+              <label class="setrow"><span data-i18n="wl.spread">Spread</span><input type="checkbox" id="cSpread" class="sw" checked></label>
+              <label class="setrow"><span data-i18n="wl.high">High</span><input type="checkbox" id="cHigh" class="sw" checked></label>
             </div>
           </div>
         </div>
       </div>
-
-      <div class="rsz rsz-h" data-rsz="toolbar"></div>
 
       <div class="chartwrap">
         <div id="legend" class="legend">
           <div class="legend__top"><span id="lgSym">—</span><span id="lgTf" class="muted"></span></div>
           <div id="lgTime" class="legend__time muted">—</div>
           <div id="lgOhlc" class="legend__ohlc">—</div>
+          <div id="lgMa" class="legend__ma"></div>
         </div>
         <div id="watermark" class="watermark">—</div>
         <div id="loading" class="loading hidden"><span class="spinner"></span></div>
@@ -177,66 +221,83 @@
       </div>
 
       <div id="statbar" class="statbar"></div>
-
-      <div class="rsz rsz-h" data-rsz="deal"></div>
-
-      <!-- Покупка/продажа — под графиком -->
-      <section class="deal">
-      <div class="deal__tabs">
-        <button id="tabDeal" class="active">OPEN DEAL</button>
-        <button id="tabLimit">LIMIT ORDER</button>
-      </div>
-      <div class="deal__sym">
-        <div><div id="dealSym" class="deal__symname">—</div><div id="dealSub" class="muted small">—</div></div>
-        <div id="dealChange" class="deal__change">0.00%</div>
-      </div>
-      <div class="deal__body">
-        <div class="lbl lbl-row"><span>SIZE</span>
-          <span class="unit-toggle"><button id="unitLot" class="ubtn active">LOT</button><button id="unitUsd" class="ubtn">USD</button></span>
-        </div>
-        <div class="lotrow">
-          <button id="lotMinus" class="btn lotbtn">−</button>
-          <input id="lot" type="number" step="0.001" value="0.01" />
-          <button id="lotPlus" class="btn lotbtn">+</button>
-        </div>
-        <div id="sizeEq" class="muted small"></div>
-        <div id="priceRow" class="pricerow hidden">
-          <label class="lbl">PRICE (limit)</label>
-          <input id="price" type="number" step="0.01" />
-        </div>
-        <div class="sltp">
-          <div><label class="lbl">STOP LOSS</label><input id="sl" type="number" step="0.01" placeholder="—" /></div>
-          <div><label class="lbl">TAKE PROFIT</label><input id="tp" type="number" step="0.01" placeholder="—" /></div>
-        </div>
-        <div id="pipsInfo" class="muted small hidden"></div>
-        <!-- Комиссия сделки по тарифу счёта (10.11) — до подтверждения. Цена на
-             кнопках — цена исполнения с наценкой тарифа; отдельной строки
-             «наценка» нет, как на любом spread-счёте. Нет комиссии — строки нет. -->
-        <div id="feeInfo" class="muted small hidden"></div>
-        <button id="btnBuy" class="orderbtn buy">BUY <span id="askPx">—</span></button>
-        <button id="btnSell" class="orderbtn sell">SELL <span id="bidPx">—</span></button>
-        <div id="dealMsg" class="dealmsg"></div>
-      </div>
-      </section>
     </section>
 
-    <div class="rsz rsz-v" data-rsz="right"></div>
+    <!-- ===================== Форма ордера ===================== -->
+    <section class="deal" id="deal">
+      <div class="deal__tabs">
+        <button id="tabLimit" data-i18n="f.limit">Limit</button>
+        <button id="tabDeal" class="active" data-i18n="f.market">Market</button>
+        <button id="tabStop" class="deal__tab--off" disabled data-i18n-title="f.stop.tip"><span data-i18n="f.stop">Stop</span> <small data-i18n="f.soon">soon</small></button>
+        <div class="deal__acct">
+          <span><span class="muted" data-i18n="f.leverage">Leverage</span> <b id="fLev">—</b></span>
+          <span><span class="muted" data-i18n="f.free">Free</span> <b id="fFree">—</b></span>
+        </div>
+      </div>
+      <!-- Имя инструмента и изменение — для мобильной вкладки «Ордер», где шапки
+           инструмента над формой нет. На десктопе скрыты: шапка выше. -->
+      <div class="deal__sym">
+        <div><div id="dealSym" class="deal__symname">—</div><div id="dealSub" class="muted small">—</div></div>
+        <div id="dealChange" class="deal__change">—</div>
+      </div>
+      <div class="deal__body">
+        <div class="fld" id="priceRow">
+          <label class="lbl" for="price" data-i18n="f.price">Price</label>
+          <div class="inp inp--limit"><input id="price" type="number" step="0.01" inputmode="decimal" /><span class="inp__u" id="priceUnit">USDT</span></div>
+          <div class="inp inp--static" data-i18n="f.atMarket">At market</div>
+        </div>
+        <div class="fld fld--size">
+          <div class="lbl lbl-row"><label for="lot" data-i18n="f.size">Size</label>
+            <span class="unit-toggle"><button id="unitLot" class="ubtn active">LOT</button><button id="unitUsd" class="ubtn">USD</button></span>
+          </div>
+          <div class="lotrow">
+            <button id="lotMinus" class="btn lotbtn" type="button" aria-label="−">−</button>
+            <input id="lot" type="number" step="0.001" value="0.01" inputmode="decimal" />
+            <button id="lotPlus" class="btn lotbtn" type="button" aria-label="+">+</button>
+          </div>
+        </div>
+        <div class="fld fld--sl"><label class="lbl" for="sl" data-i18n="f.sl">Stop Loss</label><input id="sl" type="number" step="0.01" placeholder="—" inputmode="decimal" /></div>
+        <div class="fld fld--tp"><label class="lbl" for="tp" data-i18n="f.tp">Take Profit</label><input id="tp" type="number" step="0.01" placeholder="—" inputmode="decimal" /></div>
+        <div class="deal__info">
+          <div class="shares" id="shares" data-i18n-title="f.share.tip"><button data-share="10">10%</button><button data-share="25">25%</button><button data-share="50">50%</button></div>
+          <div id="sizeEq" class="muted small"></div>
+          <div id="marginEq" class="muted small"></div>
+          <div id="pipsInfo" class="muted small hidden"></div>
+          <!-- Комиссия сделки по тарифу счёта (10.11) — до подтверждения. Цена на
+               кнопках — цена исполнения с наценкой тарифа; отдельной строки
+               «наценка» нет, как на любом spread-счёте. Нет комиссии — строки нет. -->
+          <div id="feeInfo" class="muted small hidden"></div>
+        </div>
+        <div class="deal__btns">
+          <button id="btnBuy" class="orderbtn buy"><span class="orderbtn__t" data-i18n="f.buy">Buy / Long</span><span id="askPx">—</span></button>
+          <button id="btnSell" class="orderbtn sell"><span class="orderbtn__t" data-i18n="f.sell">Sell / Short</span><span id="bidPx">—</span></button>
+        </div>
+        <div id="dealMsg" class="dealmsg" role="status"></div>
+      </div>
+      <div id="dealFrozen" class="deal__frozen" hidden><b data-i18n="frozen.form">Trading blocked by operator</b><span data-i18n="frozen.form.sub">Closing positions is still available</span></div>
+    </section>
 
-    <!-- Справа: выбор монеты, под ним — сделки по инструменту -->
+    <div class="rsz rsz-v rsz-right" data-rsz="right"></div>
+
+    <!-- Справа: выбор пары, под ним — сделки по инструменту -->
     <aside class="col-right">
+      <button id="watchClose" class="mclose" type="button" aria-label="close">✕</button>
       <aside class="watch"></aside>
       <div class="rsz rsz-h" data-rsz="trades"></div>
       <div id="trades"></div>
     </aside>
+
+    <div class="rsz rsz-h rsz-bottom" data-rsz="bottom"></div>
+    <!-- Во всю ширину: позиции, ордера, история, баланс (positions.js) -->
+    <div class="bottom" id="bottom"></div>
   </main>
 
-  <div class="rsz rsz-h" data-rsz="bottom"></div>
-  <!-- Самый низ, во всю ширину: ордера и история (positions.js) -->
-  <div class="bottom" id="bottom"></div>
-  </div>
+  <!-- Бегущая строка тикеров: цены и изменение по всем парам сайта. -->
+  <footer class="tape" id="tape"><div class="tape__track" id="tapeTrack"></div></footer>
 
   <div id="tip" class="tip hidden"></div>
   <script src="/config.js"></script>
+  <script src="/i18n.js"></script>
   <script src="/diag.js"></script>
   <script src="/rejection.js"></script>
   <script src="/tariff.js"></script>

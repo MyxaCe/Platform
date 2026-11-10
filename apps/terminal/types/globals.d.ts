@@ -24,6 +24,8 @@ interface Window {
   Api?: any;
   Theming?: any;
   Sso?: any;
+  /** Локализация RU/EN без внешних библиотек (i18n.js). */
+  I18n?: any;
   Diag?: any;
   /** Тексты отказов границы (TRM-43). */
   Rejection?: any;
@@ -50,6 +52,7 @@ interface Window {
 declare const Api: any;
 declare const Theming: any;
 declare const Sso: any;
+declare const I18n: any;
 declare const Diag: any;
 declare const Rejection: any;
 declare const Tariff: any;
