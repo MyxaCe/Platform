@@ -143,6 +143,12 @@ ALTER TABLE accounts ADD COLUMN IF NOT EXISTS currency_minor_units SMALLINT NOT 
 -- торговать так же, как торговал. Источник истины — запись `leverage_set`
 -- журнала; столбец — слепок, сверяемый с ней на старте.
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS leverage BIGINT;
+-- Тариф СЧЁТА для новых позиций (решение владельца 10.11): наценка на спред и
+-- комиссия за сделку, в базисных пунктах. DEFAULT 0 — «без тарифа», и это
+-- факт истории: до столбцов наценки и комиссии не было. Источник истины —
+-- запись `fees_set` журнала; столбцы — слепок, сверяемый с ней на старте.
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS markup_bps BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS commission_bps BIGINT NOT NULL DEFAULT 0;
 
 -- НЕИЗМЕНЯЕМОСТЬ ПРОФИЛЯ — МЕХАНИЗМОМ, А НЕ ДИСЦИПЛИНОЙ (TRM-55, требование
 -- владельца). Отсутствие профиля в `DO UPDATE` защищает только от нашего же
@@ -201,6 +207,13 @@ CREATE TABLE IF NOT EXISTS positions (
 -- базы, поднятой специально для этого. Цена пропуска — новое окружение, в
 -- котором шлюз не стартует вообще.
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS leverage BIGINT NOT NULL DEFAULT 1;
+-- Тариф позиции — снимок на момент открытия (10.11), и накопленный по ней
+-- доход площадки, ещё не отнесённый к закрытой сделке. Нули — факт истории:
+-- позиции, открытые до тарифов, открыты без наценки и комиссии.
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS markup_bps BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS commission_bps BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS commission_paid NUMERIC(38,0) NOT NULL DEFAULT 0;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS markup_paid NUMERIC(38,0) NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS pendings (
   user_id     BIGINT NOT NULL,
   id          BIGINT NOT NULL,
@@ -240,6 +253,13 @@ CREATE INDEX IF NOT EXISTS closed_deals_user_idx ON closed_deals (user_id, idx D
 -- обязан отличать его от «нет».
 ALTER TABLE closed_deals ADD COLUMN IF NOT EXISTS level BIGINT;
 ALTER TABLE closed_deals ADD COLUMN IF NOT EXISTS across_gap BOOLEAN;
+-- Доход площадки со сделки (10.11): комиссия и наценка, отнесённые к ней, —
+-- по ним сайт считает кешбэк и долю IB. Нули у сделок до тарифов — факт: их
+-- не было. `market_exit` — рыночная цена закрытия до наценки; NULL — сделка
+-- закрыта до появления столбца, и цену мы не знаем.
+ALTER TABLE closed_deals ADD COLUMN IF NOT EXISTS commission NUMERIC(38,0) NOT NULL DEFAULT 0;
+ALTER TABLE closed_deals ADD COLUMN IF NOT EXISTS markup NUMERIC(38,0) NOT NULL DEFAULT 0;
+ALTER TABLE closed_deals ADD COLUMN IF NOT EXISTS market_exit BIGINT;
 
 -- ===================== Журнал событий счёта (TRM-13) ========================
 -- Лента пополняется только добавлением. `kind` хранится ровно той канонической
@@ -359,7 +379,7 @@ impl Persistence for PgStore {
     async fn load_all(&self) -> Result<LoadedState, StoreError> {
         // Счёт — самостоятельная сущность: перебираем то, что реально лежит в accounts.
         let acc_rows = sqlx::query(
-            "SELECT user_id, balance, next_id, model, leverage, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units
+            "SELECT user_id, balance, next_id, model, leverage, markup_bps, commission_bps, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units
                FROM accounts ORDER BY user_id",
         )
                 .fetch_all(&self.pool)
@@ -375,6 +395,10 @@ impl Persistence for PgStore {
 
             let model = model_from_db(acc.get::<i16, _>("model"));
             let leverage = acc.get::<Option<i64>, _>("leverage").map(i128::from);
+            let fees = broker::Fees {
+                markup_bps: acc.get::<i64, _>("markup_bps"),
+                commission_bps: acc.get::<i64, _>("commission_bps"),
+            };
             // Неизвестное значение в профиле — ОТКАЗ чтения, а не умолчание.
             // Род счёта решает, настоящие ли это деньги; прочитать непонятное
             // как «демо» значило бы угадывать, чьими деньгами торгуют.
@@ -411,7 +435,7 @@ impl Persistence for PgStore {
             };
 
             let positions = sqlx::query(
-                "SELECT id, instrument, side, qty, entry, pd, qd, margin, sl, tp, leverage FROM positions WHERE user_id = $1 ORDER BY id",
+                "SELECT id, instrument, side, qty, entry, pd, qd, margin, sl, tp, leverage, markup_bps, commission_bps, commission_paid, markup_paid FROM positions WHERE user_id = $1 ORDER BY id",
             )
             .bind(id_db)
             .fetch_all(&self.pool)
@@ -431,6 +455,12 @@ impl Persistence for PgStore {
                     sl: r.get::<Option<i64>, _>("sl"),
                     tp: r.get::<Option<i64>, _>("tp"),
                     leverage: r.get::<i64, _>("leverage") as i128,
+                    fees: broker::PositionFees {
+                        markup_bps: r.get::<i64, _>("markup_bps"),
+                        commission_bps: r.get::<i64, _>("commission_bps"),
+                        commission: from_numeric(&r.get::<BigDecimal, _>("commission_paid"))?,
+                        markup: from_numeric(&r.get::<BigDecimal, _>("markup_paid"))?,
+                    },
                 })
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
@@ -457,7 +487,7 @@ impl Persistence for PgStore {
             .collect();
 
             let closed = sqlx::query(
-                "SELECT instrument, side, qty, entry, exit, pnl, pd, qd, level, across_gap FROM closed_deals WHERE user_id = $1 ORDER BY idx",
+                "SELECT instrument, side, qty, entry, exit, pnl, pd, qd, level, across_gap, commission, markup, market_exit FROM closed_deals WHERE user_id = $1 ORDER BY idx",
             )
             .bind(id_db)
             .fetch_all(&self.pool)
@@ -478,6 +508,11 @@ impl Persistence for PgStore {
                     // сделки, закрытые до появления этих столбцов (TRM-38).
                     level: r.get::<Option<i64>, _>("level"),
                     across_gap: r.get::<Option<bool>, _>("across_gap"),
+                    fees: broker::DealFees {
+                        commission: from_numeric(&r.get::<BigDecimal, _>("commission"))?,
+                        markup: from_numeric(&r.get::<BigDecimal, _>("markup"))?,
+                        market_exit: r.get::<Option<i64>, _>("market_exit"),
+                    },
                 })
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
@@ -493,6 +528,7 @@ impl Persistence for PgStore {
                     closed,
                     model,
                     leverage,
+                    fees,
                 },
             ));
         }
@@ -538,9 +574,9 @@ impl Persistence for PgStore {
         // счёта, означали бы, что прошлые суммы посчитаны в одном, а читаются в
         // другом. Смена валюты — это новый счёт, а не правка поля.
         sqlx::query(
-            "INSERT INTO accounts (user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units, leverage)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-             ON CONFLICT (user_id) DO UPDATE SET balance = EXCLUDED.balance, next_id = EXCLUDED.next_id, model = EXCLUDED.model, leverage = EXCLUDED.leverage",
+            "INSERT INTO accounts (user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units, leverage, markup_bps, commission_bps)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             ON CONFLICT (user_id) DO UPDATE SET balance = EXCLUDED.balance, next_id = EXCLUDED.next_id, model = EXCLUDED.model, leverage = EXCLUDED.leverage, markup_bps = EXCLUDED.markup_bps, commission_bps = EXCLUDED.commission_bps",
         )
         .bind(id_db)
         .bind(to_numeric(snap.balance))
@@ -553,6 +589,8 @@ impl Persistence for PgStore {
         .bind(snap.profile.currency.code())
         .bind(snap.profile.currency.minor_units() as i16)
         .bind(snap.leverage.map(|l| l as i64))
+        .bind(snap.fees.markup_bps)
+        .bind(snap.fees.commission_bps)
         .execute(&mut *tx)
         .await
         .map_err(db)?;
@@ -566,12 +604,14 @@ impl Persistence for PgStore {
             .map_err(db)?;
         for p in &snap.positions {
             sqlx::query(
-                "INSERT INTO positions (user_id, id, instrument, side, qty, entry, pd, qd, margin, sl, tp, leverage)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                "INSERT INTO positions (user_id, id, instrument, side, qty, entry, pd, qd, margin, sl, tp, leverage, markup_bps, commission_bps, commission_paid, markup_paid)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             )
             .bind(id_db).bind(p.id as i64).bind(p.instrument as i32).bind(side_to_db(p.side))
             .bind(p.qty).bind(p.entry).bind(p.pd as i16).bind(p.qd as i16)
             .bind(to_numeric(p.margin)).bind(p.sl).bind(p.tp).bind(p.leverage as i64)
+            .bind(p.fees.markup_bps).bind(p.fees.commission_bps)
+            .bind(to_numeric(p.fees.commission)).bind(to_numeric(p.fees.markup))
             .execute(&mut *tx).await.map_err(db)?;
         }
 
@@ -610,13 +650,15 @@ impl Persistence for PgStore {
             .get("n");
         for (i, d) in snap.closed.iter().enumerate().skip(have as usize) {
             sqlx::query(
-                "INSERT INTO closed_deals (user_id, idx, instrument, side, qty, entry, exit, pnl, pd, qd, level, across_gap)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (user_id, idx) DO NOTHING",
+                "INSERT INTO closed_deals (user_id, idx, instrument, side, qty, entry, exit, pnl, pd, qd, level, across_gap, commission, markup, market_exit)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (user_id, idx) DO NOTHING",
             )
             .bind(id_db).bind(i as i64).bind(d.instrument as i32).bind(side_to_db(d.side))
             .bind(d.qty).bind(d.entry).bind(d.exit).bind(to_numeric(d.pnl))
             .bind(d.pd as i16).bind(d.qd as i16)
             .bind(d.level).bind(d.across_gap)
+            .bind(to_numeric(d.fees.commission)).bind(to_numeric(d.fees.markup))
+            .bind(d.fees.market_exit)
             .execute(&mut *tx).await.map_err(db)?;
         }
 

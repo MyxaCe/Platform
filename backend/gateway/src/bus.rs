@@ -511,6 +511,14 @@ fn balance_reason(
     if after.closed.len() > before.closed {
         return Some("trade");
     }
+    // Комиссия открытия двигает остаток без закрытой сделки — и это тоже
+    // сделка, а не ручная проводка.
+    if kinds
+        .iter()
+        .any(|k| matches!(k, EventKind::CommissionCharged { .. }))
+    {
+        return Some("trade");
+    }
     if kinds
         .iter()
         .any(|k| matches!(k, EventKind::Deposited { .. }))
@@ -606,6 +614,21 @@ fn trade_executed(
     }
     if let Some(gap) = deal.across_gap {
         data["acrossGap"] = serde_json::Value::from(gap);
+    }
+    // Доход площадки со сделки (решение владельца 10.11) — по нему сайт
+    // считает кешбэк клиента и долю IB. Аддитивно: потребитель, который полей
+    // не знает, срезает их молча (лишние ключи `z.object` отбрасывает).
+    //
+    // `commissionMinor` — ВСЯ комиссия сделки (открытие, доливки, закрытие),
+    // фактически списанная; `markupMinor` — вся наценка (вход и выход) в
+    // наименьших единицах валюты счёта — те же `currency`/`currencyMinorUnits`,
+    // что у остальных сумм события. Нули — тарифа не было.
+    // `marketPrice` — рыночная цена закрытия ДО наценки (`price` — цена
+    // исполнения). Поля нет у сделок, закрытых до тарифов: цену мы не знаем.
+    data["commissionMinor"] = cents(deal.fees.commission);
+    data["markupMinor"] = cents(deal.fees.markup);
+    if let Some(m) = deal.fees.market_exit {
+        data["marketPrice"] = num(&decimal(m, deal.pd));
     }
     Envelope {
         // Ключ — счёт и номер сделки в его истории. Та же сделка, отданная на
@@ -928,6 +951,7 @@ mod tests {
             closed: Vec::new(),
             model: PositionModel::Hedging,
             leverage: None,
+            fees: Default::default(),
         }
     }
 
@@ -943,6 +967,7 @@ mod tests {
             qd: 5,
             level,
             across_gap: gap,
+            fees: Default::default(),
         }
     }
 
@@ -1299,6 +1324,7 @@ mod tests {
             sl: None,
             tp: None,
             leverage: 1,
+            fees: Default::default(),
         }];
         let evs = envelopes_for(&who(9), &before_empty(), &after, &[], &known);
         let e = evs

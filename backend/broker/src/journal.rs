@@ -47,8 +47,8 @@ use domain::account::{
 };
 
 use crate::{
-    margin_for, merged_entry, realized_on_close, AccountSnapshot, Cents, ClosedDeal, PendingOrder,
-    PosSide, Position, PositionModel,
+    margin_for, merged_entry, realized_on_close, AccountSnapshot, Cents, ClosedDeal, DealFees,
+    Fees, PendingOrder, PosSide, Position, PositionFees, PositionModel,
 };
 
 // ============================== Кто и почему ================================
@@ -369,6 +369,42 @@ pub enum EventKind {
         exec: Option<i64>,
         reason: RejectReason,
     },
+    /// Счёту назначен тариф для **новых** позиций (решение владельца 10.11):
+    /// наценка на спред и комиссия за сделку, в базисных пунктах.
+    ///
+    /// Как `LeverageSet`: ставки считает сайт (портфель, override), сюда
+    /// приезжают два числа и основание (`Origin::Operator`). Свёртка их
+    /// применяет, тариф лежит в слепке и сверяется. Открытые позиции запись
+    /// не трогает — их тариф снят при открытии.
+    FeesSet {
+        markup_bps: i64,
+        commission_bps: i64,
+    },
+    /// Наценка на исполнение по позиции `trade`: рыночная цена `mkt`,
+    /// исполнено по `exec`, разница на объёме — `amount` (доход площадки).
+    ///
+    /// Деньги отдельно не двигает: наценка уже внутри цены исполнения, и
+    /// остаток меняется через результат сделки. Запись нужна, чтобы наценку
+    /// было ВИДНО — «цена рынка против цены исполнения» и сумма, — и чтобы
+    /// свёртка отнесла её к сделке так же, как живой путь. Состояние
+    /// позиции (накопленную наценку) она меняет, поэтому применяется.
+    MarkupApplied {
+        trade: u64,
+        mkt: i64,
+        exec: i64,
+        amount: Cents,
+    },
+    /// Комиссия за исполнение по позиции `trade`, списана с остатка.
+    ///
+    /// Отдельной проводкой, а не вычетом из результата сделки: доход площадки
+    /// обязан складываться за период из записей, а не восстанавливаться
+    /// вычитанием. `waived` — часть, НЕ списанная защитой от минуса (комиссия
+    /// не уводит остаток ниже нуля); ноль — списана целиком.
+    CommissionCharged {
+        amount: Cents,
+        trade: u64,
+        waived: Cents,
+    },
 }
 
 /// Почему сработавший отложенный ордер не исполнен.
@@ -413,7 +449,10 @@ impl EventKind {
             | EventKind::DemoAccountReset { .. }
             | EventKind::TradingFreezeSet { .. }
             | EventKind::LeverageSet { .. }
-            | EventKind::PendingRejected { .. } => true,
+            | EventKind::PendingRejected { .. }
+            | EventKind::FeesSet { .. }
+            | EventKind::MarkupApplied { .. }
+            | EventKind::CommissionCharged { .. } => true,
             EventKind::HistoryExcludedFromReporting { .. } => false,
         }
     }
@@ -656,6 +695,21 @@ impl EventKind {
             EventKind::PendingRejected { id, exec, reason } => {
                 format!("pending_rejected id={id} exec={} reason={}", opt(*exec), reason.tag())
             }
+            EventKind::FeesSet { markup_bps, commission_bps } => {
+                format!("fees_set markup_bps={markup_bps} commission_bps={commission_bps}")
+            }
+            EventKind::MarkupApplied { trade, mkt, exec, amount } => {
+                format!("markup_applied trade={trade} mkt={mkt} exec={exec} amount={amount}")
+            }
+            // `waived` пишется только когда он есть: обычная комиссия — короткая
+            // строка, а ограниченная защитой видна сразу.
+            EventKind::CommissionCharged { amount, trade, waived } => {
+                if *waived == 0 {
+                    format!("commission_charged amount={amount} trade={trade}")
+                } else {
+                    format!("commission_charged amount={amount} trade={trade} waived={waived}")
+                }
+            }
         }
     }
 
@@ -777,6 +831,44 @@ impl EventKind {
                     _ => return Err(BadRecord("неизвестная причина отказа ордера")),
                 },
             },
+            "fees_set" => {
+                let bps = |key: &str| -> Result<i64, BadRecord> {
+                    match num::<i64>(&f, key)? {
+                        v if (0..=crate::MAX_FEE_BPS).contains(&v) => Ok(v),
+                        _ => Err(BadRecord("ставка тарифа записи вне 0..=MAX_FEE_BPS")),
+                    }
+                };
+                EventKind::FeesSet {
+                    markup_bps: bps("markup_bps")?,
+                    commission_bps: bps("commission_bps")?,
+                }
+            }
+            "markup_applied" => EventKind::MarkupApplied {
+                trade: num(&f, "trade")?,
+                mkt: num(&f, "mkt")?,
+                exec: num(&f, "exec")?,
+                amount: match num::<Cents>(&f, "amount")? {
+                    a if a >= 0 => a,
+                    _ => return Err(BadRecord("отрицательная наценка")),
+                },
+            },
+            "commission_charged" => {
+                let amount = num::<Cents>(&f, "amount")?;
+                let waived = match f.iter().find(|(k, _)| *k == "waived") {
+                    None => 0,
+                    Some((_, v)) => v
+                        .parse::<Cents>()
+                        .map_err(|_| BadRecord("поле записи не число"))?,
+                };
+                if amount < 0 || waived < 0 {
+                    return Err(BadRecord("отрицательная комиссия"));
+                }
+                EventKind::CommissionCharged {
+                    amount,
+                    trade: num(&f, "trade")?,
+                    waived,
+                }
+            }
             _ => return Err(BadRecord("неизвестный вид события")),
         })
     }
@@ -961,6 +1053,13 @@ pub struct ReplayState {
     /// Плечо счёта для новых позиций (`LeverageSet`). `None` — не назначали.
     /// В сверку со слепком входит: плечо счёта лежит в слепке брокера.
     pub leverage: Option<i128>,
+    /// Тариф счёта для новых позиций (`FeesSet`). Нули — не назначали.
+    /// В сверку входит. Новая позиция в свёртке получает ЭТОТ тариф снимком —
+    /// ровно тот, что был у счёта в момент её открытия на живом пути.
+    pub fees: Fees,
+    /// Рыночная цена последней наценки по позиции `(id, mkt)` — для
+    /// `market_exit` закрытия, которое идёт следом. Служебное.
+    last_mkt: Option<(u64, i64)>,
 }
 
 impl ReplayState {
@@ -978,6 +1077,8 @@ impl ReplayState {
             excluded_from_reporting_through: None,
             trading_frozen: false,
             leverage: None,
+            fees: Fees::default(),
+            last_mkt: None,
         }
     }
 
@@ -1027,6 +1128,36 @@ impl ReplayState {
             EventKind::DemoAccountReset { adjustment } => self.balance += *adjustment,
             EventKind::TradingFreezeSet { frozen } => self.trading_frozen = *frozen,
             EventKind::LeverageSet { lev } => self.leverage = Some(*lev),
+            EventKind::FeesSet {
+                markup_bps,
+                commission_bps,
+            } => {
+                self.fees = Fees {
+                    markup_bps: *markup_bps,
+                    commission_bps: *commission_bps,
+                }
+            }
+            // Наценка уже внутри цены исполнения, остаток она отдельно не
+            // двигает; здесь она только относится к позиции — так же, как на
+            // живом пути, — чтобы закрытие отнесло её к сделке.
+            EventKind::MarkupApplied {
+                trade, mkt, amount, ..
+            } => {
+                let Some(p) = self.pos_mut(*trade) else {
+                    self.orphans.push(*trade);
+                    return;
+                };
+                p.fees.markup += *amount;
+                self.last_mkt = Some((*trade, *mkt));
+            }
+            EventKind::CommissionCharged { amount, trade, .. } => {
+                self.balance -= *amount;
+                let Some(p) = self.pos_mut(*trade) else {
+                    self.orphans.push(*trade);
+                    return;
+                };
+                p.fees.commission += *amount;
+            }
             EventKind::Withdrawn { amount } => self.balance -= *amount,
             EventKind::PositionOpened {
                 id,
@@ -1057,7 +1188,12 @@ impl ReplayState {
                     margin: margin_for(*entry, *qty, *pd, *qd, *rec_lev, minor),
                     sl: *sl,
                     tp: *tp,
+                    // Тариф счёта на момент открытия — тот же снимок, что
+                    // делает живой путь: новая позиция всегда берёт тариф
+                    // счёта, а он в свёртке — последний `FeesSet` до неё.
+                    fees: PositionFees::snapshot(self.fees),
                 });
+                self.last_mkt = None;
             }
             EventKind::PositionIncreased {
                 id,
@@ -1066,6 +1202,7 @@ impl ReplayState {
                 sl,
                 tp,
             } => {
+                self.last_mkt = None;
                 let Some(p) = self.pos_mut(*id) else {
                     self.orphans.push(*id);
                     return;
@@ -1083,11 +1220,22 @@ impl ReplayState {
                 }
             }
             EventKind::PositionReduced { id, qty, exit } => {
+                let market_exit = match self.last_mkt.take() {
+                    Some((pid, m)) if pid == *id => Some(m),
+                    _ => Some(*exit),
+                };
                 let Some(p) = self.pos_mut(*id) else {
                     self.orphans.push(*id);
                     return;
                 };
                 let pnl = realized_on_close(p.side, p.entry, *exit, *qty, p.pd, p.qd, minor);
+                let fees = DealFees {
+                    commission: p.fees.commission,
+                    markup: p.fees.markup,
+                    market_exit,
+                };
+                p.fees.commission = 0;
+                p.fees.markup = 0;
                 let deal = ClosedDeal {
                     instrument: p.instrument,
                     side: p.side,
@@ -1103,6 +1251,7 @@ impl ReplayState {
                     // со слепком и сверка покраснеет на ровном месте.
                     level: None,
                     across_gap: Some(false),
+                    fees,
                 };
                 p.qty -= qty;
                 let left = p.qty;
@@ -1128,6 +1277,10 @@ impl ReplayState {
                 };
                 let p = self.positions.remove(i);
                 let pnl = realized_on_close(p.side, p.entry, *exit, p.qty, p.pd, p.qd, minor);
+                let market_exit = match self.last_mkt.take() {
+                    Some((pid, m)) if pid == *id => Some(m),
+                    _ => Some(*exit),
+                };
                 self.balance += pnl;
                 self.closed.push(ClosedDeal {
                     instrument: p.instrument,
@@ -1142,6 +1295,11 @@ impl ReplayState {
                     // не домысливаем: свёртка обязана дать то же, что живой путь.
                     level: *level,
                     across_gap: Some(*across_gap),
+                    fees: DealFees {
+                        commission: p.fees.commission,
+                        markup: p.fees.markup,
+                        market_exit,
+                    },
                 });
             }
             EventKind::PendingPlaced {
@@ -1510,6 +1668,12 @@ pub fn reconcile(state: &ReplayState, snap: &AccountSnapshot) -> Vec<Divergence>
             state.leverage, snap.leverage
         ));
     }
+    if state.fees != snap.fees {
+        d(format!(
+            "тариф счёта: по журналу {:?}, в слепке {:?}",
+            state.fees, snap.fees
+        ));
+    }
     for id in &state.orphans {
         d(format!(
             "событие журнала ссылается на неизвестную позицию или ордер {id}"
@@ -1543,6 +1707,12 @@ pub fn reconcile(state: &ReplayState, snap: &AccountSnapshot) -> Vec<Divergence>
                 d(format!(
                     "позиция {}: маржа по журналу {}, в слепке {}",
                     a.id, a.margin, b.margin
+                ));
+            }
+            if a.fees != b.fees {
+                d(format!(
+                    "позиция {}: тариф/доход площадки по журналу {:?}, в слепке {:?}",
+                    a.id, a.fees, b.fees
                 ));
             }
             if a.sl != b.sl || a.tp != b.tp {
@@ -1583,6 +1753,15 @@ pub fn reconcile(state: &ReplayState, snap: &AccountSnapshot) -> Vec<Divergence>
                     a.qty, a.entry, a.exit, a.pnl, b.qty, b.entry, b.exit, b.pnl
                 ));
             }
+            // Доход площадки со сделки — то, по чему сайт считает кешбэк и
+            // долю IB. Рыночная цена закрытия — свидетельство, не деньги, и в
+            // сверку не входит (у старых сделок её нет).
+            if a.fees.commission != b.fees.commission || a.fees.markup != b.fees.markup {
+                d(format!(
+                    "сделка {i}: комиссия/наценка по журналу {}/{}, в слепке {}/{}",
+                    a.fees.commission, a.fees.markup, b.fees.commission, b.fees.markup
+                ));
+            }
         }
     }
 
@@ -1606,7 +1785,8 @@ pub fn audit(journal: &Journal, snap: &AccountSnapshot) -> JournalStatus {
             && snap.pendings.is_empty()
             && snap.closed.is_empty()
             && snap.next_id == 0
-            && snap.leverage.is_none();
+            && snap.leverage.is_none()
+            && snap.fees.is_zero();
         return if fresh {
             JournalStatus::Reconciled
         } else {
@@ -2463,6 +2643,7 @@ mod tests {
             closed: s.closed.clone(),
             model: s.model,
             leverage: s.leverage,
+            fees: s.fees,
         }
     }
 
@@ -2533,6 +2714,7 @@ mod tests {
             closed: vec![],
             model: PositionModel::Hedging,
             leverage: None,
+            fees: Default::default(),
         };
         assert_eq!(audit(&j, &live), JournalStatus::NoEntries);
         assert_eq!(audit(&j, &live).tag(), "no_entries");

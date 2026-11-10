@@ -651,6 +651,7 @@ fn deal_error(e: broker::BrokerError) -> ApiErr {
         E::NotADemoAccount => err(StatusCode::CONFLICT, "not_a_demo_account"),
         E::AccountNotFlat => err(StatusCode::CONFLICT, "account_not_flat"),
         E::InvalidLeverage => err(StatusCode::BAD_REQUEST, "invalid_leverage"),
+        E::InvalidFees => err(StatusCode::BAD_REQUEST, "invalid_fees"),
     }
 }
 
@@ -1653,6 +1654,12 @@ struct ClosedDto {
     /// разрыва не было, то есть отвечал бы за прошлое, которого не видел.
     #[serde(skip_serializing_if = "Option::is_none")]
     across_gap: Option<bool>,
+    /// Вся комиссия сделки (открытие и закрытие), в наименьших единицах
+    /// валюты счёта (10.11). Ноль — тарифа не было.
+    commission: i128,
+    /// Рыночная цена закрытия до наценки. Поля нет у сделок до тарифов.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    market_exit: Option<i64>,
 }
 #[derive(Serialize)]
 struct AccountDto {
@@ -1704,6 +1711,11 @@ struct AccountDto {
     /// (`PLATFORM_LEVERAGE`). У открытых позиций плечо своё, записанное при
     /// открытии.
     leverage: i128,
+    /// Тариф для СЛЕДУЮЩЕЙ позиции (10.11): наценка на спред и комиссия от
+    /// нотионала, bps. Нули — без тарифа. Фронт показывает по ним «Комиссия ≈»
+    /// в тикете; открытые позиции держат свой тариф снимком.
+    markup_bps: i64,
+    commission_bps: i64,
     /// Торговля заморожена оператором: открытие, новые ордера и вывод
     /// отклоняются (`account_frozen`), закрытие и стоп-аут работают.
     trading_frozen: bool,
@@ -2096,8 +2108,21 @@ async fn open_deal(
             req.tp,
         )
         .map_err(deal_error)
+        .map(|id| {
+            // Цена входа — та, по которой ИСПОЛНЕНО (с наценкой тарифа), а
+            // не рыночная: позицию человек видит по ней же. У неттинга —
+            // средневзвешенный вход позиции после операции.
+            let exec = b
+                .positions(user)
+                .into_iter()
+                .find(|p| p.id == id)
+                .map(|p| p.entry)
+                .unwrap_or(entry);
+            (id, exec)
+        })
     })
     .await?;
+    let (id, entry) = id;
     Ok(Json(DealDto {
         id,
         instrument: req.instrument,
@@ -2237,6 +2262,8 @@ async fn list_closed(
             pnl: d.pnl,
             level: d.level,
             across_gap: d.across_gap,
+            commission: d.fees.commission,
+            market_exit: d.fees.market_exit,
             price_decimals: d.pd,
             qty_decimals: d.qd,
         })
@@ -2356,6 +2383,8 @@ async fn account(
             negative_balance_protection: b.negative_balance_protection(),
             open_pnl: None,
             leverage: b.account_leverage(user),
+            markup_bps: 0,
+            commission_bps: 0,
             trading_frozen: false,
             kind: kind.tag(),
             account_id,
@@ -2394,6 +2423,8 @@ async fn account(
         negative_balance_protection: b.negative_balance_protection(),
         open_pnl: Some(open_pnl),
         leverage: b.account_leverage(user),
+        markup_bps: b.account_fees(user).markup_bps,
+        commission_bps: b.account_fees(user).commission_bps,
         trading_frozen: frozen,
         kind: b.snapshot(user).profile.kind.tag(),
         account_id,
@@ -2561,6 +2592,7 @@ async fn session_create(
             )
         })?;
     sync_leverage_claim(&st, user, claims.leverage).await?;
+    sync_fees_claim(&st, user, claims.markup_bps, claims.commission_bps).await?;
     let expires_in = st
         .sso
         .mint(claims.jti.clone(), user, claims.tenant.clone())
@@ -2610,6 +2642,53 @@ async fn sync_leverage_claim(
             user.0, e.1 .0.error
         );
         return Err(err(StatusCode::SERVICE_UNAVAILABLE, "leverage_sync_failed"));
+    }
+    Ok(())
+}
+
+/// Тариф счёта из токена входа (решение владельца 10.11): кабинет кладёт в
+/// claims `markup_bps` / `commission_bps` итог портфеля / override клиента.
+/// Как с плечом: синхронизация при входе и продлении, основной путь — у
+/// админки (`.../fees`).
+///
+/// Нет обоих claim-ов — тариф не трогаем. Есть один — второй остаётся
+/// прежним (старый кабинет, знающий только одну ставку, не обнуляет другую).
+/// Вне `0..=MAX_FEE_BPS` — отказ входа (`400 invalid_fees`). Синхронизация не
+/// удалась — входа нет (fail-closed): торговать по тарифу, который сайт уже
+/// сменил, — значит считать доход площадки и кешбэк по чужим ставкам.
+async fn sync_fees_claim(
+    st: &AppState,
+    user: UserId,
+    markup: Option<i64>,
+    commission: Option<i64>,
+) -> Result<(), ApiErr> {
+    if markup.is_none() && commission.is_none() {
+        return Ok(());
+    }
+    let ok = |v: Option<i64>| v.is_none_or(|v| (0..=broker::MAX_FEE_BPS).contains(&v));
+    if !ok(markup) || !ok(commission) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid_fees"));
+    }
+    if st.quarantined.lock().await.contains(&user) {
+        return Ok(());
+    }
+    let current = st.broker.lock().await.account_fees(user);
+    let fees = broker::Fees {
+        markup_bps: markup.unwrap_or(current.markup_bps),
+        commission_bps: commission.unwrap_or(current.commission_bps),
+    };
+    let op = journal::Operator::new(
+        "cabinet-sso",
+        "тариф счёта из токена входа кабинета (портфель/override клиента)",
+        "sso-login",
+    )
+    .expect("поля заданы константами");
+    if let Err(e) = money::apply_fees(st, user, fees, op).await {
+        eprintln!(
+            "[sso] тариф счёта {} из токена не применён ({}): вход отклонён",
+            user.0, e.1 .0.error
+        );
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "fees_sync_failed"));
     }
     Ok(())
 }
@@ -3307,11 +3386,13 @@ mod invariant_wiring_tests {
                 sl: None,
                 tp: None,
                 leverage: 1,
+                fees: Default::default(),
             }],
             pendings: vec![],
             closed: vec![],
             model: broker::PositionModel::Hedging,
             leverage: None,
+            fees: Default::default(),
         }
     }
 

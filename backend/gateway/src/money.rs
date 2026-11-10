@@ -12,6 +12,7 @@
 //! * `POST /internal/sites/{tenant}/users/{sub}/real/withdraw`
 //! * `POST /internal/sites/{tenant}/users/{sub}/{demo|real}/trading-freeze`
 //! * `POST /internal/sites/{tenant}/users/{sub}/{demo|real}/leverage`
+//! * `POST /internal/sites/{tenant}/users/{sub}/{demo|real}/fees`
 //! * `GET  /internal/sites/{tenant}/users/{sub}/accounts`
 //!
 //! Человек адресуется той же парой, что и в SSO и на шине: сайт (`tenant`) и
@@ -113,6 +114,11 @@ pub(crate) fn routes() -> Router<AppState> {
         .route(
             "/internal/sites/:tenant/users/:sub/:kind/leverage",
             post(set_leverage),
+        )
+        // Тариф счёта (наценка и комиссия, 10.11) — на любом из двух.
+        .route(
+            "/internal/sites/:tenant/users/:sub/:kind/fees",
+            post(set_fees),
         )
         .route("/internal/sites/:tenant/users/:sub/accounts", get(accounts))
 }
@@ -771,6 +777,163 @@ async fn set_leverage(
         .into_response()
 }
 
+// ============================ Тариф счёта ===================================
+
+#[derive(Deserialize)]
+struct FeesReq {
+    /// Наценка на спред, целые базисные пункты `0..=MAX_FEE_BPS` (Standard).
+    markup_bps: i64,
+    /// Комиссия от нотионала сделки, целые bps `0..=MAX_FEE_BPS` (Pro / ENC Prime).
+    commission_bps: i64,
+    reason: String,
+    #[serde(alias = "initiator")]
+    operator: String,
+    /// Необязательная ссылка на дело на стороне сайта (заявка, запись журнала).
+    #[serde(default)]
+    external_ref: Option<String>,
+}
+
+/// Назначить счёту тариф одной записью журнала `FeesSet` (обычный путь
+/// мутации: инварианты, сверка, слепок и лента одной транзакцией).
+///
+/// Отдаёт `(тариф до, сменился ли)`. Счёт, которого ещё нет в памяти,
+/// заводится тем же путём, что первой операцией (TRM-46).
+pub(crate) async fn apply_fees(
+    st: &AppState,
+    user: UserId,
+    fees: broker::Fees,
+    operator: Operator,
+) -> Result<(broker::Fees, bool), super::ApiErr> {
+    with_account(st, user, Origin::Operator(operator), |b| {
+        let before = b.account_fees(user);
+        b.set_account_fees(user, fees)
+            .map(|changed| (before, changed))
+            .map_err(super::deal_error)
+    })
+    .await
+}
+
+/// `POST /internal/sites/{tenant}/users/{sub}/{kind}/fees`.
+///
+/// Тариф **для новых позиций** счёта (решение владельца 10.11): наценка на
+/// спред и комиссия за сделку. Открытые позиции закрываются по своему снимку.
+/// Повтор того же тарифа записи не пишет (`changed: false`) — маршрут
+/// идемпотентен по значению.
+///
+/// Счёт без маппинга личности — `404 account_not_opened`: тариф он получит
+/// claim-ами `markup_bps`/`commission_bps` при первом входе.
+async fn set_fees(
+    State(st): State<AppState>,
+    Path((tenant, sub, kind)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    body: Result<Json<FeesReq>, JsonRejection>,
+) -> Response {
+    if let Err(r) = authorize(&st, &headers) {
+        return *r;
+    }
+    let Some(kind) = AccountKind::parse(&kind) else {
+        return fail(StatusCode::NOT_FOUND, "unknown_account_kind", None);
+    };
+    let req = match body {
+        Ok(Json(r)) => r,
+        Err(rej) => {
+            return fail(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                Some(rej.body_text()),
+            )
+        }
+    };
+    let fees = broker::Fees {
+        markup_bps: req.markup_bps,
+        commission_bps: req.commission_bps,
+    };
+    if fees.validate().is_err() {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "invalid_fees",
+            Some(format!(
+                "markup_bps и commission_bps — целые от 0 до {}",
+                broker::MAX_FEE_BPS
+            )),
+        );
+    }
+    if req.operator.trim().is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "missing_operator", None);
+    }
+    if req.reason.trim().is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "missing_reason", None);
+    }
+    let incident = match req.external_ref.as_deref().map(str::trim) {
+        Some(r) if r.len() > MAX_REF_LEN => {
+            return fail(StatusCode::BAD_REQUEST, "invalid_external_ref", None)
+        }
+        Some(r) if !r.is_empty() => format!("{REF_PREFIX}{r}"),
+        _ => "fees".to_string(),
+    };
+    let operator = match Operator::new(&req.operator, &req.reason, &incident) {
+        Ok(o) => o,
+        Err(e) => return fail(StatusCode::BAD_REQUEST, "bad_request", Some(e.to_string())),
+    };
+    let (tenant, sub) = (tenant.trim().to_string(), sub.trim().to_string());
+    if tenant.is_empty() || sub.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "bad_account", None);
+    }
+    let user = match st.store.find_account(&tenant, &sub, kind).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return fail(StatusCode::NOT_FOUND, "account_not_opened", None),
+        Err(e) => {
+            eprintln!(
+                "[money] счёт {tenant}/{sub}/{} не разрешён: {e}",
+                kind.tag()
+            );
+            return fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity_store_unavailable",
+                None,
+            );
+        }
+    };
+
+    let (previous, changed) = match apply_fees(&st, user, fees, operator).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let seq = st
+        .journals
+        .lock()
+        .await
+        .get(&user)
+        .and_then(|j| j.events().last())
+        .map(|e| e.seq())
+        .unwrap_or(0);
+    if changed {
+        println!(
+            "[money] тариф счёта {} ({tenant}/{sub}/{}) наценка {}→{} bps, комиссия {}→{} bps оператором {}: {}",
+            user.0,
+            kind.tag(),
+            previous.markup_bps,
+            fees.markup_bps,
+            previous.commission_bps,
+            fees.commission_bps,
+            req.operator.trim(),
+            req.reason.trim()
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "tenant": tenant, "sub": sub, "account_kind": kind.tag(),
+            "account_id": bus::account_uuid(&tenant, &sub, kind),
+            "markup_bps": fees.markup_bps, "commission_bps": fees.commission_bps,
+            "previous_markup_bps": previous.markup_bps,
+            "previous_commission_bps": previous.commission_bps,
+            "changed": changed, "seq": seq,
+        })),
+    )
+        .into_response()
+}
+
 // ============================ Список счетов =================================
 
 /// `GET /internal/sites/{tenant}/users/{sub}/accounts` — счета человека.
@@ -819,6 +982,9 @@ async fn accounts(
             // или, если не назначали, плечо площадки.
             "leverage": b.account_leverage(user),
             "leverage_assigned": b.assigned_leverage(user).is_some(),
+            // Тариф для НОВЫХ позиций (10.11): нули — без тарифа.
+            "markup_bps": b.account_fees(user).markup_bps,
+            "commission_bps": b.account_fees(user).commission_bps,
         }));
     }
     (
@@ -2134,5 +2300,442 @@ mod tests {
         let c: sso::Claims =
             serde_json::from_str(r#"{"sub":"u","tenant":"t","jti":"j","leverage":20}"#).unwrap();
         assert_eq!(c.leverage, Some(20));
+    }
+
+    // ---- Тариф счёта: наценка и комиссия (решение 10.11) --------------------
+
+    fn fees_uri(kind: &str) -> String {
+        format!("/internal/sites/{TENANT}/users/{SUB}/{kind}/fees")
+    }
+
+    fn fees_body(markup: serde_json::Value, commission: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "markup_bps": markup,
+            "commission_bps": commission,
+            "reason": "портфель Pro: комиссия 10 bps",
+            "operator": "risk@site",
+            "external_ref": "adm-fees-7"
+        })
+    }
+
+    #[tokio::test]
+    async fn the_fees_route_is_behind_the_secret_and_validates() {
+        let app = router(state(None));
+        let (s, _) = call(
+            &app,
+            &fees_uri("real"),
+            Some(TOKEN),
+            fees_body(1.into(), 1.into()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "без секрета маршрута нет");
+
+        let st = state(Some(TOKEN));
+        let app = router(st.clone());
+        let (s, _) = call(&app, &fees_uri("real"), None, fees_body(1.into(), 1.into())).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        let (s, _) = call(
+            &app,
+            &fees_uri("real"),
+            Some("nope"),
+            fees_body(1.into(), 1.into()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+
+        let (s, _) = call(&app, &uri("deposit"), Some(TOKEN), body(1, "seed-f")).await;
+        assert_eq!(s, StatusCode::OK);
+
+        for (m, c) in [(-1, 0), (0, -1), (501, 0), (0, 501)] {
+            let (s, v) = call(
+                &app,
+                &fees_uri("real"),
+                Some(TOKEN),
+                fees_body(m.into(), c.into()),
+            )
+            .await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{m}/{c}: {v}");
+            assert_eq!(v["error"], "invalid_fees", "{m}/{c}");
+        }
+        let (s, v) = call(
+            &app,
+            &fees_uri("real"),
+            Some(TOKEN),
+            fees_body("5".into(), 0.into()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "строка — не ставка: {v}");
+        let (s, v) = call(
+            &app,
+            &fees_uri("real"),
+            Some(TOKEN),
+            fees_body(0.into(), 2.5.into()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "дробь — не bps: {v}");
+        let (s, v) = call(
+            &app,
+            &fees_uri("real"),
+            Some(TOKEN),
+            serde_json::json!({"markup_bps": 1, "reason": "r", "operator": "x"}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "обе ставки обязательны: {v}");
+        let (s, v) = call(
+            &app,
+            &fees_uri("real"),
+            Some(TOKEN),
+            serde_json::json!({"markup_bps": 1, "commission_bps": 1, "reason": " ", "operator": "x"}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"], "missing_reason");
+        let (s, v) = call(
+            &app,
+            &fees_uri("real"),
+            Some(TOKEN),
+            serde_json::json!({"markup_bps": 1, "commission_bps": 1, "reason": "r", "operator": ""}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"], "missing_operator");
+        let (s, _) = call(
+            &app,
+            &fees_uri("gold"),
+            Some(TOKEN),
+            fees_body(1.into(), 1.into()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "неизвестный род счёта");
+        assert_eq!(
+            st.broker.lock().await.account_fees(DEFAULT_USER),
+            broker::Fees::default(),
+            "ни один отказ ничего не записал"
+        );
+        let (s, v) = call(
+            &app,
+            &fees_uri("demo"),
+            Some(TOKEN),
+            fees_body(1.into(), 1.into()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+        assert_eq!(v["error"], "account_not_opened");
+    }
+
+    /// Тариф из маршрута: журналируется с оператором, повтор не пишет, виден
+    /// в `/account` и в списке счетов; новая позиция исполняется с наценкой
+    /// и платит комиссию на открытии и закрытии; старая — по своему снимку;
+    /// событие сделки на шине несёт доход площадки; рестарт сходится.
+    #[tokio::test]
+    async fn fees_reach_new_trades_and_the_bus_and_survive_a_restart() {
+        let store = linked();
+        let st = state_with(store.clone(), Some(TOKEN));
+        restore_state(&st).await.unwrap();
+        let app = router(st.clone());
+        let px: i64 = 5_000_000;
+        price(&st, 1, px).await;
+        let (s, _) = call(
+            &app,
+            &uri("deposit"),
+            Some(TOKEN),
+            body(100_000_000, "seed-fe"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let fi = feed_by_id(&st, 1).unwrap();
+        let (pd, qd) = (fi.price_decimals, fi.qty_decimals);
+
+        // Позиция ДО тарифа — без наценки и комиссии.
+        let (s, v) = send(&app, "POST", "/deals", deal(None)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let old = v["id"].as_u64().unwrap();
+        assert_eq!(v["entry"], px, "без тарифа — рыночная цена");
+
+        let (s, v) = call(
+            &app,
+            &fees_uri("real"),
+            Some(TOKEN),
+            fees_body(10.into(), 10.into()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["changed"], true);
+        assert_eq!(v["markup_bps"], 10);
+        assert_eq!(v["commission_bps"], 10);
+        assert_eq!(v["previous_markup_bps"], 0);
+        let seq = v["seq"].clone();
+        let (s, v) = call(
+            &app,
+            &fees_uri("real"),
+            Some(TOKEN),
+            fees_body(10.into(), 10.into()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["changed"], false, "повтор — без записи");
+        assert_eq!(v["seq"], seq);
+
+        let (_, acc) = send(&app, "GET", "/account", serde_json::Value::Null).await;
+        assert_eq!(acc["markup_bps"], 10, "{acc}");
+        assert_eq!(acc["commission_bps"], 10, "{acc}");
+
+        let balance_before = st.broker.lock().await.balance(DEFAULT_USER).unwrap();
+        let (s, v) = send(&app, "POST", "/deals", deal(None)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let new = v["id"].as_u64().unwrap();
+        let exec_in = broker::apply_markup(true, px, 10);
+        assert_eq!(v["entry"], exec_in, "покупка дороже ask на наценку");
+        let open_fee = broker::commission_for(exec_in, 1000, pd, qd, 10, 100);
+        assert!(open_fee > 0);
+        assert_eq!(
+            st.broker.lock().await.balance(DEFAULT_USER),
+            Some(balance_before - open_fee),
+            "комиссия открытия списана"
+        );
+        {
+            let js = st.journals.lock().await;
+            let e = js[&DEFAULT_USER]
+                .events()
+                .iter()
+                .find(|e| matches!(e.kind(), journal::EventKind::FeesSet { .. }))
+                .expect("запись о тарифе");
+            let op = e.origin().operator().unwrap();
+            assert_eq!(op.who(), "risk@site");
+            assert_eq!(op.incident(), "ext:adm-fees-7");
+            assert_eq!(e.canon(), "fees_set markup_bps=10 commission_bps=10");
+        }
+
+        // Закрытие обеих: старая — без тарифа (снимок), новая — с наценкой
+        // и комиссией закрытия.
+        let (s, _) = send(
+            &app,
+            "POST",
+            &format!("/deals/{old}/close"),
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _) = send(
+            &app,
+            "POST",
+            &format!("/deals/{new}/close"),
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let exec_out = broker::apply_markup(false, px, 10);
+        let close_fee = broker::commission_for(exec_out, 1000, pd, qd, 10, 100);
+
+        let (_, closed) = send(&app, "GET", "/deals/closed", serde_json::Value::Null).await;
+        let closed = closed.as_array().unwrap().clone();
+        // Ответ — от новых к старым.
+        assert_eq!(closed[0]["exit"], exec_out, "продажа дешевле рынка");
+        assert_eq!(
+            closed[0]["commission"],
+            (open_fee + close_fee) as i64,
+            "{}",
+            closed[0]
+        );
+        assert_eq!(closed[0]["market_exit"], px);
+        assert_eq!(
+            closed[1]["exit"], px,
+            "старая — по своему (нулевому) тарифу"
+        );
+        assert_eq!(closed[1]["commission"], 0);
+
+        let trades: Vec<serde_json::Value> = queued(&st)
+            .await
+            .into_iter()
+            .filter(|e| e["event"] == bus::EV_TRADE_EXECUTED)
+            .collect();
+        assert_eq!(trades.len(), 2, "{trades:?}");
+        let t_old = &trades[0]["data"];
+        assert_eq!(t_old["commissionMinor"], 0);
+        assert_eq!(t_old["markupMinor"], 0);
+        let t = &trades[1]["data"];
+        assert_eq!(t["commissionMinor"], (open_fee + close_fee) as i64, "{t}");
+        let mk = broker::markup_amount(px, exec_in, 1000, pd, qd, 100)
+            + broker::markup_amount(px, exec_out, 1000, pd, qd, 100);
+        assert_eq!(t["markupMinor"], mk as i64, "{t}");
+        assert_eq!(
+            t["marketPrice"],
+            serde_json::from_str::<serde_json::Value>(&bus::decimal(px, pd)).unwrap()
+        );
+        assert_eq!(
+            t["price"],
+            serde_json::from_str::<serde_json::Value>(&bus::decimal(exec_out, pd)).unwrap(),
+            "price — цена исполнения"
+        );
+        assert_eq!(t["currency"], "USD");
+        assert_eq!(t["currencyMinorUnits"], 2);
+
+        // Рестарт: лента и слепок из того же хранилища — сверка сходится.
+        let st2 = state_with(store, Some(TOKEN));
+        restore_state(&st2).await.unwrap();
+        assert!(st2.quarantined.lock().await.is_empty(), "сверка сошлась");
+        assert_eq!(
+            st2.broker.lock().await.account_fees(DEFAULT_USER),
+            broker::Fees {
+                markup_bps: 10,
+                commission_bps: 10
+            }
+        );
+        let (s, v) = get(&router(st2.clone()), &accounts_uri(), Some(TOKEN)).await;
+        assert_eq!(s, StatusCode::OK);
+        let real = v["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["account_kind"] == "real")
+            .expect("реальный счёт в списке")
+            .clone();
+        assert_eq!(real["markup_bps"], 10, "{real}");
+        assert_eq!(real["commission_bps"], 10, "{real}");
+    }
+
+    /// Комиссия открытия двигает остаток — событие баланса уходит с причиной
+    /// `trade`, а не без причины.
+    #[tokio::test]
+    async fn an_opening_commission_is_a_trade_balance_change() {
+        let st = state(Some(TOKEN));
+        let app = router(st.clone());
+        price(&st, 1, 5_000_000).await;
+        let (s, _) = call(
+            &app,
+            &uri("deposit"),
+            Some(TOKEN),
+            body(100_000_000, "seed-fb"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _) = call(
+            &app,
+            &fees_uri("real"),
+            Some(TOKEN),
+            fees_body(0.into(), 10.into()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, v) = send(&app, "POST", "/deals", deal(None)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let all = queued(&st).await;
+        let last = *balance_changes(&all).last().expect("событие баланса");
+        assert_eq!(last["data"]["balanceMinor"], 100_000_000 - 50, "{last}");
+        assert_eq!(last["data"]["reason"], "trade", "{last}");
+    }
+
+    /// Claims тарифа токена входа: применяются записью журнала, повтор молчит,
+    /// вне диапазона — отказ входа, один claim не трогает другую ставку.
+    #[tokio::test]
+    async fn the_sso_fee_claims_sync_the_account() {
+        let st = state(Some(TOKEN));
+        let user = st
+            .store
+            .resolve_account(TENANT, SUB, AccountKind::Demo)
+            .await
+            .unwrap();
+        sync_fees_claim(&st, user, None, None).await.unwrap();
+        assert!(
+            !st.broker.lock().await.has_account(user),
+            "без claim-ов ничего"
+        );
+
+        sync_fees_claim(&st, user, Some(15), Some(0)).await.unwrap();
+        let f = |m, c| broker::Fees {
+            markup_bps: m,
+            commission_bps: c,
+        };
+        assert_eq!(st.broker.lock().await.account_fees(user), f(15, 0));
+        let n = st.journals.lock().await[&user].len();
+        sync_fees_claim(&st, user, Some(15), Some(0)).await.unwrap();
+        assert_eq!(st.journals.lock().await[&user].len(), n, "повтор не пишет");
+
+        sync_fees_claim(&st, user, None, Some(7)).await.unwrap();
+        assert_eq!(
+            st.broker.lock().await.account_fees(user),
+            f(15, 7),
+            "один claim — вторая ставка прежняя"
+        );
+        for (m, c) in [(Some(501), None), (None, Some(-1))] {
+            let e = sync_fees_claim(&st, user, m, c).await.unwrap_err();
+            assert_eq!(e.0, StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(st.broker.lock().await.account_fees(user), f(15, 7));
+        let js = st.journals.lock().await;
+        let op = js[&user]
+            .events()
+            .iter()
+            .find(|e| matches!(e.kind(), journal::EventKind::FeesSet { .. }))
+            .and_then(|e| e.origin().operator().cloned())
+            .expect("запись с основанием");
+        assert_eq!(op.who(), "cabinet-sso");
+    }
+
+    #[test]
+    fn the_fee_claims_are_optional() {
+        let c: sso::Claims = serde_json::from_str(r#"{"sub":"u","tenant":"t","jti":"j"}"#).unwrap();
+        assert_eq!((c.markup_bps, c.commission_bps), (None, None));
+        let c: sso::Claims = serde_json::from_str(
+            r#"{"sub":"u","tenant":"t","jti":"j","markup_bps":12,"commission_bps":3}"#,
+        )
+        .unwrap();
+        assert_eq!((c.markup_bps, c.commission_bps), (Some(12), Some(3)));
+    }
+
+    /// Монитор: отложенный ордер исполняется с наценкой и комиссией тарифа,
+    /// стоп-лосс закрывает с комиссией — записями системы, сверка сходится.
+    #[tokio::test]
+    async fn the_monitor_charges_fees_on_pending_fill_and_stop_loss() {
+        let st = state(Some(TOKEN));
+        let app = router(st.clone());
+        price(&st, 1, 5_000_000).await;
+        let (s, _) = call(
+            &app,
+            &uri("deposit"),
+            Some(TOKEN),
+            body(100_000_000, "seed-fm"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _) = call(
+            &app,
+            &fees_uri("real"),
+            Some(TOKEN),
+            fees_body(10.into(), 10.into()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let pending = serde_json::json!({"instrument":1,"side":"buy","qty":1000,"price":4_900_000,"sl":4_700_000});
+        let (s, v) = send(&app, "POST", "/pending", pending).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+
+        price(&st, 1, 4_800_000).await;
+        monitor_tick(&st).await;
+        let id = {
+            let b = st.broker.lock().await;
+            let p = b.positions(DEFAULT_USER);
+            assert_eq!(p.len(), 1, "ордер исполнен");
+            assert_eq!(p[0].entry, broker::apply_markup(true, 4_800_000, 10));
+            assert!(p[0].fees.commission > 0, "комиссия открытия");
+            p[0].id
+        };
+        price(&st, 1, 4_650_000).await;
+        monitor_tick(&st).await;
+        assert!(st.broker.lock().await.positions(DEFAULT_USER).is_empty());
+        {
+            let js = st.journals.lock().await;
+            let charged: Vec<_> = js[&DEFAULT_USER]
+                .events()
+                .iter()
+                .filter(|e| {
+                    matches!(e.kind(), journal::EventKind::CommissionCharged { trade, .. } if *trade == id)
+                })
+                .map(|e| e.origin().clone())
+                .collect();
+            assert_eq!(charged.len(), 2, "открытие и стоп-лосс");
+            assert!(charged.iter().all(|o| o == &journal::Origin::System));
+        }
+        assert!(st.quarantined.lock().await.is_empty(), "сверка сошлась");
     }
 }

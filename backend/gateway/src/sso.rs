@@ -40,6 +40,13 @@ pub struct Claims {
     /// входом не меняется.
     #[serde(default)]
     pub leverage: Option<i64>,
+    /// Наценка на спред счёта, bps (решение 10.11): итог портфеля / override
+    /// клиента на момент выпуска. Нет claim-а — наценка входом не меняется.
+    #[serde(default)]
+    pub markup_bps: Option<i64>,
+    /// Комиссия за сделку счёта, bps. Нет claim-а — комиссия не меняется.
+    #[serde(default)]
+    pub commission_bps: Option<i64>,
 }
 
 /// Ошибка входа. Наверх маппится в HTTP-код (см. `code()`).
