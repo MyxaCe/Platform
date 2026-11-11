@@ -84,6 +84,10 @@ services:
       # поведение: Сейшелы её не требуют, мы её даём по своему выбору, и выбор
       # обязан быть переключаемым. Умолчание в коде — выключено.
       NEGATIVE_BALANCE_PROTECTION: ${NEGATIVE_BALANCE_PROTECTION:-1}
+      # Минимальное расстояние SL/TP от цены, bps (10 = 0.1 %), для площадок,
+      # которым сайт ещё не назначил своё (PUT /internal/sites/{tenant}/settings/stops).
+      # 0 — ограничения нет.
+      MIN_STOP_BPS: ${MIN_STOP_BPS:-0}
       BUS_URL: ${BUS_URL:-}
       BUS_EXCHANGE: ${BUS_EXCHANGE:-platform.events}
     extra_hosts:

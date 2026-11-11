@@ -19,6 +19,8 @@ pub mod jurisdiction;
 /// Внутренние денежные ручки: пополнение и вывод от имени сайта (демо-деньги).
 mod money;
 mod sso;
+/// Минимальное расстояние SL/TP от цены — настройка площадки (сайта).
+mod stops;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -165,6 +167,8 @@ pub struct AppState {
     /// события реальных счетов не собираются вовсе; деньги реального счёта
     /// сайт видит в ответах внутренних ручек и в `GET .../accounts`.
     bus_real_events: bool,
+    /// Минимальное расстояние стопов по площадкам (`settings/stops`, `MIN_STOP_BPS`).
+    stops: Arc<stops::StopSettings>,
 }
 
 pub fn build_state() -> AppState {
@@ -346,6 +350,7 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         money_lock: Arc::new(Mutex::new(())),
         real_trading_enabled,
         bus_real_events,
+        stops: stops::from_env(),
     }
 }
 
@@ -423,6 +428,9 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
     // «журнала нет»: недоступное хранилище и пустая лента — разные беды, и сервис,
     // который их путает, стартует на выдуманной истории (TRM-13).
     let loaded = st.store.load_all().await?;
+    // Настройки площадок — не счета, но и без них стартовать нельзя: торговля
+    // шла бы по умолчанию окружения, а не по тому, что назначил сайт.
+    st.stops.load(st.store.load_site_min_stops().await?).await;
     let accounts_n = loaded.accounts.len();
     let start_balance = st.broker.lock().await.start_balance();
     {
@@ -630,6 +638,33 @@ fn demo_start_from_env(raw: Option<&str>) -> i128 {
             }
         },
     }
+}
+
+/// Отказ «стоп ближе минимума площадки» — `422` с числами (см. [`stops`]).
+fn stops_err(e: stops::TooClose, price_decimals: u8) -> ApiErr {
+    let scale = 10f64.powi(i32::from(price_decimals));
+    let fmt = |v: i64| format!("{:.*}", usize::from(price_decimals), v as f64 / scale);
+    let what = if e.code == "stop_loss_too_close" {
+        "stop loss"
+    } else {
+        "take profit"
+    };
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(ErrResp {
+            error: e.code.to_string(),
+            extra: Some(serde_json::json!({
+                "detail": format!(
+                    "{what} is closer than the minimum distance of {} bps ({}) from {}; nearest allowed level is {}",
+                    e.min_stop_bps, fmt(e.min_distance), fmt(e.reference), fmt(e.limit)
+                ),
+                "min_stop_bps": e.min_stop_bps,
+                "min_distance": e.min_distance,
+                "limit": e.limit,
+                "reference": e.reference,
+            })),
+        }),
+    )
 }
 
 /// Отказ брокера — в код границы, СВОИМ именем (TRM-57, КОНТРАКТЫ §4б).
@@ -1548,6 +1583,7 @@ pub fn router(state: AppState) -> Router {
         // Внутренние денежные ручки. Наружу не публикуются: nginx терминала
         // проксирует только явный список префиксов и `/internal` закрывает сам.
         .merge(money::routes())
+        .merge(stops::routes())
         .with_state(state)
 }
 
@@ -1556,6 +1592,11 @@ pub fn router(state: AppState) -> Router {
 #[derive(Serialize, Debug)]
 struct ErrResp {
     error: String,
+    /// Подробности отказа для человека и числа, по которым он правит поле.
+    /// Есть только у отказов, которым есть что сказать (минимум стопов);
+    /// у остальных поля в ответе нет вовсе — форма прежних отказов не меняется.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    extra: Option<serde_json::Value>,
 }
 type ApiErr = (StatusCode, Json<ErrResp>);
 fn err(code: StatusCode, msg: &str) -> ApiErr {
@@ -1563,6 +1604,7 @@ fn err(code: StatusCode, msg: &str) -> ApiErr {
         code,
         Json(ErrResp {
             error: msg.to_string(),
+            extra: None,
         }),
     )
 }
@@ -1725,6 +1767,10 @@ struct AccountDto {
     /// счёт не привязан к сайту (автономный терминал).
     #[serde(skip_serializing_if = "Option::is_none")]
     account_id: Option<String>,
+    /// Минимальное расстояние SL/TP от цены, bps (настройка площадки,
+    /// `settings/stops`). `0` — ограничения нет. Тикет подставляет уровни по
+    /// нему, а шлюз отказывает в более близких (`422 *_too_close`).
+    min_stop_bps: i64,
 }
 #[derive(Serialize)]
 struct InstrumentDto {
@@ -2098,6 +2144,11 @@ async fn open_deal(
             t.last,
         )
     };
+    // Минимум стопов площадки — граница, а не подсказка фронта. Отсчёт — от
+    // рыночной цены стороны сделки: её же видит человек в тикете.
+    let min_bps = st.stops.for_tenant(who.tenant.as_deref()).await;
+    stops::check(side, entry, req.sl, req.tp, min_bps)
+        .map_err(|e| stops_err(e, fi.price_decimals))?;
     // Текущие цены нужны допуску: свободная маржа считается через equity, то
     // есть с учётом нереализованного результата уже открытых позиций (TRM-41).
     // Снимаются ДО лока счёта: тикеры живут под своим локом, и брать два лока
@@ -2169,6 +2220,10 @@ async fn place_pending(
     }
     let fi = feed_by_id(&st, req.instrument)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
+    // У лимитного ордера вход — цена ордера: от неё и отсчитывается минимум.
+    let min_bps = st.stops.for_tenant(who.tenant.as_deref()).await;
+    stops::check(side, req.price, req.sl, req.tp, min_bps)
+        .map_err(|e| stops_err(e, fi.price_decimals))?;
     let id = with_account_gated(&st, user, Origin::Client, Gate::NotFrozen, |b| {
         b.place_pending(
             user,
@@ -2358,7 +2413,10 @@ async fn account(
     State(st): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<AccountDto>, ApiErr> {
-    let user = require_user(&st, &headers).await?;
+    let who = require_principal(&st, &headers).await?;
+    let user = who.user;
+    // Минимум стопов площадки — свойство сайта, известное и до заведения счёта.
+    let min_stop_bps = st.stops.for_tenant(who.tenant.as_deref()).await;
     let m = marks(&st).await;
     // До лока брокера: журналы и брокер вложенно не берём.
     let frozen = trading_frozen(&st, user).await;
@@ -2397,6 +2455,7 @@ async fn account(
             trading_frozen: false,
             kind: kind.tag(),
             account_id,
+            min_stop_bps,
         }));
     }
 
@@ -2437,6 +2496,7 @@ async fn account(
         trading_frozen: frozen,
         kind: b.snapshot(user).profile.kind.tag(),
         account_id,
+        min_stop_bps,
     }))
 }
 

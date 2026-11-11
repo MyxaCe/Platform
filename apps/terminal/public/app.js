@@ -1,7 +1,7 @@
 'use strict';
 
 // ============================ State ========================================
-let META = {}, selected = null, tf = 3600, orderMode = 'market';
+let META = {}, selected = null, tf = 3600, orderMode = 'market', orderSide = 'buy';
 let chartType = 'candles', priceType = 'mid', showPips = false, showSLTP = true, sizeUnit = 'lot';
 // MA 7/25/99 включены по умолчанию — привычная раскладка профессионального
 // терминала; остальное включает человек.
@@ -55,6 +55,7 @@ const ICONS = {
   caret: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6l4 4 4-4"/></svg>',
   reset: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M12.5 8a4.5 4.5 0 1 1-1.3-3.2"/><path d="M12.5 2.5V5H10"/></svg>',
   fullscreen: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>',
+  fullscreenExit: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M6 2v4H2M10 2v4h4M6 14v-4H2M10 14v-4h4"/></svg>',
   settings: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.6v1.8M8 12.6v1.8M1.6 8h1.8M12.6 8h1.8M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>',
 };
 function renderIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { const n = /** @type {HTMLElement} */ (el).dataset.icon; if (ICONS[n]) el.innerHTML = ICONS[n]; }); }
@@ -348,6 +349,7 @@ function updateDealPanel() {
   document.getElementById('priceUnit').textContent = quote;
   if (orderMode === 'limit' && !/** @type {HTMLInputElement} */ (document.getElementById('price')).value && ref != null) /** @type {HTMLInputElement} */ (document.getElementById('price')).value = (ref / pscale(it.id)).toFixed(pdec(it.id));
   updateSizeEq();
+  refreshStops();
   renderInstrumentHeader(it);
 }
 
@@ -517,7 +519,7 @@ const watchlist = Watchlist.mount(document.querySelector('.watch'), {
   title: '',
   t: wT,
 });
-async function selectInstrument(id) { selected = id; watchlist.setActive(id); /** @type {HTMLInputElement} */ (document.getElementById('price')).value = ''; /** @type {HTMLInputElement} */ (document.getElementById('sl')).value = ''; /** @type {HTMLInputElement} */ (document.getElementById('tp')).value = ''; await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.reset(); book.refresh(); stats.refresh(); trades.clearTape(); trades.refreshMine(); }
+async function selectInstrument(id) { selected = id; watchlist.setActive(id); /** @type {HTMLInputElement} */ (document.getElementById('price')).value = ''; resetStops(); await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.reset(); book.refresh(); stats.refresh(); trades.clearTape(); trades.refreshMine(); }
 document.getElementById('tfs').addEventListener('click', (e) => { const btn = /** @type {Element} */ (e.target).closest('button'); if (!btn) return; tf = +btn.dataset.tf; document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
 
 // ============================ Toolbar (dropdowns) ==========================
@@ -556,7 +558,56 @@ function resetChart() {
   const n = rawCandles.length; if (n) chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 });
 }
 document.getElementById('resetBtn').addEventListener('click', resetChart);
-document.getElementById('fullBtn').addEventListener('click', () => { const cw = document.querySelector('.chartwrap'); if (document.fullscreenElement) document.exitFullscreen(); else cw.requestFullscreen?.(); });
+// ---- График на весь экран ---------------------------------------------------
+// Разворачивается ВСЯ секция графика (тулбар + график + статистика), а не одна
+// область рисования: прежде во весь экран уходил только `.chartwrap`, и кнопки
+// выхода на экране не оставалось.
+//
+// Почему «не открывался». Терминал встраивается в кабинет фреймом с другого
+// origin, а там Fullscreen API закрыт, пока родитель не дал `allow="fullscreen"`:
+// `document.fullscreenEnabled === false`, `requestFullscreen()` отказывает — и
+// прежний обработчик молча глотал отказ (`?.()` без `catch`). Теперь при
+// закрытом API график разворачивается на всё окно терминала (фиксированный
+// слой поверх раскладки); выход — той же кнопкой или Esc в обоих режимах.
+const chartSection = /** @type {HTMLElement} */ (document.querySelector('.center'));
+const isChartMax = () => document.fullscreenElement === chartSection || chartSection.classList.contains('is-max');
+function syncFullBtn() {
+  const on = isChartMax();
+  const b = document.getElementById('fullBtn');
+  b.classList.toggle('on', on);
+  const key = on ? 'tb.fullExit' : 'tb.full';
+  b.dataset.i18nTip = key; b.dataset.tip = T(key);
+  b.setAttribute('aria-pressed', String(on));
+  const ic = /** @type {HTMLElement} */ (b.querySelector('.ic'));
+  if (ic) { ic.dataset.icon = on ? 'fullscreenExit' : 'fullscreen'; ic.innerHTML = ICONS[ic.dataset.icon]; }
+  document.body.classList.toggle('chart-max', on);
+  // Размер графика подхватит ResizeObserver; явный вызов — на случай, если
+  // браузер сменил размер без события на самом узле.
+  requestAnimationFrame(() => chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight }));
+}
+/** @param {boolean} on */
+function setChartMax(on) {
+  if (on === isChartMax()) return;
+  if (!on) {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    chartSection.classList.remove('is-max');
+    syncFullBtn();
+    return;
+  }
+  const fallback = () => { chartSection.classList.add('is-max'); syncFullBtn(); };
+  if (document.fullscreenEnabled && chartSection.requestFullscreen) {
+    chartSection.requestFullscreen().then(syncFullBtn, fallback);
+  } else fallback();
+}
+document.getElementById('fullBtn').addEventListener('click', () => setChartMax(!isChartMax()));
+document.addEventListener('fullscreenchange', syncFullBtn);
+// Esc в настоящем полноэкранном режиме закрывает его сам браузер (и шлёт
+// fullscreenchange); в запасном режиме Esc — наш. Он же закрывает список пар.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (chartSection.classList.contains('is-max')) { chartSection.classList.remove('is-max'); syncFullBtn(); }
+  document.body.classList.remove('m-watch');
+});
 document.getElementById('setBtn').addEventListener('click', () => toggleDD('setMenu'));
 function bindSetting(id, key, kind) {
   const el = document.getElementById(id); if (!el) return;
@@ -576,8 +627,10 @@ bindCol('cLast', 'last'); bindCol('cChange', 'change'); bindCol('cSell', 'sell')
 // фиксированной высотой, тулбар с ручной высотой) к этой сетке не подходит.
 // Сохранённый пользователем размер имеет приоритет над умолчанием.
 const wide = window.innerWidth >= 1800, tall = window.innerHeight >= 1000;
-const layout = Object.assign({ leftW: wide ? 340 : 300, rightW: wide ? 380 : 320, bottomH: tall ? 250 : 200, tradesH: tall ? 320 : 250 },
-  JSON.parse(localStorage.getItem('layout.v2') || '{}'));
+// Ключ v3: колонки поменялись ролями (справа теперь тикет, лента сделок —
+// под стаканом), и размеры прежней раскладки к новой не подходят.
+const layout = Object.assign({ leftW: wide ? 320 : 280, rightW: wide ? 340 : 312, bottomH: tall ? 240 : 196, tradesH: tall ? 300 : 230 },
+  JSON.parse(localStorage.getItem('layout.v3') || '{}'));
 function applyLayout() {
   const g = document.getElementById('grid');
   g.style.setProperty('--lw', layout.leftW + 'px');
@@ -591,12 +644,12 @@ function initResizers() {
     const type = /** @type {HTMLElement} */ (h).dataset.rsz, sx = /** @type {MouseEvent} */ (e).clientX, sy = /** @type {MouseEvent} */ (e).clientY, sl = layout.leftW, sr = layout.rightW, sb = layout.bottomH, str = layout.tradesH;
     const mv = (ev) => {
       if (type === 'left') layout.leftW = Math.min(520, Math.max(220, sl + (ev.clientX - sx)));
-      else if (type === 'right') layout.rightW = Math.min(560, Math.max(240, sr - (ev.clientX - sx)));
+      else if (type === 'right') layout.rightW = Math.min(480, Math.max(280, sr - (ev.clientX - sx)));
       else if (type === 'bottom') layout.bottomH = Math.min(window.innerHeight - 360, Math.max(90, sb - (ev.clientY - sy)));
       else if (type === 'trades') layout.tradesH = Math.min(window.innerHeight - 260, Math.max(90, str - (ev.clientY - sy)));
       applyLayout();
     };
-    const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); document.body.style.userSelect = ''; h.classList.remove('drag'); localStorage.setItem('layout.v2', JSON.stringify(layout)); };
+    const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); document.body.style.userSelect = ''; h.classList.remove('drag'); localStorage.setItem('layout.v3', JSON.stringify(layout)); };
     document.body.style.userSelect = 'none';
     document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
   }));
@@ -720,6 +773,68 @@ document.getElementById('tabLimit').addEventListener('click', () => setMode('lim
 // Режим формы виден атрибутом на самой форме: CSS прячет поле цены в «Рынке»
 // и надпись «По рынку» в «Лимите» — одно состояние, одно место.
 function setMode(m) { orderMode = m; document.getElementById('tabDeal').classList.toggle('active', m === 'market'); document.getElementById('tabLimit').classList.toggle('active', m === 'limit'); document.getElementById('deal').dataset.mode = m; updateDealPanel(); }
+/** Сторона заявки: от неё зависят уровни SL/TP и то, какая кнопка видна. */
+function setSide(/** @type {'buy'|'sell'} */ side) {
+  if (orderSide !== side) { orderSide = side; resetStops(); }
+  document.getElementById('deal').dataset.side = side;
+  document.querySelectorAll('.side [data-side]').forEach((b) => b.classList.toggle('active', /** @type {HTMLElement} */ (b).dataset.side === side));
+  refreshStops();
+}
+document.querySelector('.side').addEventListener('click', (e) => {
+  const b = /** @type {HTMLElement} */ (/** @type {Element} */ (e.target).closest('[data-side]'));
+  if (b) setSide(/** @type {'buy'|'sell'} */ (b.dataset.side));
+});
+
+// ---- Минимальное расстояние SL/TP (stops.js) ------------------------------
+// Минимум задаёт сайт; шлюз отдаёт его в `/account` (`min_stop_bps`) и
+// отказывает в более близких уровнях. Тикет подставляет уровни сам и держит
+// их у минимума, пока человек их не тронул; тронутое поле больше не
+// переписывается, а проверяется.
+let minStopBps = 0;
+const stopAuto = { sl: true, tp: true };
+const stopInput = (/** @type {'sl'|'tp'} */ k) => /** @type {HTMLInputElement} */ (document.getElementById(k));
+/** Цена отсчёта — та же, что у шлюза: рынок стороны или цена лимитного ордера. */
+function stopRef(it) {
+  if (!it) return null;
+  if (orderMode === 'limit') {
+    const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('price')).value);
+    return v > 0 ? Math.round(v * pscale(it.id)) : null;
+  }
+  const raw = orderSide === 'buy' ? it.ask : it.bid;
+  return Number.isInteger(raw) && raw > 0 ? raw : null;
+}
+function resetStops() { stopAuto.sl = true; stopAuto.tp = true; }
+function refreshStops() {
+  const it = META[selected];
+  const hint = document.getElementById('stopsHint');
+  const ref = stopRef(it);
+  const sug = it && ref != null ? Stops.suggest(orderSide, ref, minStopBps, orderMode === 'market') : null;
+  for (const k of /** @type {Array<'sl'|'tp'>} */ (['sl', 'tp'])) {
+    if (stopAuto[k]) stopInput(k).value = sug ? (sug[k] / pscale(it.id)).toFixed(pdec(it.id)) : '';
+  }
+  document.getElementById('stopsReset').hidden = stopAuto.sl && stopAuto.tp;
+  if (!it) { hint.textContent = ''; return; }
+  if (minStopBps > 0) {
+    const d = ref != null ? fmtP(it.id, Stops.minDistance(ref, minStopBps)) : '—';
+    hint.textContent = tv('f.stops.min', { p: (minStopBps / 100).toFixed(2), d });
+  } else hint.textContent = tv('f.stops.hint', { p: (Stops.HINT_BPS / 100).toFixed(0) });
+  validateStops();
+}
+/** Проблема с уровнями сейчас, или `null`. Красит поле, но ничего не отправляет. */
+function validateStops() {
+  const it = META[selected];
+  const ref = stopRef(it);
+  const { sl, tp } = it ? readSlTp(it.id) : { sl: null, tp: null };
+  const bad = it && ref != null ? Stops.check(orderSide, ref, sl, tp, minStopBps) : null;
+  stopInput('sl').classList.toggle('bad', !!bad && bad.code === 'stop_loss_too_close');
+  stopInput('tp').classList.toggle('bad', !!bad && bad.code === 'take_profit_too_close');
+  return bad;
+}
+for (const k of /** @type {Array<'sl'|'tp'>} */ (['sl', 'tp'])) {
+  stopInput(k).addEventListener('input', () => { stopAuto[k] = false; document.getElementById('stopsReset').hidden = false; validateStops(); });
+}
+document.getElementById('stopsReset').addEventListener('click', () => { resetStops(); refreshStops(); });
+document.getElementById('price').addEventListener('input', () => refreshStops());
 // Доля свободной маржи: объём, на который хватит N% свободных средств с
 // плечом счёта. Цены или счёта нет — кнопки ничего не делают (а не ставят 0).
 document.getElementById('shares').addEventListener('click', (e) => {
@@ -854,13 +969,27 @@ async function submit(side) {
   const id = selected; if (id == null) return; const msg = document.getElementById('dealMsg');
   const baseQty = sizeBaseQty(id);
   if (!(baseQty > 0)) { msg.textContent = T('f.enterSize'); msg.style.color = 'var(--down)'; return; }
+  // Уровни, которые тикет держит сам, пересчитываются от цены этой секунды:
+  // между опросом и нажатием рынок успевает сдвинуться.
+  if (side !== orderSide) setSide(side);
+  refreshStops();
+  const bad = validateStops();
+  if (bad) {
+    msg.textContent = tv(bad.code === 'stop_loss_too_close' ? 'f.sl.bad' : 'f.tp.bad', { px: fmtP(id, bad.limit) });
+    msg.style.color = 'var(--down)';
+    return;
+  }
   const { sl, tp } = readSlTp(id); const qty = Math.round(baseQty * qscale(id)); let body;
   const isLimit = orderMode === 'limit';
   if (isLimit) { const price = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('price')).value); if (!(price > 0)) { msg.textContent = T('f.enterPrice'); msg.style.color = 'var(--down)'; return; } body = { instrument: id, side, qty, price: Math.round(price * pscale(id)), sl, tp }; }
   else body = { instrument: id, side, qty, sl, tp };
   const { ok, status, data } = isLimit ? await api.placePending(body) : await api.openDeal(body);
-  if (ok) { msg.textContent = isLimit ? tv('f.limitPlaced', { id: data.id }) : tv('f.opened', { id: data.id, side: side.toUpperCase(), px: fmtP(id, data.entry) }); msg.style.color = 'var(--up)'; panel.show(isLimit ? 'pending' : 'deals'); pollAccount(); panel.refresh(); }
-  else { msg.textContent = rejectionText(status, data?.error); msg.style.color = 'var(--down)'; }
+  if (ok) { msg.textContent = isLimit ? tv('f.limitPlaced', { id: data.id }) : tv('f.opened', { id: data.id, side: side.toUpperCase(), px: fmtP(id, data.entry) }); msg.style.color = 'var(--up)'; panel.show(isLimit ? 'pending' : 'deals'); pollAccount(); panel.refresh(); resetStops(); refreshStops(); }
+  else {
+    // Шлюз называет ближайший допустимый уровень — его и показываем.
+    const near = Number.isInteger(data?.limit) ? ' ' + tv('f.nearest', { px: fmtP(id, data.limit) }) : '';
+    msg.textContent = rejectionText(status, data?.error) + near; msg.style.color = 'var(--down)';
+  }
 }
 document.getElementById('btnBuy').addEventListener('click', () => submit('buy'));
 document.getElementById('btnSell').addEventListener('click', () => submit('sell'));
@@ -1022,6 +1151,8 @@ async function pollAccount() {
       markup_bps: Number.isInteger(a.markup_bps) ? a.markup_bps : 0,
       commission_bps: Number.isInteger(a.commission_bps) ? a.commission_bps : 0,
     };
+    // Минимум стопов площадки. Поля нет (прежний шлюз) — 0: так он и проверяет.
+    minStopBps = Number.isInteger(a.min_stop_bps) && a.min_stop_bps > 0 ? a.min_stop_bps : 0;
     updateDealPanel();
     if (a.opened === false) {
       // Счёта ещё нет: шлюз отдаёт `null` вместо цифр, и подставлять сюда ноль
@@ -1104,7 +1235,7 @@ document.querySelector('.lang').addEventListener('click', (e) => {
 // перерисовка тех, кто держит текст у себя. Сессия и состояние не трогаются.
 I18N.onChange(() => {
   renderLangButtons();
-  updateDealPanel(); renderFeedStatus(); refreshLegend(); renderMarketWarn(); showStorageMode();
+  updateDealPanel(); renderFeedStatus(); refreshLegend(); renderMarketWarn(); showStorageMode(); syncFullBtn();
   pollAccount(); panel.refresh(); panel.refreshSignals(); trades.refreshMine(); book.refresh(); renderSsoUi();
 });
 
@@ -1118,7 +1249,14 @@ document.getElementById('mtabs').addEventListener('click', (e) => {
   if (b) setMTab(b.dataset.m);
 });
 // Кнопка пары в шапке инструмента: на телефоне открывает список пар поверх.
-document.getElementById('ihPair').addEventListener('click', () => document.body.classList.toggle('m-watch'));
+// На телефоне кнопка пары открывает список на весь экран; на десктопе список
+// и так виден под заявкой — кнопка ставит курсор в его поиск.
+const phone = window.matchMedia('(max-width: 860px)');
+document.getElementById('ihPair').addEventListener('click', () => {
+  if (phone.matches) { document.body.classList.toggle('m-watch'); return; }
+  const q = /** @type {HTMLInputElement|null} */ (document.querySelector('#pairs input'));
+  if (q) { q.focus(); q.select(); }
+});
 document.getElementById('watchClose').addEventListener('click', () => document.body.classList.remove('m-watch'));
 document.getElementById('tapeTrack').addEventListener('click', (e) => {
   const it = /** @type {HTMLElement} */ (/** @type {Element} */ (e.target).closest('[data-id]'));
@@ -1160,6 +1298,7 @@ renderIcons();
 applyLayout();
 initResizers();
 setMode('market');
+setSide('buy');
 document.querySelectorAll('#indMenu [data-ov]').forEach((x) => x.classList.toggle('on', !!overlays[/** @type {HTMLElement} */ (x).dataset.ov]));
 // Тема и бренд сайта (theming-pack v1, ADR-023 фаза Т1). Без CMS остаёмся на палитре
 // платформы; кнопка ◐ переключает тёмную/светлую.

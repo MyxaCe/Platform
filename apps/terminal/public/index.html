@@ -101,8 +101,14 @@
   </nav>
 
   <main class="grid" id="grid">
-    <!-- Слева — глубина рынка-источника (DOM строит orderbook.js) -->
-    <div id="book" class="col-book"></div>
+    <!-- Слева — рынок-источник: глубина (orderbook.js) и под ней лента сделок
+         (trades.js). Всё, что про рынок, — в одной колонке; всё, что про
+         заявку человека, — справа. -->
+    <div class="col-left">
+      <div id="book" class="col-book"></div>
+      <div class="rsz rsz-h" data-rsz="trades"></div>
+      <div id="trades"></div>
+    </div>
 
     <div class="rsz rsz-v rsz-left" data-rsz="left"></div>
 
@@ -223,16 +229,19 @@
       <div id="statbar" class="statbar"></div>
     </section>
 
+    <div class="rsz rsz-v rsz-right" data-rsz="right"></div>
+
+    <!-- Справа во всю высоту — заявка человека и список пар. -->
+    <aside class="col-right">
     <!-- ===================== Форма ордера ===================== -->
-    <section class="deal" id="deal">
+    <!-- Справа во всю высоту, одной колонкой — как на телефоне. Сторона
+         выбирается переключателем: уровни SL/TP у покупки и продажи
+         зеркальные, и подставить их можно, только зная сторону. -->
+    <section class="deal" id="deal" data-mode="market" data-side="buy">
       <div class="deal__tabs">
         <button id="tabLimit" data-i18n="f.limit">Limit</button>
         <button id="tabDeal" class="active" data-i18n="f.market">Market</button>
         <button id="tabStop" class="deal__tab--off" disabled data-i18n-title="f.stop.tip"><span data-i18n="f.stop">Stop</span> <small data-i18n="f.soon">soon</small></button>
-        <div class="deal__acct">
-          <span><span class="muted" data-i18n="f.leverage">Leverage</span> <b id="fLev">—</b></span>
-          <span><span class="muted" data-i18n="f.free">Free</span> <b id="fFree">—</b></span>
-        </div>
       </div>
       <!-- Имя инструмента и изменение — для мобильной вкладки «Ордер», где шапки
            инструмента над формой нет. На десктопе скрыты: шапка выше. -->
@@ -241,6 +250,10 @@
         <div id="dealChange" class="deal__change">—</div>
       </div>
       <div class="deal__body">
+        <div class="side" role="group">
+          <button id="sideBuy" type="button" class="side__b side__b--buy active" data-side="buy" data-i18n="f.side.buy">Buy</button>
+          <button id="sideSell" type="button" class="side__b side__b--sell" data-side="sell" data-i18n="f.side.sell">Sell</button>
+        </div>
         <div class="fld" id="priceRow">
           <label class="lbl" for="price" data-i18n="f.price">Price</label>
           <div class="inp inp--limit"><input id="price" type="number" step="0.01" inputmode="decimal" /><span class="inp__u" id="priceUnit">USDT</span></div>
@@ -256,35 +269,42 @@
             <button id="lotPlus" class="btn lotbtn" type="button" aria-label="+">+</button>
           </div>
         </div>
-        <div class="fld fld--sl"><label class="lbl" for="sl" data-i18n="f.sl">Stop Loss</label><input id="sl" type="number" step="0.01" placeholder="—" inputmode="decimal" /></div>
-        <div class="fld fld--tp"><label class="lbl" for="tp" data-i18n="f.tp">Take Profit</label><input id="tp" type="number" step="0.01" placeholder="—" inputmode="decimal" /></div>
         <div class="deal__info">
           <div class="shares" id="shares" data-i18n-title="f.share.tip"><button data-share="10">10%</button><button data-share="25">25%</button><button data-share="50">50%</button></div>
           <div id="sizeEq" class="muted small"></div>
           <div id="marginEq" class="muted small"></div>
           <div id="pipsInfo" class="muted small hidden"></div>
           <!-- Комиссия сделки по тарифу счёта (10.11) — до подтверждения. Цена на
-               кнопках — цена исполнения с наценкой тарифа; отдельной строки
+               кнопке — цена исполнения с наценкой тарифа; отдельной строки
                «наценка» нет, как на любом spread-счёте. Нет комиссии — строки нет. -->
           <div id="feeInfo" class="muted small hidden"></div>
+        </div>
+        <div class="fld fld--sl"><label class="lbl" for="sl" data-i18n="f.sl">Stop Loss</label><input id="sl" type="number" step="0.01" placeholder="—" inputmode="decimal" /></div>
+        <div class="fld fld--tp"><label class="lbl" for="tp" data-i18n="f.tp">Take Profit</label><input id="tp" type="number" step="0.01" placeholder="—" inputmode="decimal" /></div>
+        <!-- Минимальное расстояние SL/TP площадки (`/account` → min_stop_bps).
+             Уровни подставлены на нём; ближе не даст ни форма, ни шлюз. -->
+        <div class="stops-hint">
+          <span id="stopsHint" class="muted small" data-i18n-title="f.stops.min.tip"></span>
+          <button id="stopsReset" type="button" class="linkbtn" data-i18n="f.stops.reset" data-i18n-title="f.stops.reset.tip" hidden>Reset</button>
         </div>
         <div class="deal__btns">
           <button id="btnBuy" class="orderbtn buy"><span class="orderbtn__t" data-i18n="f.buy">Buy / Long</span><span id="askPx">—</span></button>
           <button id="btnSell" class="orderbtn sell"><span class="orderbtn__t" data-i18n="f.sell">Sell / Short</span><span id="bidPx">—</span></button>
         </div>
         <div id="dealMsg" class="dealmsg" role="status"></div>
+        <div class="deal__acct">
+          <span><span class="muted" data-i18n="f.leverage">Leverage</span> <b id="fLev">—</b></span>
+          <span><span class="muted" data-i18n="f.free">Free</span> <b id="fFree">—</b></span>
+        </div>
       </div>
       <div id="dealFrozen" class="deal__frozen" hidden><b data-i18n="frozen.form">Trading blocked by operator</b><span data-i18n="frozen.form.sub">Closing positions is still available</span></div>
     </section>
-
-    <div class="rsz rsz-v rsz-right" data-rsz="right"></div>
-
-    <!-- Справа: выбор пары, под ним — сделки по инструменту -->
-    <aside class="col-right">
-      <button id="watchClose" class="mclose" type="button" aria-label="close">✕</button>
-      <aside class="watch"></aside>
-      <div class="rsz rsz-h" data-rsz="trades"></div>
-      <div id="trades"></div>
+      <!-- Под заявкой — список пар. На телефоне он открывается кнопкой пары в
+           шапке инструмента на весь экран. -->
+      <div id="pairs" class="pairs">
+        <button id="watchClose" class="mclose" type="button" aria-label="close">✕</button>
+        <aside class="watch"></aside>
+      </div>
     </aside>
 
     <div class="rsz rsz-h rsz-bottom" data-rsz="bottom"></div>
@@ -301,6 +321,7 @@
   <script src="/diag.js"></script>
   <script src="/rejection.js"></script>
   <script src="/tariff.js"></script>
+  <script src="/stops.js"></script>
   <script src="/theming.js"></script>
   <script src="/sso.js"></script>
   <script src="/api.js"></script>

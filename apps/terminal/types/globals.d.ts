@@ -31,6 +31,7 @@ interface Window {
   Rejection?: any;
   /** Тариф счёта в тикете: цена исполнения и комиссия (10.11). */
   Tariff?: any;
+  Stops?: any;
   Indicators?: any;
   OrderBook?: any;
   AssetStats?: any;
@@ -56,6 +57,7 @@ declare const I18n: any;
 declare const Diag: any;
 declare const Rejection: any;
 declare const Tariff: any;
+declare const Stops: any;
 declare const Indicators: any;
 declare const OrderBook: any;
 declare const AssetStats: any;

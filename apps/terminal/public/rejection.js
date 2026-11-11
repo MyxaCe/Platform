@@ -46,6 +46,12 @@
       'Your stop loss is already on the other side of the price — the position would close immediately. Move it below the current price for a buy, above it for a sell.',
     take_profit_already_reached:
       'Your take profit is already reached — the position would close immediately. Move it above the current price for a buy, below it for a sell.',
+    // Минимальное расстояние стопов площадки (settings/stops). Тоже два кода:
+    // поля разные, и сдвигать их в разные стороны.
+    stop_loss_too_close:
+      'Your stop loss is closer to the price than the minimum distance set by the site. Move it further away: lower for a buy, higher for a sell.',
+    take_profit_too_close:
+      'Your take profit is closer to the price than the minimum distance set by the site. Move it further away: higher for a buy, lower for a sell.',
     // Р-293. Счёт заводится первой операцией, и сумму для него называет САЙТ.
     // Три кода, потому что чинят их три разных человека: владелец в админке,
     // команда развёртывания, снова развёртывание. Один текст на всех отправил

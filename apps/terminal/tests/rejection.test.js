@@ -91,6 +91,8 @@ test('код не затирается статусом', () => {
 
 /** Коды отказа по уровню, которые шлюз отдаёт на `/deals` и `/pending`. */
 const LEVEL_CODES = ['stop_loss_already_reached', 'take_profit_already_reached'];
+/** Минимум стопов площадки (`settings/stops`): шлюз отдаёт их `422`. */
+const MIN_CODES = ['stop_loss_too_close', 'take_profit_too_close'];
 
 test('уровень, уже достигнутый рынком, объяснён, а не показан кодом', () => {
   for (const code of LEVEL_CODES) {
@@ -169,4 +171,15 @@ test('заморозка объяснена: что запрещено и что
   assert.ok(!t.includes('account_frozen'), `сырой код: ${t}`);
   assert.match(t, /operator/i, `не сказано, кто заблокировал: ${t}`);
   assert.match(t, /close/i, `не сказано, что закрыть можно: ${t}`);
+});
+
+test('стоп ближе минимума площадки объяснён словами, и поле названо', () => {
+  const [sl, tp] = MIN_CODES.map((c) => Rejection.text(422, c));
+  for (const [code, t] of [[MIN_CODES[0], sl], [MIN_CODES[1], tp]]) {
+    assert.ok(!t.includes(code), `«${code}» показывается сырым кодом: ${t}`);
+    assert.ok(!/does not recognise/i.test(t), `«${code}» уехал в запасную ветку: ${t}`);
+  }
+  assert.match(sl, /stop loss/i);
+  assert.match(tp, /take profit/i);
+  assert.notEqual(sl, tp);
 });

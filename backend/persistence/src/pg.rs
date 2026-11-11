@@ -304,6 +304,19 @@ CREATE TRIGGER account_events_no_update
 -- `payload` — конверт ЦЕЛИКОМ, собранный в момент сделки. Релей его не
 -- пересобирает: иначе форма события зависела бы от версии кода в момент отправки,
 -- а не в момент сделки, и строка, пролежавшая через выкатку, уехала бы в чужом виде.
+-- Настройки площадки (сайта), не счёта: минимальное расстояние стоп-лосса и
+-- тейк-профита от цены, в базисных пунктах (10 bps = 0.1 %). Пишет сайт через
+-- `PUT /internal/sites/{tenant}/settings/stops`.
+--
+-- Отдельной таблицей, а НЕ записью журнала счёта, и это условие отката: новый
+-- вид записи в журнале прежний образ не разберёт и отправит счёт в карантин, а
+-- незнакомую таблицу он просто не читает. Строки нет — действует MIN_STOP_BPS
+-- окружения.
+CREATE TABLE IF NOT EXISTS site_settings (
+  tenant TEXT PRIMARY KEY,
+  min_stop_bps BIGINT NOT NULL CHECK (min_stop_bps BETWEEN 0 AND 10000),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS bus_outbox (
   id              BIGSERIAL PRIMARY KEY,
   event_id        TEXT NOT NULL UNIQUE,
@@ -829,6 +842,35 @@ impl Persistence for PgStore {
             .await
             .map_err(db)?;
         Ok(row.map(|r| (r.get::<String, _>("tenant"), r.get::<String, _>("sub"))))
+    }
+
+    async fn load_site_min_stops(&self) -> Result<Vec<(String, i64)>, StoreError> {
+        let rows = sqlx::query("SELECT tenant, min_stop_bps FROM site_settings ORDER BY tenant")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db)?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("tenant"),
+                    r.get::<i64, _>("min_stop_bps"),
+                )
+            })
+            .collect())
+    }
+
+    async fn save_site_min_stop(&self, tenant: &str, bps: i64) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO site_settings (tenant, min_stop_bps) VALUES ($1, $2)
+             ON CONFLICT (tenant) DO UPDATE SET min_stop_bps = EXCLUDED.min_stop_bps, updated_at = now()",
+        )
+        .bind(tenant)
+        .bind(bps)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(())
     }
 
     fn durable(&self) -> bool {
