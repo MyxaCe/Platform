@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Terminal</title>
+  <!-- Страница выхода терминала верхнего уровня (sso.js, 10.11). Ни токенов, ни
+       торговых запросов: только куда идти дальше. Кабинет — из белого списка
+       конфига (`cabinetOrigins`), а не из адреса страницы. -->
+  <link rel="stylesheet" href="/tokens.v1.css" />
+  <link rel="stylesheet" href="/style.css" />
+  <style>
+    body { align-items: center; justify-content: center; }
+    .out { max-width: 440px; margin: auto; padding: 32px 28px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; text-align: center; }
+    .out h1 { font-size: 20px; margin: 14px 0 8px; }
+    .out p { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 0 0 22px; }
+    .out__btns { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    .out .logo__mark { margin: 0 auto; width: 40px; height: 40px; font-size: 20px; }
+    .out .btn-top { height: 36px; padding: 0 16px; }
+  </style>
+</head>
+<body>
+  <div class="out">
+    <div class="logo__mark">E</div>
+    <h1 data-i18n="out.title">You have signed out of the terminal</h1>
+    <p data-i18n="out.text">The terminal session is closed. Your cabinet session is not affected.</p>
+    <div class="out__btns">
+      <a id="outCabinet" class="btn-top" hidden data-i18n="out.cabinet">Back to cabinet</a>
+      <a id="outAgain" class="btn-top btn-top--ghost" hidden data-i18n="out.again">Open terminal again</a>
+    </div>
+  </div>
+  <script src="/config.js"></script>
+  <script src="/i18n.js"></script>
+  <script src="/theming.js"></script>
+  <script src="/sso.js"></script>
+  <script>
+    (function () {
+      window.I18n.apply();
+      window.Theming.init();
+      const cfg = window.TERMINAL_CONFIG || {};
+      const allowed = (cfg.cabinetOrigins || []).filter(Boolean);
+      let saved = null, acc = null;
+      try { saved = sessionStorage.getItem('terminal:sso.cabinet'); acc = sessionStorage.getItem('terminal:sso.account'); } catch (e) { /* */ }
+      const cab = window.Sso.pickCabinet([saved], allowed);
+      if (cab) {
+        const a = document.getElementById('outCabinet'); a.href = cab + '/'; a.hidden = false;
+        const again = document.getElementById('outAgain');
+        again.href = window.Sso.launchUrl(cab, acc === 'demo' || acc === 'real' ? acc : null, location.origin + '/' + location.search);
+        again.hidden = false;
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -8,7 +8,13 @@
  *     symbols: (id) => ({ base, quote }),     // подписи колонок
  *     markPrice: (id) => number|null,         // цена под серединой (в единицах, не raw)
  *     interval: 700, levels: 20, storagePrefix: 'ob',
+ *     source: 'Binance',                    // чей это стакан (опц.): подпись в шапке
+ *     t: (key, en) => string,               // перевод (опц.): без него — английский
  *   });
+ *
+ * У брокера (B-book) своего стакана нет: здесь показывается глубина
+ * рынка-источника цен. Поэтому шапка обязана назвать источник — `ctx.source`
+ * печатается рядом с заголовком, а не прячется в подсказку.
  *
  * Возможности: группировка цен по шагу (шаг тика ×1/×10/×100), режимы показа
  * (обе стороны / только покупки / только продажи), глубина полос по объёму строки
@@ -18,8 +24,10 @@
 (function () {
   const CSS = `
 .ob { display: flex; flex-direction: column; min-height: 0; height: 100%; background: var(--panel,#10141d); }
-.ob__head { display: flex; align-items: center; justify-content: space-between; padding: 9px 12px;
-  font-size: 12px; font-weight: 700; border-bottom: 1px solid var(--border,#1f2735); }
+.ob__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px;
+  font-size: 13px; font-weight: 700; border-bottom: 1px solid var(--border,#1f2735); }
+.ob__title { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ob__src { font-size: 10.5px; font-weight: 600; color: var(--muted,#6b7688); cursor: help; }
 .ob__dots { background: none; border: none; color: var(--muted,#6b7688); cursor: pointer; font-size: 15px;
   line-height: 1; padding: 2px 6px; border-radius: 4px; font-family: inherit; }
 .ob__dots:hover { background: var(--panel2,#151a25); color: var(--text,#d7dce5); }
@@ -79,7 +87,7 @@
 .brow { position: relative; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; padding: 2px 10px;
   font-variant-numeric: tabular-nums; font-size: 11px; cursor: pointer; }
 .brow:hover { background: rgba(255,255,255,.04); }
-.brow .bar { position: absolute; top: 0; bottom: 0; right: 0; }
+.brow .bar { position: absolute; top: 1px; bottom: 1px; right: 0; }
 .ob--anim .brow .bar { transition: width .18s ease-out; }
 .brow.ask .bar { background: rgba(239,83,80,.16); } .brow.bid .bar { background: rgba(38,166,154,.16); }
 .brow.ask .bp { color: var(--down,#ef5350); } .brow.bid .bp { color: var(--up,#26a69a); }
@@ -92,7 +100,7 @@
 
 .ob__mid { display: flex; align-items: center; gap: 8px; padding: 7px 10px; font-variant-numeric: tabular-nums;
   border-top: 1px solid var(--border,#1f2735); border-bottom: 1px solid var(--border,#1f2735); }
-.ob__last { font-size: 17px; font-weight: 700; }
+.ob__last { font-size: 18px; font-weight: 700; }
 .ob__last.up { color: var(--up,#26a69a); } .ob__last.down { color: var(--down,#ef5350); }
 .ob__mark { color: var(--muted,#6b7688); font-size: 12px; }
 .ob__spread { margin-left: auto; color: var(--muted,#6b7688); font-size: 11px; }
@@ -123,6 +131,10 @@
 
   function mount(root, ctx) {
     const levels = ctx.levels || 20;
+    /** Перевод: хост даёт `t(ключ, английский)`; без него — английский (ADR-015). */
+    const t = ctx.t || ((_k, en) => en);
+    /** Подпись с ключом перевода: хост обновит её при смене языка сам. */
+    const tx = (k, en) => `<span data-i18n="${k}">${t(k, en)}</span>`;
     const prefix = ctx.storagePrefix || 'ob';
     const key = `${prefix}.settings`;
     let cfg = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem(key) || '{}'));
@@ -130,28 +142,30 @@
 
     root.classList.add('ob');
     root.innerHTML = `
-      <div class="ob__head">Order Book<button class="ob__dots" title="Settings">⋯</button></div>
+      <div class="ob__head"><div class="ob__title">${ctx.source ? tx('ob.title', 'Market depth') : tx('ob.title.book', 'Order Book')}` +
+        `${ctx.source ? `<span class="ob__src" data-i18n="ob.source" data-i18n-title="ob.source.tip" title="${t('ob.source.tip', '')}">${t('ob.source', 'source: ' + ctx.source)}</span>` : ''}</div>` +
+        `<button class="ob__dots" title="${t('ob.settings', 'Settings')}" data-i18n-title="ob.settings">⋯</button></div>
       <div class="ob__wrap">
         <div class="ob__menu hidden">
-          <div class="ob__cat">Order book display</div>
-          <label class="ob__opt"><span>Show average amount</span><input type="checkbox" data-k="avg"></label>
-          <label class="ob__opt"><span>Show buy/sell ratio</span><input type="checkbox" data-k="ratio"></label>
-          <label class="ob__opt"><span>Rounding</span><input type="checkbox" data-k="rounding"></label>
-          <div class="ob__cat">Visual depth</div>
-          <label class="ob__opt"><span>Amount</span><input type="radio" name="${prefix}-depth" data-d="sum"></label>
-          <label class="ob__opt"><span>Cumulative</span><input type="radio" name="${prefix}-depth" data-d="cum"></label>
-          <div class="ob__cat">Animation</div>
-          <label class="ob__opt"><span>Enabled</span><input type="checkbox" data-k="anim"></label>
+          <div class="ob__cat">${tx('ob.display', 'Order book display')}</div>
+          <label class="ob__opt">${tx('ob.avg', 'Show average amount')}<input type="checkbox" data-k="avg"></label>
+          <label class="ob__opt">${tx('ob.ratio', 'Show buy/sell ratio')}<input type="checkbox" data-k="ratio"></label>
+          <label class="ob__opt">${tx('ob.rounding', 'Rounding')}<input type="checkbox" data-k="rounding"></label>
+          <div class="ob__cat">${tx('ob.depth', 'Visual depth')}</div>
+          <label class="ob__opt">${tx('ob.amountMode', 'Amount')}<input type="radio" name="${prefix}-depth" data-d="sum"></label>
+          <label class="ob__opt">${tx('ob.cum', 'Cumulative')}<input type="radio" name="${prefix}-depth" data-d="cum"></label>
+          <div class="ob__cat">${tx('ob.anim', 'Animation')}</div>
+          <label class="ob__opt">${tx('ob.enabled', 'Enabled')}<input type="checkbox" data-k="anim"></label>
         </div>
         <div class="ob__ctl">
           <div class="ob__modes">
-            <button class="ob__mode" data-m="both" title="Bids and asks"><i></i></button>
-            <button class="ob__mode" data-m="bids" title="Bids only"><i></i></button>
-            <button class="ob__mode" data-m="asks" title="Asks only"><i></i></button>
+            <button class="ob__mode" data-m="both" title="${t('ob.both', 'Bids and asks')}" data-i18n-title="ob.both"><i></i></button>
+            <button class="ob__mode" data-m="bids" title="${t('ob.bids', 'Bids only')}" data-i18n-title="ob.bids"><i></i></button>
+            <button class="ob__mode" data-m="asks" title="${t('ob.asks', 'Asks only')}" data-i18n-title="ob.asks"><i></i></button>
           </div>
-          <select class="ob__group" title="Price grouping"></select>
+          <select class="ob__group" title="${t('ob.group', 'Price grouping')}" data-i18n-title="ob.group"></select>
         </div>
-        <div class="ob__cols"><span class="c-price">Price</span><span class="c-amt">Amount</span><span>Total</span></div>
+        <div class="ob__cols"><span class="c-price">${t('ob.price', 'Price')}</span><span class="c-amt">${t('ob.amount', 'Amount')}</span>${tx('ob.total', 'Total')}</div>
         <div class="ob__side asks"></div>
         <div class="ob__mid"><span class="ob__last">—</span><span class="ob__mark"></span><span class="ob__spread"></span></div>
         <div class="ob__side bids"></div>
@@ -263,7 +277,7 @@
         elLast.textContent = mid.toFixed(pd);
         elLast.classList.toggle('up', dir === 'up');
         elLast.classList.toggle('down', dir === 'down');
-        elSpread.textContent = `spread ${((ba - bb) / ps).toFixed(pd)}`;
+        elSpread.textContent = `${t('ob.spread', 'spread')} ${((ba - bb) / ps).toFixed(pd)}`;
       } else {
         elLast.textContent = '—'; elSpread.textContent = '';
       }
@@ -281,8 +295,9 @@
 
       // Подписи колонок с валютами инструмента.
       const sym = (ctx.symbols && ctx.symbols(id)) || {};
-      $('.c-price').textContent = sym.quote ? `Price (${sym.quote})` : 'Price';
-      $('.c-amt').textContent = sym.base ? `Amount (${sym.base})` : 'Amount';
+      const lp = t('ob.price', 'Price'), la = t('ob.amount', 'Amount');
+      $('.c-price').textContent = sym.quote ? `${lp} (${sym.quote})` : lp;
+      $('.c-amt').textContent = sym.base ? `${la} (${sym.base})` : la;
 
       // Варианты группировки: шаг тика ×1/×10/×100.
       const want = [1, 10, 100].map((m) => `${m}|${(m / ps).toFixed(Math.max(0, pd))}`).join(',');

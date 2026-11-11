@@ -32,6 +32,21 @@ pub struct Claims {
     pub sub: String,
     pub tenant: String,
     pub jti: String,
+    /// Какой счёт открыть: `demo` | `real` (demo-money). Нет claim-а — демо.
+    #[serde(default)]
+    pub account_kind: Option<String>,
+    /// Плечо счёта (знаменатель 1:N), посчитанное кабинетом из портфеля и
+    /// override клиента на момент выпуска (Р-446). Нет claim-а — плечо счёта
+    /// входом не меняется.
+    #[serde(default)]
+    pub leverage: Option<i64>,
+    /// Наценка на спред счёта, bps (решение 10.11): итог портфеля / override
+    /// клиента на момент выпуска. Нет claim-а — наценка входом не меняется.
+    #[serde(default)]
+    pub markup_bps: Option<i64>,
+    /// Комиссия за сделку счёта, bps. Нет claim-а — комиссия не меняется.
+    #[serde(default)]
+    pub commission_bps: Option<i64>,
 }
 
 /// Ошибка входа. Наверх маппится в HTTP-код (см. `code()`).

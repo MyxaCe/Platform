@@ -17,6 +17,9 @@
 //     interval:   1000,                      // автообновление, мс (0 — выключить)
 //     title:      '⭐ POPULAR',
 //     storagePrefix: 'watch',                // ключи localStorage: <prefix>.favs / <prefix>.cols
+//     colsKey: 'watch.cols.v2',              // (опц.) свой ключ видимости колонок
+//     columnsDefault: { last: 1, change: 1 },// (опц.) какие колонки видны по умолчанию
+//     t: (key, en) => string,                // (опц.) перевод; без него — английский
 //   });
 //   wl.refresh(); wl.columns(); wl.setColumns({ spread: 0 }); wl.destroy();
 // ============================================================================
@@ -30,7 +33,7 @@
 .watch__search { padding: 8px; }
 .watch__search input { width: 100%; background: var(--panel2,#151a25); border: 1px solid var(--border,#1f2735); color: var(--text,#d7dce5);
   border-radius: 6px; padding: 7px 10px; }
-.watch__title { padding: 6px 12px; color: var(--brand,#f0b90b); font-weight: 700; font-size: 11px; letter-spacing: .5px; }
+.watch__title { padding: 6px 12px; color: var(--muted,#6b7688); font-weight: 700; font-size: 11px; letter-spacing: .3px; }
 .watch__head, .irow { display: grid; grid-template-columns: 20px 1.25fr .78fr .82fr .82fr .62fr .82fr; gap: 4px; padding: 5px 10px; align-items: center; }
 .star { color: #384253; cursor: pointer; display: inline-flex; }
 .star svg { width: 13px; height: 13px; }
@@ -44,7 +47,7 @@
 .irow:hover { background: var(--panel2,#151a25); }
 .irow.active { background: var(--panel3,#1a2130); box-shadow: inset 3px 0 0 var(--brand,#f0b90b); }
 .irow .sym { font-weight: 600; } .irow .sym small { color: var(--muted,#6b7688); font-weight: 400; display: block; font-size: 10px; }
-.irow .chg.up { color: var(--up,#26a69a); } .irow .chg.down { color: var(--down,#ef5350); }
+.irow .chg.up, .irow .c-last.up { color: var(--up,#26a69a); } .irow .chg.down, .irow .c-last.down { color: var(--down,#ef5350); }
 .irow .sell { color: var(--down,#ef5350); } .irow .buy { color: var(--up,#26a69a); }
 .star svg { width: 14px; height: 14px; }
 .watch__head, .irow { grid-template-columns: 18px 1.55fr .82fr .85fr .85fr .7fr .85fr; }
@@ -68,7 +71,7 @@
 .coin { position: absolute; inset: 0; width: 100%; height: 100%; }
 .irow .symtxt small { display: inline; }
 .watch__head, .irow { grid-template-columns: var(--watch-cols, 18px 1.55fr .82fr .85fr .85fr .7fr .85fr); }
-.watch.hide-change .c-change, .watch.hide-sell .c-sell, .watch.hide-buy .c-buy,
+.watch.hide-last .c-last, .watch.hide-change .c-change, .watch.hide-sell .c-sell, .watch.hide-buy .c-buy,
 .watch.hide-spread .c-spread, .watch.hide-high .c-high { display: none; }
 `;
   if (!document.getElementById('watchlist-css')) {
@@ -80,6 +83,7 @@
 
   /** Колонки: ключ → ширина трека в CSS-гриде. Порядок задаёт порядок в строке. */
   const COLS = [
+    { key: 'last', label: 'PRICE', width: '1fr', i18n: 'wl.price' },
     { key: 'change', label: 'CHANGE', width: '.82fr' },
     { key: 'sell', label: 'SELL', width: '.85fr' },
     { key: 'buy', label: 'BUY', width: '.85fr' },
@@ -89,6 +93,7 @@
 
   /** Как достать из инструмента величину для сортировки. `-Infinity` уводит пустые вниз. */
   const SORT_METRIC = {
+    last: (it) => it.last ?? -Infinity,
     change: (it) => it.change,
     sell: (it) => it.bid ?? -Infinity,
     buy: (it) => it.ask ?? -Infinity,
@@ -125,10 +130,11 @@
     const cfg = ctx || {};
     const prefix = cfg.storagePrefix || 'watch';
     const favsKey = `${prefix}.favs`;
-    const colsKey = `${prefix}.cols`;
+    const colsKey = cfg.colsKey || `${prefix}.cols`;
+    const t = cfg.t || ((k, en) => en);
 
     const favs = new Set(readJson(favsKey, []));
-    const cols = Object.assign({ change: 1, sell: 1, buy: 1, spread: 1, high: 1 }, readJson(colsKey, {}));
+    const cols = Object.assign({ last: 0, change: 1, sell: 1, buy: 1, spread: 1, high: 1 }, cfg.columnsDefault || {}, readJson(colsKey, {}));
     const rowEls = {};       // id → элемент строки (переиспользуем, чтобы не терять скролл)
     const meta = {};         // id → последний известный инструмент
     let sortKey = null, sortDir = -1;
@@ -137,10 +143,10 @@
 
     // ---- DOM (строим сами) -------------------------------------------------
     root.innerHTML =
-      `<div class="watch__search"><input class="wl-search" placeholder="Search…" /></div>` +
-      `<div class="watch__title">${cfg.title || '⭐ POPULAR'}</div>` +
-      `<div class="watch__head"><span></span><span>INSTR.</span>` +
-      COLS.map((c) => `<span class="sortable c-${c.key}" data-sort="${c.key}">${c.label}<i></i></span>`).join('') +
+      `<div class="watch__search"><input class="wl-search" placeholder="${t('wl.search', 'Search…')}" data-i18n-ph="wl.search" /></div>` +
+      (cfg.title === '' ? '' : `<div class="watch__title">${cfg.title || '⭐ POPULAR'}</div>`) +
+      `<div class="watch__head"><span></span><span data-i18n="wl.instr">${t('wl.instr', 'INSTR.')}</span>` +
+      COLS.map((c) => { const k = c.i18n || `wl.${c.key}`; return `<span class="sortable c-${c.key}" data-sort="${c.key}"><span data-i18n="${k}">${t(k, c.label)}</span><i></i></span>`; }).join('') +
       `</div><div class="watch__rows"></div>`;
 
     const searchEl = root.querySelector('.wl-search');
@@ -206,6 +212,7 @@
       el.innerHTML =
         `<span class="star ${favs.has(it.id) ? 'on' : ''}">${STAR}</span>` +
         `<div class="sym">${coinHtml(base)}<span class="symtxt">${base}<small>/${quote || 'USDT'}</small></span></div>` +
+        `<div class="num c-last ${known ? (up ? 'up' : 'down') : ''}">${it.last != null ? fmtPrice(it, it.last) : '—'}</div>` +
         `<div class="num chg c-change ${known ? (up ? 'up' : 'down') : ''}">${known ? `${up ? '+' : ''}${it.change.toFixed(2)}%` : '—'}</div>` +
         `<div class="num sell c-sell">${it.bid != null ? fmtPrice(it, it.bid) : '—'}</div>` +
         `<div class="num buy c-buy">${it.ask != null ? fmtPrice(it, it.ask) : '—'}</div>` +

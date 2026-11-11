@@ -56,7 +56,12 @@ fn trade_events(j: &Journal) -> Vec<broker::journal::AccountEvent> {
     all.extend(j2.seal(
         1_700_000_050_000,
         &op,
-        &[EventKind::Deposited { amount: 250_000 }],
+        // Заморозка торговли (demo-money) едет в той же ленте и обязана
+        // подниматься из хранилища: другого места у неё нет.
+        &[
+            EventKind::Deposited { amount: 250_000 },
+            EventKind::TradingFreezeSet { frozen: true },
+        ],
     ));
     all
 }
@@ -93,6 +98,10 @@ async fn memory_store_round_trips_the_journal() {
     // И цепочка сходится после подъёма — иначе хранилище что-то потеряло по дороге.
     let rebuilt = Journal::load(10_000_000, lane).expect("цепочка обязана сойтись");
     assert_eq!(rebuilt.replay().balance, 10_250_000);
+    assert!(
+        rebuilt.state().trading_frozen,
+        "заморозка поднялась из хранилища"
+    );
     let op = rebuilt
         .events()
         .last()
@@ -559,6 +568,7 @@ async fn postgres_round_trips_the_position_leverage() {
         sl: None,
         tp: None,
         leverage: 100,
+        fees: Default::default(),
     };
     let snap = AccountSnapshot {
         balance: 10_000_000,
@@ -594,4 +604,287 @@ async fn postgres_round_trips_the_position_leverage() {
         vec![],
         "поднятый счёт здоров: маржа отвечает плечу, которое доехало обратно"
     );
+}
+
+/// Плечо СЧЁТА (Р-446) переживает хранилище: столбец `accounts.leverage` и
+/// запись `leverage_set` в ленте поднимаются обратно и сходятся друг с другом.
+///
+/// Без базы не проверить: отображение живёт в SQL. Не доедь столбец обратно —
+/// сверка на старте увидит «плечо по журналу 50, в слепке None», и счёт уйдёт
+/// в карантин при первом же перезапуске. `None` обязан остаться `None`, а не
+/// стать единицей: «не назначали» — это плечо площадки.
+#[tokio::test]
+#[ignore = "нужна живая БД: TEST_DATABASE_URL=postgres://... cargo test -p persistence -- --ignored"]
+async fn postgres_round_trips_the_account_leverage() {
+    let url = std::env::var("TEST_DATABASE_URL")
+        .expect("TEST_DATABASE_URL не задан — тест запущен без базы, которую он проверяет");
+    let store = persistence::PgStore::connect(&url)
+        .await
+        .expect("подключение");
+    store.init().await.expect("DDL");
+
+    const W: UserId = UserId(79);
+    const N: UserId = UserId(80);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE account_events DISABLE TRIGGER account_events_no_update")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for u in [W, N] {
+        for t in ["positions", "pendings", "accounts", "account_events"] {
+            sqlx::query(&format!("DELETE FROM {t} WHERE user_id = $1"))
+                .bind(u.0 as i64)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+    sqlx::query("ALTER TABLE account_events ENABLE TRIGGER account_events_no_update")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let j = Journal::new(10_000_000);
+    let op = Origin::Operator(Operator::new("risk@site", "портфель Pro", "ext:adm-1").unwrap());
+    let mut events = j.seal(
+        1_700_000_000_000,
+        &Origin::System,
+        &[EventKind::AccountOpened {
+            balance: 10_000_000,
+            profile: Default::default(),
+        }],
+    );
+    let mut j2 = j.clone();
+    for e in events.clone() {
+        j2.commit(e).unwrap();
+    }
+    let tail = j2.seal(
+        1_700_000_001_000,
+        &op,
+        &[
+            EventKind::LeverageSet { lev: 50 },
+            EventKind::PendingPlaced {
+                id: 1,
+                instrument: 1,
+                side: PosSide::Long,
+                qty: 10,
+                price: 4_900,
+                pd: 2,
+                qd: 3,
+                sl: None,
+                tp: None,
+            },
+            EventKind::PendingRejected {
+                id: 1,
+                exec: Some(4_800),
+                reason: broker::journal::RejectReason::AccountFrozen,
+            },
+        ],
+    );
+    events.extend(tail);
+    let snap = AccountSnapshot {
+        balance: 10_000_000,
+        next_id: 1,
+        leverage: Some(50),
+        ..Default::default()
+    };
+    store
+        .save_account(W, &snap, &events, &[])
+        .await
+        .expect("запись в БД");
+    // Счёт без назначенного плеча — NULL в столбце.
+    let plain = AccountSnapshot {
+        balance: 10_000_000,
+        ..Default::default()
+    };
+    store
+        .save_account(N, &plain, &[], &[])
+        .await
+        .expect("запись в БД");
+
+    let loaded = store.load_all().await.expect("подъём из БД");
+    let back = |u: UserId| {
+        loaded
+            .accounts
+            .iter()
+            .find(|(id, _)| *id == u)
+            .expect("счёт поднялся")
+            .1
+            .clone()
+    };
+    assert_eq!(back(W).leverage, Some(50), "плечо счёта пережило хранилище");
+    assert_eq!(
+        back(N).leverage,
+        None,
+        "не назначали — остаётся не назначенным"
+    );
+
+    let lane = loaded
+        .journals
+        .into_iter()
+        .find(|(id, _)| *id == W)
+        .expect("лента поднялась")
+        .1;
+    let journal = Journal::load(10_000_000, lane).expect("цепочка цела");
+    assert_eq!(journal.state().leverage, Some(50));
+    assert!(
+        broker::journal::audit(&journal, &back(W)).ok(),
+        "лента и слепок сходятся после подъёма"
+    );
+}
+
+/// Тариф СЧЁТА, снимок тарифа в позиции и доход площадки со сделки (10.11)
+/// переживают хранилище: столбцы поднимаются обратно и сходятся с лентой
+/// (`fees_set`, `markup_applied`, `commission_charged`).
+///
+/// Без базы не проверить: отображение живёт в SQL. Не доедь хоть один столбец
+/// — сверка на старте увидит расхождение тарифа или дохода, и счёт уйдёт в
+/// карантин при первом же перезапуске.
+#[tokio::test]
+#[ignore = "нужна живая БД: TEST_DATABASE_URL=postgres://... cargo test -p persistence -- --ignored"]
+async fn postgres_round_trips_the_account_fees() {
+    let url = std::env::var("TEST_DATABASE_URL")
+        .expect("TEST_DATABASE_URL не задан — тест запущен без базы, которую он проверяет");
+    let store = persistence::PgStore::connect(&url)
+        .await
+        .expect("подключение");
+    store.init().await.expect("DDL");
+
+    const W: UserId = UserId(81);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE account_events DISABLE TRIGGER account_events_no_update")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for t in [
+        "positions",
+        "pendings",
+        "closed_deals",
+        "accounts",
+        "account_events",
+    ] {
+        sqlx::query(&format!("DELETE FROM {t} WHERE user_id = $1"))
+            .bind(W.0 as i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("ALTER TABLE account_events ENABLE TRIGGER account_events_no_update")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Живой путь брокера: тариф, две позиции, одна закрыта.
+    let mut b = broker::Broker::new(1_000_000_000, 20);
+    assert!(b.open_account(W));
+    let mut j = Journal::new(b.start_balance());
+    let mut all = Vec::new();
+    let mut step = |b: &mut broker::Broker, j: &mut Journal, origin: &Origin| {
+        let kinds = b.take_events(W);
+        let sealed = j.seal(1_700_000_000_000, origin, &kinds);
+        for e in sealed.clone() {
+            j.commit(e).unwrap();
+        }
+        all.extend(sealed);
+    };
+    step(&mut b, &mut j, &Origin::System);
+    let op = Origin::Operator(Operator::new("risk@site", "портфель Pro", "ext:adm-9").unwrap());
+    b.set_account_fees(
+        W,
+        broker::Fees {
+            markup_bps: 10,
+            commission_bps: 7,
+        },
+    )
+    .unwrap();
+    step(&mut b, &mut j, &op);
+    let marks = std::collections::HashMap::from([(1u32, 5_000_000i64)]);
+    let a = b
+        .open(
+            W,
+            &marks,
+            1,
+            PosSide::Long,
+            1000,
+            5_000_000,
+            2,
+            3,
+            None,
+            None,
+        )
+        .unwrap();
+    step(&mut b, &mut j, &Origin::Client);
+    b.open(
+        W,
+        &marks,
+        1,
+        PosSide::Short,
+        1000,
+        5_000_000,
+        2,
+        3,
+        None,
+        None,
+    )
+    .unwrap();
+    step(&mut b, &mut j, &Origin::Client);
+    b.close(W, a, 5_100_000).unwrap();
+    step(&mut b, &mut j, &Origin::Client);
+
+    let snap = b.snapshot(W);
+    assert!(
+        broker::journal::audit(&j, &snap).ok(),
+        "до хранилища сходится"
+    );
+    store
+        .save_account(W, &snap, &all, &[])
+        .await
+        .expect("запись в БД");
+
+    let loaded = store.load_all().await.expect("подъём из БД");
+    let back = loaded
+        .accounts
+        .iter()
+        .find(|(id, _)| *id == W)
+        .expect("счёт поднялся")
+        .1
+        .clone();
+    assert_eq!(back.fees, snap.fees, "тариф счёта пережил хранилище");
+    assert_eq!(back.positions.len(), 1);
+    assert_eq!(
+        back.positions[0].fees, snap.positions[0].fees,
+        "снимок тарифа позиции"
+    );
+    assert!(back.positions[0].fees.commission > 0);
+    assert_eq!(
+        back.closed[0].fees, snap.closed[0].fees,
+        "доход площадки со сделки"
+    );
+    assert!(back.closed[0].fees.commission > 0 && back.closed[0].fees.markup > 0);
+    assert_eq!(back.closed[0].fees.market_exit, Some(5_100_000));
+
+    let lane = loaded
+        .journals
+        .into_iter()
+        .find(|(id, _)| *id == W)
+        .expect("лента поднялась")
+        .1;
+    let journal = Journal::load(1_000_000_000, lane).expect("цепочка цела");
+    assert!(
+        broker::journal::audit(&journal, &back).ok(),
+        "лента и слепок сходятся после подъёма: {}",
+        broker::journal::audit(&journal, &back)
+    );
+    assert!(journal
+        .events()
+        .iter()
+        .any(|e| matches!(e.kind(), EventKind::CommissionCharged { .. })));
 }

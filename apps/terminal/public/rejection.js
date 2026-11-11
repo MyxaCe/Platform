@@ -54,6 +54,9 @@
       'This site has not set a starting balance for demo accounts, so your account was not opened. Nothing is wrong with your request — the site owner sets this amount in the admin panel.',
     demo_start_balance_unavailable:
       'Site settings could not be reached, so your account was not opened. Your request was fine; this is a platform-side outage and is being fixed there.',
+    // Заморозка оператором (demo-money): закрывать позиции можно, открывать нельзя.
+    account_frozen:
+      'Your account is blocked by an operator: opening positions, new orders and withdrawals are disabled. You can still close existing positions. Please contact support.',
     identity_store_unavailable:
       'We could not confirm which site your account belongs to, so it was not opened. Nothing is wrong with your request — this is a platform-side outage.',
   };

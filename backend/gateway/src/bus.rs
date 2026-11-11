@@ -42,6 +42,7 @@ use std::sync::Arc;
 
 use broker::journal::EventKind;
 use broker::{AccountSnapshot, Cents, ClosedDeal, Currency, PosSide};
+use domain::account::AccountKind;
 use persistence::{OutboxRecord, Persistence};
 use serde::Serialize;
 
@@ -148,6 +149,16 @@ impl Envelope {
 /// имени), поэтому значение воспроизводимо и проверяется тестом по константе.
 pub fn event_id(kind: &str, key: &str) -> String {
     let name = format!("urn:terminal:{kind}:{key}");
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, name.as_bytes()).to_string()
+}
+
+/// Внешний идентификатор счёта (`accountId` на шине и во внутренних ручках).
+///
+/// Выводится из ключа счёта `(tenant, sub, kind)`, а не хранится: UUIDv5 от
+/// имени воспроизводим, и хранить второй источник правды о том же незачем.
+/// Внутренний номер наружу не уходит — он наша деталь.
+pub fn account_uuid(tenant: &str, sub: &str, kind: AccountKind) -> String {
+    let name = format!("urn:terminal:account:{tenant}:{sub}:{}", kind.tag());
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, name.as_bytes()).to_string()
 }
 
@@ -309,6 +320,12 @@ pub struct Addressee<'a> {
     pub seq: u64,
     /// Момент запечатывания записей журнала.
     pub at_ms: i64,
+    /// Род счёта (demo-money). У человека до двух счетов — демо и реальный —
+    /// с ОДНОЙ парой `(tenant, userId)`, и различает их только это поле и
+    /// `accountId`. Едут во всех событиях: `accountKind`, `accountId`.
+    pub kind: AccountKind,
+    /// [`account_uuid`] этого счёта.
+    pub account_id: &'a str,
 }
 
 /// Собрать конверты по изменению счёта. Чистая функция: сеть, время и хранилище —
@@ -350,12 +367,23 @@ pub fn envelopes_for(
             "tenant": who.tenant,
             "userId": who.sub,
             "accountSeq": who.seq,
+            "accountKind": who.kind.tag(),
+            "accountId": who.account_id,
             "currency": after.profile.currency.code(),
             "balanceCents": cents(*balance),
         });
         money(&mut data, "balance", *balance, after.profile.currency);
         out.push(Envelope {
-            event_id: event_id(EV_ACCOUNT_OPENED, &format!("{}:{}", who.tenant, who.sub)),
+            // Ключ демо-счёта прежний (`tenant:sub`) — уже опубликованные
+            // события остаются теми же. Реальный — со своим суффиксом: иначе
+            // его заведение склеилось бы дедупом с заведением демо.
+            event_id: event_id(
+                EV_ACCOUNT_OPENED,
+                &match who.kind {
+                    AccountKind::Demo => format!("{}:{}", who.tenant, who.sub),
+                    AccountKind::Real => format!("{}:{}:real", who.tenant, who.sub),
+                },
+            ),
             event: EV_ACCOUNT_OPENED.to_string(),
             version: EVENT_VERSION,
             occurred_at: occurred_at.clone(),
@@ -398,6 +426,8 @@ pub fn envelopes_for(
             "tenant": who.tenant,
             "userId": who.sub,
             "accountSeq": who.seq,
+            "accountKind": who.kind.tag(),
+            "accountId": who.account_id,
             "balanceCents": cents(after.balance),
             "positions": positions_json(after, instrument),
         });
@@ -450,7 +480,12 @@ pub fn envelopes_for(
 ///
 /// То есть добавить поле можно в одиночку, а значение причины — нельзя: цена
 /// ошибки не «причину не покажут», а «деньги в кабинете не обновятся».
-pub const CONSUMER_KNOWN_REASONS: [&str; 4] = ["trade", "deposit", "reset", "adjustment"];
+/// `withdrawal` добавлен по согласованию с сайтом (demo-money): сайт вносит
+/// его в перечень и делает разбор терпимым. Выводы бывают только у реальных
+/// счетов, а их события без `BUS_REAL_ACCOUNT_EVENTS=1` не собираются вовсе —
+/// значит, до выкатки потребителя значение на шину не попадёт.
+pub const CONSUMER_KNOWN_REASONS: [&str; 5] =
+    ["trade", "deposit", "reset", "adjustment", "withdrawal"];
 
 /// Причина, пригодная к отправке, или `None` — если потребитель её не знает.
 ///
@@ -476,11 +511,25 @@ fn balance_reason(
     if after.closed.len() > before.closed {
         return Some("trade");
     }
+    // Комиссия открытия двигает остаток без закрытой сделки — и это тоже
+    // сделка, а не ручная проводка.
+    if kinds
+        .iter()
+        .any(|k| matches!(k, EventKind::CommissionCharged { .. }))
+    {
+        return Some("trade");
+    }
     if kinds
         .iter()
         .any(|k| matches!(k, EventKind::Deposited { .. }))
     {
         return Some("deposit");
+    }
+    if kinds
+        .iter()
+        .any(|k| matches!(k, EventKind::Withdrawn { .. }))
+    {
+        return Some("withdrawal");
     }
     // Сброс демо-счёта (TRM-54). `reset` уже есть в перечне потребителя, так
     // что причина доедет и ничего не сломает.
@@ -547,6 +596,8 @@ fn trade_executed(
         "tenant": who.tenant,
         "userId": who.sub,
         "accountSeq": who.seq,
+        "accountKind": who.kind.tag(),
+        "accountId": who.account_id,
         // Номер сделки в истории счёта — он же её адрес в `GET /deals/closed`.
         // Устойчив между перезапусками: история только дописывается.
         "tradeId": format!("{}:{}", who.user, idx),
@@ -563,6 +614,21 @@ fn trade_executed(
     }
     if let Some(gap) = deal.across_gap {
         data["acrossGap"] = serde_json::Value::from(gap);
+    }
+    // Доход площадки со сделки (решение владельца 10.11) — по нему сайт
+    // считает кешбэк клиента и долю IB. Аддитивно: потребитель, который полей
+    // не знает, срезает их молча (лишние ключи `z.object` отбрасывает).
+    //
+    // `commissionMinor` — ВСЯ комиссия сделки (открытие, доливки, закрытие),
+    // фактически списанная; `markupMinor` — вся наценка (вход и выход) в
+    // наименьших единицах валюты счёта — те же `currency`/`currencyMinorUnits`,
+    // что у остальных сумм события. Нули — тарифа не было.
+    // `marketPrice` — рыночная цена закрытия ДО наценки (`price` — цена
+    // исполнения). Поля нет у сделок, закрытых до тарифов: цену мы не знаем.
+    data["commissionMinor"] = cents(deal.fees.commission);
+    data["markupMinor"] = cents(deal.fees.markup);
+    if let Some(m) = deal.fees.market_exit {
+        data["marketPrice"] = num(&decimal(m, deal.pd));
     }
     Envelope {
         // Ключ — счёт и номер сделки в его истории. Та же сделка, отданная на
@@ -597,6 +663,8 @@ pub fn margin_called(
         "tenant": who.tenant,
         "userId": who.sub,
         "accountSeq": who.seq,
+        "accountKind": who.kind.tag(),
+        "accountId": who.account_id,
         "marginLevelPct": cents(level_pct),
         "equityCents": cents(equity),
         "usedMarginCents": cents(used_margin),
@@ -882,6 +950,8 @@ mod tests {
             pendings: Vec::new(),
             closed: Vec::new(),
             model: PositionModel::Hedging,
+            leverage: None,
+            fees: Default::default(),
         }
     }
 
@@ -897,6 +967,7 @@ mod tests {
             qd: 5,
             level,
             across_gap: gap,
+            fees: Default::default(),
         }
     }
 
@@ -907,6 +978,8 @@ mod tests {
             user: 7,
             seq,
             at_ms: 1_767_225_600_123,
+            kind: AccountKind::Demo,
+            account_id: "00000000-0000-0000-0000-000000000000",
         }
     }
 
@@ -1251,6 +1324,7 @@ mod tests {
             sl: None,
             tp: None,
             leverage: 1,
+            fees: Default::default(),
         }];
         let evs = envelopes_for(&who(9), &before_empty(), &after, &[], &known);
         let e = evs

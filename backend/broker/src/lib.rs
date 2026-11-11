@@ -4,7 +4,7 @@
 //! (лимитные) ордера с триггером по цене, история закрытых сделок, маржа и P&L на реальных ценах.
 //! Деньги — в **центах** (`i128`). Реальных денег нет.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use domain::account::UserId;
 /// Реэкспорт словаря счёта: шлюз работает с ним через брокера, а не
@@ -16,7 +16,7 @@ pub use domain::account::{
 
 pub mod journal;
 
-use journal::{CloseCause, EventKind};
+use journal::{CloseCause, EventKind, RejectReason};
 
 /// Деньги в центах (1/100 USD).
 /// Денежная величина — целое в **наименьшей единице валюты счёта** (TRM-55).
@@ -121,6 +121,149 @@ pub fn margin_for(entry: i64, qty: i64, pd: u8, qd: u8, lev: i128, minor_per_uni
     value_minor(entry, qty, pd, qd, minor_per_unit) / lev.max(1)
 }
 
+// ===================== Тариф счёта: наценка и комиссия ======================
+//
+// Доход площадки (решение владельца 10.11): наценка на спред (портфель
+// Standard) и комиссия за сделку (Pro / ENC Prime). Ставки — свойство СЧЁТА,
+// задаются сайтом (админка, портфель), сюда приезжают двумя целыми. Ничего не
+// зашито: ноль — значит «без наценки и без комиссии», и счёт без назначенного
+// тарифа торгует ровно так, как торговал до тарифов.
+
+/// Верхняя граница ставки тарифа в базисных пунктах (500 bps = 5 %).
+///
+/// Предохранитель от опечатки в админке, а не коммерческое решение: 5 %
+/// наценки или комиссии за сделку уже за пределами любого розничного рынка,
+/// и число выше почти наверняка ошибка ввода (лишний ноль).
+pub const MAX_FEE_BPS: i64 = 500;
+
+/// Знаменатель базисного пункта.
+const BPS: i128 = 10_000;
+
+/// Тариф счёта: наценка на цену исполнения и комиссия от нотионала сделки,
+/// оба в базисных пунктах. `Default` — нули: без тарифа.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Fees {
+    /// Наценка на спред: покупка исполняется дороже рыночной цены на
+    /// `price · bps / 10000`, продажа — дешевле. На открытии и на закрытии.
+    pub markup_bps: i64,
+    /// Комиссия от нотионала сделки (`цена исполнения · объём`), списывается
+    /// с остатка при КАЖДОМ исполнении: открытие, доливка, закрытие.
+    pub commission_bps: i64,
+}
+
+impl Fees {
+    pub fn is_zero(&self) -> bool {
+        self.markup_bps == 0 && self.commission_bps == 0
+    }
+
+    /// Обе ставки — целые `0..=MAX_FEE_BPS`.
+    pub fn validate(&self) -> Result<(), BrokerError> {
+        let ok = |v: i64| (0..=MAX_FEE_BPS).contains(&v);
+        if ok(self.markup_bps) && ok(self.commission_bps) {
+            Ok(())
+        } else {
+            Err(BrokerError::InvalidFees)
+        }
+    }
+}
+
+/// Цена исполнения с наценкой.
+///
+/// `buy` — сторона ИСПОЛНЕНИЯ, а не позиции: открытие лонга и закрытие шорта —
+/// покупка (дороже рынка), открытие шорта и закрытие лонга — продажа
+/// (дешевле). Сдвиг — `market · bps / 10000`, округление к ближайшему (половина
+/// — от нуля): та же политика, что у усреднения входа, — систематическое
+/// отбрасывание дарило бы или отнимало деньги в одну сторону.
+pub fn apply_markup(buy: bool, market: i64, markup_bps: i64) -> i64 {
+    if markup_bps <= 0 {
+        return market;
+    }
+    let off = (market as i128 * markup_bps as i128 + BPS / 2) / BPS;
+    let off = off as i64;
+    if buy {
+        market + off
+    } else {
+        market - off
+    }
+}
+
+/// Комиссия за исполнение `qty` по цене `exec`: нотионал · bps / 10000, в
+/// наименьших единицах валюты счёта, округление к ближайшему.
+pub fn commission_for(
+    exec: i64,
+    qty: i64,
+    pd: u8,
+    qd: u8,
+    commission_bps: i64,
+    minor_per_unit: i128,
+) -> Minor {
+    if commission_bps <= 0 {
+        return 0;
+    }
+    let notional = value_minor(exec, qty, pd, qd, minor_per_unit);
+    (notional * commission_bps as i128 + BPS / 2) / BPS
+}
+
+/// Наценка в деньгах: разница цены исполнения и рыночной на объёме.
+///
+/// Это доход площадки от спреда — та же величина, на которую клиент получил
+/// худшую цену. Одна функция на живой путь и на свёртку.
+pub fn markup_amount(market: i64, exec: i64, qty: i64, pd: u8, qd: u8, minor: i128) -> Minor {
+    value_minor((exec - market).abs(), qty, pd, qd, minor)
+}
+
+/// Тариф, под которым позиция открыта, и доход площадки с неё, ещё не
+/// отнесённый к закрытой сделке.
+///
+/// **Снимок, как плечо.** Позиция закрывается по ставкам, действовавшим при
+/// её открытии: смена тарифа счёта касается новых позиций, а не тех, на
+/// которые человек уже согласился.
+///
+/// `commission` / `markup` — накопленное по этой позиции (открытие, доливки)
+/// и ещё не отнесённое к сделке истории. Закрытие (полное или частичное)
+/// забирает накопленное вместе со своим в [`ClosedDeal::fees`] и обнуляет:
+/// событие сделки на шине несёт ПОЛНЫЙ доход площадки с неё, а сделка на
+/// шину уходит только при закрытии.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PositionFees {
+    pub markup_bps: i64,
+    pub commission_bps: i64,
+    pub commission: Minor,
+    pub markup: Minor,
+}
+
+impl PositionFees {
+    fn snapshot(f: Fees) -> Self {
+        Self {
+            markup_bps: f.markup_bps,
+            commission_bps: f.commission_bps,
+            commission: 0,
+            markup: 0,
+        }
+    }
+    fn rates(&self) -> Fees {
+        Fees {
+            markup_bps: self.markup_bps,
+            commission_bps: self.commission_bps,
+        }
+    }
+}
+
+/// Доход площадки с закрытой сделки (решение владельца 10.11).
+///
+/// Нули у сделок без тарифа и у закрытых до появления тарифов.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DealFees {
+    /// Вся комиссия, отнесённая к этой сделке: открытия (и доливок) и
+    /// закрытия. Фактически списанная — после ограничения защитой от минуса.
+    pub commission: Minor,
+    /// Вся наценка, отнесённая к сделке: на входе и на выходе.
+    pub markup: Minor,
+    /// Рыночная цена на закрытии — до наценки. `exit` — цена исполнения.
+    /// `None` — сделка закрыта до появления поля.
+    pub market_exit: Option<i64>,
+}
+
 /// Открытая позиция.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Position {
@@ -145,6 +288,8 @@ pub struct Position {
     /// под ней считается одним правилом от открытия до закрытия (решение
     /// штаба). Поэтому запись о доливке своего плеча не несёт — оно уже здесь.
     pub leverage: i128,
+    /// Тариф на момент открытия и накопленный доход площадки (10.11).
+    pub fees: PositionFees,
 }
 
 impl Position {
@@ -203,6 +348,8 @@ pub struct ClosedDeal {
     /// появления поля: про них мы не знаем, а `false` утверждал бы, что
     /// разрыва не было. Отсутствующее значение ищут, лгущее читают как правду.
     pub across_gap: Option<bool>,
+    /// Комиссия и наценка, отнесённые к сделке, и рыночная цена закрытия.
+    pub fees: DealFees,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,7 +370,25 @@ pub enum BrokerError {
     StopLossAlreadyReached,
     /// Тейк-профит уже достигнут: позиция закрылась бы на первом же тике.
     TakeProfitAlreadyReached,
+    /// Плечо вне `1..=MAX_LEVERAGE`.
+    InvalidLeverage,
+    /// Ставка тарифа вне `0..=MAX_FEE_BPS`.
+    InvalidFees,
 }
+
+/// Условия, на которых счёт исполняет сделку: плечо и тариф для НОВОЙ
+/// позиции и правило защиты от минуса для комиссии. Одним значением, чтобы
+/// путь открытия не обрастал параметрами по одному.
+#[derive(Debug, Clone, Copy)]
+struct Terms {
+    lev: i128,
+    fees: Fees,
+    protect: bool,
+}
+
+/// Верхняя граница плеча (знаменатель 1:N). Одна на площадку и на счёт: та же,
+/// что у `PLATFORM_LEVERAGE`.
+pub const MAX_LEVERAGE: i128 = 1000;
 
 /// Сработал бы стоп-лосс `sl` при цене `m` у позиции стороны `side`.
 ///
@@ -299,6 +464,21 @@ struct Account {
     /// повторно. Это повтор **верного** предупреждения, а не ложное, и он
     /// дешевле столбца в денежной таблице ради состояния переписки.
     margin_called: bool,
+    /// Плечо **этого счёта** для новых позиций (Р-446: итог портфеля и
+    /// override клиента считает сайт, сюда приезжает одно число).
+    ///
+    /// `None` — счёту плечо не назначали, действует плечо площадки
+    /// (`PLATFORM_LEVERAGE`). Это не «1», а «как у площадки»: счёт, заведённый
+    /// до появления поля, обязан торговать так же, как торговал.
+    ///
+    /// Смена касается только **новых** позиций: открытые держат своё плечо
+    /// снимком (`Position::leverage`). Меняется только записью журнала
+    /// `LeverageSet` — свёртка обязана сходиться со слепком.
+    leverage: Option<i128>,
+    /// Тариф **этого счёта** для новых позиций: наценка и комиссия (10.11).
+    /// Нули — без тарифа. Как и плечо: назначает сайт, меняется только записью
+    /// `FeesSet`, открытые позиции держат свой снимок.
+    fees: Fees,
     /// Исходящая очередь событий журнала (TRM-13): что произошло со счётом в текущей
     /// операции. **Не часть состояния** — в слепок не попадает и рестарта не переживает:
     /// её забирает вызывающий сразу после операции и записывает в журнал той же
@@ -415,15 +595,90 @@ impl Account {
         self.outbox.push(e);
     }
 
+    /// Провести доход площадки с одного исполнения по позиции `id`: наценку
+    /// (`MarkupApplied`) и комиссию (`CommissionCharged`).
+    ///
+    /// **Позиция обязана быть на месте** — проводки относятся к ней, и
+    /// свёртка ищет её по тому же id. Поэтому на закрытии это зовётся ДО
+    /// снятия позиции, а на открытии — ПОСЛЕ её появления.
+    ///
+    /// `realized` — результат, который это исполнение вот-вот реализует (на
+    /// открытии ноль). Нужен ограничению комиссии защитой от минуса: при
+    /// включённой защите комиссия не уводит остаток ниже нуля — списывается
+    /// не больше, чем есть после реализации результата, а непогашенная часть
+    /// названа в записи (`waived`). Без защиты комиссия списывается целиком,
+    /// и минус, если он случился, виден проводкой, а не молча.
+    #[allow(clippy::too_many_arguments)]
+    fn book_execution(
+        &mut self,
+        id: u64,
+        market: i64,
+        exec: i64,
+        qty: i64,
+        pd: u8,
+        qd: u8,
+        rates: Fees,
+        protect: bool,
+        realized: Minor,
+    ) {
+        let minor = self.minor();
+        if rates.markup_bps > 0 {
+            let amount = markup_amount(market, exec, qty, pd, qd, minor);
+            if let Some(p) = self.positions.get_mut(&id) {
+                p.fees.markup += amount;
+            }
+            self.log(EventKind::MarkupApplied {
+                trade: id,
+                mkt: market,
+                exec,
+                amount,
+            });
+        }
+        let due = commission_for(exec, qty, pd, qd, rates.commission_bps, minor);
+        if due > 0 {
+            let amount = if protect {
+                due.min((self.balance + realized).max(0))
+            } else {
+                due
+            };
+            self.balance -= amount;
+            if let Some(p) = self.positions.get_mut(&id) {
+                p.fees.commission += amount;
+            }
+            self.log(EventKind::CommissionCharged {
+                amount,
+                trade: id,
+                waived: due - amount,
+            });
+        }
+    }
+
+    /// Забрать накопленный по позиции доход площадки в закрываемую сделку.
+    fn take_deal_fees(&mut self, id: u64, market: i64) -> DealFees {
+        let p = self.positions.get_mut(&id).expect("позиция на месте");
+        let f = DealFees {
+            commission: p.fees.commission,
+            markup: p.fees.markup,
+            market_exit: Some(market),
+        };
+        p.fees.commission = 0;
+        p.fees.markup = 0;
+        f
+    }
+
+    /// `market` — рыночная цена исполнения ДО наценки (ask для покупки, bid
+    /// для продажи, наблюдённая цена у отложенного ордера). Наценку
+    /// накладывает ядро по тарифу — не вызывающий: иначе цена исполнения
+    /// жила бы в двух местах.
     #[allow(clippy::too_many_arguments)]
     fn try_open(
         &mut self,
-        lev: i128,
+        t: Terms,
         marks: &HashMap<u32, i64>,
         instrument: u32,
         side: PosSide,
         qty: i64,
-        entry: i64,
+        market: i64,
         pd: u8,
         qd: u8,
         sl: Option<i64>,
@@ -438,32 +693,39 @@ impl Account {
         }
         match self.model {
             PositionModel::Hedging => {
-                self.open_new(lev, marks, instrument, side, qty, entry, pd, qd, sl, tp)
+                self.open_new(t, marks, instrument, side, qty, market, pd, qd, sl, tp)
             }
             PositionModel::Netting => {
-                self.open_netting(lev, marks, instrument, side, qty, entry, pd, qd, sl, tp)
+                self.open_netting(t, marks, instrument, side, qty, market, pd, qd, sl, tp)
             }
         }
     }
 
     /// Хеджирование: каждая сделка — новая независимая позиция.
+    ///
+    /// Позиция получает плечо и тариф счёта снимком. Допуск — маржа ПЛЮС
+    /// комиссия открытия: комиссия списывается сразу, и пускать сделку, на
+    /// комиссию которой нет свободных средств, значило бы открыть её в долг.
     #[allow(clippy::too_many_arguments)]
     fn open_new(
         &mut self,
-        lev: i128,
+        t: Terms,
         marks: &HashMap<u32, i64>,
         instrument: u32,
         side: PosSide,
         qty: i64,
-        entry: i64,
+        market: i64,
         pd: u8,
         qd: u8,
         sl: Option<i64>,
         tp: Option<i64>,
     ) -> Result<u64, BrokerError> {
-        let margin = margin_for(entry, qty, pd, qd, lev, self.minor());
+        let lev = t.lev;
+        let exec = apply_markup(side == PosSide::Long, market, t.fees.markup_bps);
+        let margin = margin_for(exec, qty, pd, qd, lev, self.minor());
+        let commission = commission_for(exec, qty, pd, qd, t.fees.commission_bps, self.minor());
         // Свободная маржа считается ОДНИМ способом — через equity (TRM-41).
-        if self.free_margin(marks) < margin {
+        if self.free_margin(marks) < margin + commission {
             return Err(BrokerError::InsufficientMargin);
         }
         self.next_id += 1;
@@ -475,13 +737,14 @@ impl Account {
                 instrument,
                 side,
                 qty,
-                entry,
+                entry: exec,
                 pd,
                 qd,
                 margin,
                 sl,
                 tp,
                 leverage: lev,
+                fees: PositionFees::snapshot(t.fees),
             },
         );
         self.log(EventKind::PositionOpened {
@@ -489,13 +752,14 @@ impl Account {
             instrument,
             side,
             qty,
-            entry,
+            entry: exec,
             pd,
             qd,
             sl,
             tp,
             lev,
         });
+        self.book_execution(id, market, exec, qty, pd, qd, t.fees, t.protect, 0);
         Ok(id)
     }
 
@@ -508,15 +772,19 @@ impl Account {
     /// Возвращает id позиции, которая существует ПОСЛЕ операции. Если встречная
     /// сделка свернула позицию ровно в ноль, возвращается id свёрнутой — вызывающему
     /// нужно чем-то ответить, а новой позиции не появилось.
+    ///
+    /// Тариф: всё, что касается СУЩЕСТВУЮЩЕЙ позиции (доливка, сворачивание),
+    /// идёт по её снимку — как плечо; остаток встречной сделки открывает новую
+    /// позицию по тарифу счёта.
     #[allow(clippy::too_many_arguments)]
     fn open_netting(
         &mut self,
-        lev: i128,
+        t: Terms,
         marks: &HashMap<u32, i64>,
         instrument: u32,
         side: PosSide,
         qty: i64,
-        entry: i64,
+        market: i64,
         pd: u8,
         qd: u8,
         sl: Option<i64>,
@@ -528,24 +796,28 @@ impl Account {
             .find(|p| p.instrument == instrument)
             .map(|p| p.id);
         let Some(pos_id) = existing else {
-            return self.open_new(lev, marks, instrument, side, qty, entry, pd, qd, sl, tp);
+            return self.open_new(t, marks, instrument, side, qty, market, pd, qd, sl, tp);
         };
         let cur = self
             .positions
             .get(&pos_id)
             .expect("позиция только что найдена")
             .clone();
+        let rates = cur.fees.rates();
+        let exec = apply_markup(side == PosSide::Long, market, rates.markup_bps);
 
         if cur.side == side {
             // Доливка: объёмы складываются, вход усредняется по объёму.
             let new_qty = cur.qty + qty;
-            let new_entry = merged_entry(cur.qty, cur.entry, qty, entry);
+            let new_entry = merged_entry(cur.qty, cur.entry, qty, exec);
             let new_margin = margin_for(new_entry, new_qty, pd, qd, cur.leverage, self.minor());
             // Считаем ДОПОЛНИТЕЛЬНУЮ маржу: часть уже занята этой же позицией.
             let extra = new_margin - cur.margin;
+            let commission = commission_for(exec, qty, pd, qd, rates.commission_bps, self.minor());
             // Тем же единственным определением, что и обычное открытие (TRM-41):
             // доливка — это увеличение риска, и считаться она обязана так же.
-            if extra > 0 && self.free_margin(marks) < extra {
+            let need = extra.max(0) + commission;
+            if need > 0 && self.free_margin(marks) < need {
                 return Err(BrokerError::InsufficientMargin);
             }
             let p = self.positions.get_mut(&pos_id).expect("позиция на месте");
@@ -563,10 +835,11 @@ impl Account {
             self.log(EventKind::PositionIncreased {
                 id: pos_id,
                 add_qty: qty,
-                add_entry: entry,
+                add_entry: exec,
                 sl,
                 tp,
             });
+            self.book_execution(pos_id, market, exec, qty, pd, qd, rates, t.protect, 0);
             return Ok(pos_id);
         }
 
@@ -575,19 +848,23 @@ impl Account {
         let pnl = realized_on_close(
             cur.side,
             cur.entry,
-            entry,
+            exec,
             closing,
             cur.pd,
             cur.qd,
             self.minor(),
         );
+        self.book_execution(
+            pos_id, market, exec, closing, cur.pd, cur.qd, rates, t.protect, pnl,
+        );
+        let fees = self.take_deal_fees(pos_id, market);
         self.balance += pnl;
         self.closed.push(ClosedDeal {
             instrument: cur.instrument,
             side: cur.side,
             qty: closing,
             entry: cur.entry,
-            exit: entry,
+            exit: exec,
             pnl,
             pd: cur.pd,
             qd: cur.qd,
@@ -595,6 +872,7 @@ impl Account {
             // разрыв ряда ни при чём — закрыл не триггер, а другая сделка.
             level: None,
             across_gap: Some(false),
+            fees,
         });
 
         let left = cur.qty - closing;
@@ -608,7 +886,7 @@ impl Account {
             self.log(EventKind::PositionReduced {
                 id: pos_id,
                 qty: closing,
-                exit: entry,
+                exit: exec,
             });
             return Ok(pos_id);
         }
@@ -616,7 +894,7 @@ impl Account {
         self.positions.remove(&pos_id);
         self.log(EventKind::PositionClosed {
             id: pos_id,
-            exit: entry,
+            exit: exec,
             cause: CloseCause::Netting,
             level: None,
             across_gap: false,
@@ -627,7 +905,7 @@ impl Account {
             // сторону. В историю попадает только свёрнутая часть — остаток ещё не
             // закрыт, и место ему не в истории закрытых сделок (ADR-025).
             return self.open_new(
-                lev, marks, instrument, side, remainder, entry, pd, qd, sl, tp,
+                t, marks, instrument, side, remainder, market, pd, qd, sl, tp,
             );
         }
         Ok(pos_id)
@@ -636,24 +914,37 @@ impl Account {
     /// `cause` — не косметика: по журналу надо отличать «человек закрыл» от «сработал
     /// стоп». Иначе при разборе претензии «меня закрыли не по моей команде» ответить
     /// будет нечем, а это ровно тот разговор, ради которого журнал и заводится.
-    /// `exec` — цена ИСПОЛНЕНИЯ: по ней считаются деньги, и у триггеров это
-    /// наблюдённая рыночная цена (Р-178, проскальзывание). `level` — уровень,
-    /// который ставил человек; у закрытия по команде уровня нет, там `None`.
+    /// `market` — рыночная цена (у триггеров — наблюдённая, Р-178,
+    /// проскальзывание); исполнение — она же с наценкой по снимку тарифа
+    /// позиции, и по ней считаются деньги. `level` — уровень, который ставил
+    /// человек; у закрытия по команде уровня нет, там `None`.
     ///
     /// Обе нужны вместе: по одной `exec` нельзя отличить «рынок дошёл ровно до
     /// стопа» от «рынок перепрыгнул стоп на разрыве», а это разные разговоры
     /// с клиентом (TRM-31).
+    ///
+    /// Комиссия закрытия списывается здесь — у любой причины закрытия:
+    /// команда, SL/TP, стоп-аут.
     fn close_pos(
         &mut self,
         id: u64,
-        exec: i64,
+        market: i64,
         level: Option<i64>,
         across_gap: bool,
         cause: CloseCause,
+        protect: bool,
     ) -> Option<Cents> {
         let minor = self.minor();
-        let pos = self.positions.remove(&id)?;
+        let pos = self.positions.get(&id)?.clone();
+        let rates = pos.fees.rates();
+        // Закрытие лонга — продажа (дешевле рынка), закрытие шорта — покупка.
+        let exec = apply_markup(pos.side == PosSide::Short, market, rates.markup_bps);
         let pnl = pos.unrealized(exec, minor);
+        self.book_execution(
+            id, market, exec, pos.qty, pos.pd, pos.qd, rates, protect, pnl,
+        );
+        let fees = self.take_deal_fees(id, market);
+        self.positions.remove(&id);
         self.balance += pnl;
         self.closed.push(ClosedDeal {
             instrument: pos.instrument,
@@ -666,6 +957,7 @@ impl Account {
             qd: pos.qd,
             level,
             across_gap: Some(across_gap),
+            fees,
         });
         self.log(EventKind::PositionClosed {
             id,
@@ -686,14 +978,16 @@ impl Account {
     /// значило бы не исполнить стоп на реальном движении. Меняется только
     /// запись: закрытие на разрыве должно быть отличимо в журнале, потому что
     /// спорят именно о нём.
+    #[allow(clippy::too_many_arguments)]
     fn run_triggers(
         &mut self,
-        lev: i128,
+        t: Terms,
         marks: &HashMap<u32, i64>,
         across_gap: bool,
         stop_out_pct: Option<i128>,
-        protect_negative: bool,
+        frozen: bool,
     ) -> bool {
+        let protect_negative = t.protect;
         // Сработавшие лимитные ордера → открыть позицию.
         let mut fire: Vec<PendingOrder> = Vec::new();
         self.pendings.retain(|_, p| match marks.get(&p.instrument) {
@@ -723,14 +1017,30 @@ impl Account {
             // и это не щедрость, а то же самое правило: исполняется то, что на
             // рынке, а не то, что мы пообещали нарисовать.
             let exec = marks.get(&p.instrument).copied().unwrap_or(p.price);
+            // Счёт заморожен оператором — ордер, поставленный ДО заморозки,
+            // позицию не открывает. Проверка на постановке есть, но ордер
+            // исполняется позже и без человека: заморозка, проверяемая только
+            // на входе, пропускала бы через монитор ровно то, что запрещает.
+            // Ордер снимается своей записью с причиной — не молча и не
+            // «сработал»: позиции не было, и лента обязана это сказать.
+            if frozen {
+                self.log(EventKind::PendingRejected {
+                    id: p.id,
+                    exec: Some(exec),
+                    reason: RejectReason::AccountFrozen,
+                });
+                continue;
+            }
             self.log(EventKind::PendingTriggered {
                 id: p.id,
                 price: p.price,
                 exec: Some(exec),
                 across_gap,
             });
+            // Тариф и плечо — действующие на момент ИСПОЛНЕНИЯ (как с плечом,
+            // Р-446): ордер ничего не резервирует, допуск идёт сейчас.
             let _ = self.try_open(
-                lev,
+                t,
                 marks,
                 p.instrument,
                 p.side,
@@ -770,7 +1080,7 @@ impl Account {
         }
         let closed_any = !to_close.is_empty();
         for (id, exec, level, cause) in to_close {
-            self.close_pos(id, exec, Some(level), across_gap, cause);
+            self.close_pos(id, exec, Some(level), across_gap, cause, t.protect);
         }
 
         // Защита от отрицательного остатка идёт ПОСЛЕ закрытия (TRM-42): она
@@ -785,7 +1095,7 @@ impl Account {
         // (TRM-41). Порядок не стилистический: если стоп человека сработал на
         // этом же тике, закрыть обязан он, а не мы. Иначе брокер отбирает у
         // клиента исполнение его же распоряжения и ставит себе причину закрытия.
-        let stopped_out = self.run_stop_out(marks, across_gap, stop_out_pct);
+        let stopped_out = self.run_stop_out(marks, across_gap, stop_out_pct, t.protect);
         let compensated = self.cover_negative_balance(protect_negative);
 
         fired_any || closed_any || stopped_out || compensated
@@ -842,6 +1152,7 @@ impl Account {
         marks: &HashMap<u32, i64>,
         across_gap: bool,
         stop_out_pct: Option<i128>,
+        protect: bool,
     ) -> bool {
         let Some(threshold) = stop_out_pct else {
             return false;
@@ -874,7 +1185,7 @@ impl Account {
             };
             // Уровня человек здесь не ставил: закрытие наше, и называть
             // что-либо «уровнем» было бы приписыванием ему чужого решения.
-            self.close_pos(id, mark, None, across_gap, CloseCause::StopOut);
+            self.close_pos(id, mark, None, across_gap, CloseCause::StopOut, protect);
             closed = true;
         }
         closed
@@ -1209,18 +1520,31 @@ impl Broker {
         sl: Option<i64>,
         tp: Option<i64>,
     ) -> Result<u64, BrokerError> {
-        let lev = self.leverage;
-        self.acct(user)
-            .try_open(lev, marks, instrument, side, qty, entry, pd, qd, sl, tp)
+        // Плечо СЧЁТА, а если не назначено — площадки. Оно ложится снимком в
+        // позицию и дальше от счёта не зависит (TRM-53).
+        // Тариф счёта — так же снимком (10.11).
+        let platform = self.leverage;
+        let protect = self.protect_negative_balance;
+        let a = self.acct(user);
+        let t = Terms {
+            lev: a.leverage.unwrap_or(platform),
+            fees: a.fees,
+            protect,
+        };
+        a.try_open(t, marks, instrument, side, qty, entry, pd, qd, sl, tp)
     }
 
     /// Закрыть позицию по марк-цене. Возвращает реализованный P&L.
+    ///
+    /// `mark` — рыночная цена; исполнение — с наценкой по снимку тарифа
+    /// позиции, комиссия закрытия списывается отдельной проводкой.
     pub fn close(&mut self, user: UserId, id: u64, mark: i64) -> Result<Cents, BrokerError> {
         // Закрытие по команде исполняется по той же цене, которую видели:
         // расхождения нет, и `level` здесь молчит — не потому что неизвестно,
         // а потому что назвать нечего.
+        let protect = self.protect_negative_balance;
         self.acct(user)
-            .close_pos(id, mark, None, false, CloseCause::Command)
+            .close_pos(id, mark, None, false, CloseCause::Command, protect)
             .ok_or(BrokerError::UnknownPosition)
     }
 
@@ -1331,12 +1655,42 @@ impl Broker {
     /// `across_gap` — первый прогон после молчания фида (Р-073). Передаёт его
     /// вызывающий: о свежести цен знает тот, кто их принимает, а не брокер.
     pub fn check(&mut self, marks: &HashMap<u32, i64>, across_gap: bool) -> Vec<UserId> {
-        let lev = self.leverage;
+        self.check_with_frozen(marks, across_gap, &HashSet::new())
+    }
+
+    /// [`Self::check`] с перечнем счетов, торговля по которым заморожена.
+    ///
+    /// Заморозку держит шлюз (свёртка журнала, `TradingFreezeSet`), а не
+    /// брокер, поэтому она приходит аргументом. У замороженного счёта
+    /// сработавший отложенный ордер **снимается** (`PendingRejected`), а не
+    /// исполняется; стопы, тейки и стоп-аут работают как обычно — они
+    /// закрывают риск, а не открывают его.
+    ///
+    /// Плечо исполнения отложенного ордера — **действующее плечо счёта на
+    /// момент исполнения**, а не постановки. Ордер маржу не резервирует, допуск
+    /// по марже идёт при исполнении, и плечо — вход того же расчёта. Снимок
+    /// плеча в ордере пропускал бы через монитор решение, которое оператор уже
+    /// отменил (снизил плечо по риску), — та же дыра, что с заморозкой, только
+    /// в цифрах. Позиция, родившаяся из ордера, дальше держит своё плечо
+    /// снимком, как любая другая.
+    pub fn check_with_frozen(
+        &mut self,
+        marks: &HashMap<u32, i64>,
+        across_gap: bool,
+        frozen: &HashSet<UserId>,
+    ) -> Vec<UserId> {
+        let platform = self.leverage;
         let stop_out = self.stop_out_pct;
         let protect = self.protect_negative_balance;
         let mut changed = Vec::new();
         for (user, a) in self.accounts.iter_mut() {
-            if a.run_triggers(lev, marks, across_gap, stop_out, protect) {
+            let t = Terms {
+                lev: a.leverage.unwrap_or(platform),
+                fees: a.fees,
+                protect,
+            };
+            let is_frozen = frozen.contains(user);
+            if a.run_triggers(t, marks, across_gap, stop_out, is_frozen) {
                 changed.push(*user);
             }
         }
@@ -1361,6 +1715,8 @@ impl Broker {
                 pendings: a.pendings.values().cloned().collect(),
                 closed: a.closed.clone(),
                 model: a.model,
+                leverage: a.leverage,
+                fees: a.fees,
             },
             None => AccountSnapshot {
                 profile: AccountProfile::legacy_demo(user),
@@ -1370,6 +1726,8 @@ impl Broker {
                 pendings: vec![],
                 closed: vec![],
                 model: PositionModel::default(),
+                leverage: None,
+                fees: Fees::default(),
             },
         }
     }
@@ -1388,6 +1746,8 @@ impl Broker {
             pendings: snap.pendings.into_iter().map(|p| (p.id, p)).collect(),
             closed: snap.closed,
             model: snap.model,
+            leverage: snap.leverage,
+            fees: snap.fees,
             // Защёлка предупреждения состояние счёта не описывает и в слепке её
             // нет: после подъёма счёт, всё ещё лежащий ниже уровня, будет
             // предупреждён заново. Повтор верного предупреждения дешевле
@@ -1465,9 +1825,72 @@ impl Broker {
             .unwrap_or_default()
     }
 
-    /// Плечо брокера — нужно тем, кто проверяет инварианты по слепку.
+    /// Плечо площадки (`PLATFORM_LEVERAGE`) — умолчание для счёта, которому
+    /// своё плечо не назначали.
     pub fn leverage(&self) -> i128 {
         self.leverage
+    }
+
+    /// Плечо, с которым у этого счёта откроется **следующая** позиция: своё
+    /// плечо счёта, а если его не назначали — плечо площадки. Для счёта,
+    /// которого ещё нет, — плечо площадки: с ним он и откроется.
+    pub fn account_leverage(&self, user: UserId) -> i128 {
+        self.assigned_leverage(user).unwrap_or(self.leverage)
+    }
+
+    /// Назначено ли счёту своё плечо (`None` — действует плечо площадки).
+    pub fn assigned_leverage(&self, user: UserId) -> Option<i128> {
+        self.accounts.get(&user).and_then(|a| a.leverage)
+    }
+
+    /// Назначить плечо счёту (Р-446). Касается только **новых** позиций:
+    /// открытые держат своё плечо снимком, и маржа под ними не меняется.
+    ///
+    /// `Ok(true)` — плечо сменилось, в очереди лежит `LeverageSet`;
+    /// `Ok(false)` — оно уже такое, записи нет (повтор не шумит в журнал).
+    /// Счёта нет — отказ, а не заведение: счёт заводит шлюз своей записью.
+    pub fn set_account_leverage(&mut self, user: UserId, lev: i128) -> Result<bool, BrokerError> {
+        if !(1..=MAX_LEVERAGE).contains(&lev) {
+            return Err(BrokerError::InvalidLeverage);
+        }
+        let a = self
+            .accounts
+            .get_mut(&user)
+            .ok_or(BrokerError::UnknownAccount)?;
+        if a.leverage == Some(lev) {
+            return Ok(false);
+        }
+        a.leverage = Some(lev);
+        a.log(EventKind::LeverageSet { lev });
+        Ok(true)
+    }
+
+    /// Тариф счёта для **новых** позиций (нули — без тарифа). Для счёта,
+    /// которого нет, — нули: с ними он и откроется.
+    pub fn account_fees(&self, user: UserId) -> Fees {
+        self.accounts.get(&user).map(|a| a.fees).unwrap_or_default()
+    }
+
+    /// Назначить счёту тариф (10.11): наценку и комиссию в bps. Касается
+    /// только **новых** позиций — открытые закрываются по своему снимку.
+    ///
+    /// `Ok(true)` — тариф сменился, в очереди `FeesSet`; `Ok(false)` — уже
+    /// такой, записи нет. Счёта нет — отказ, а не заведение.
+    pub fn set_account_fees(&mut self, user: UserId, fees: Fees) -> Result<bool, BrokerError> {
+        fees.validate()?;
+        let a = self
+            .accounts
+            .get_mut(&user)
+            .ok_or(BrokerError::UnknownAccount)?;
+        if a.fees == fees {
+            return Ok(false);
+        }
+        a.fees = fees;
+        a.log(EventKind::FeesSet {
+            markup_bps: fees.markup_bps,
+            commission_bps: fees.commission_bps,
+        });
+        Ok(true)
     }
 
     /// Сменить плечо площадки (TRM-53 шаг 2).
@@ -1517,6 +1940,11 @@ pub struct AccountSnapshot {
     /// Модель ведения позиций счёта (ADR-025). Счета, заведённые до 2026-09-04,
     /// поднимаются как `Hedging` — другой модели в коде не существовало.
     pub model: PositionModel,
+    /// Плечо счёта для новых позиций (Р-446). `None` — не назначали, действует
+    /// плечо площадки.
+    pub leverage: Option<i128>,
+    /// Тариф счёта для новых позиций (10.11). Нули — без тарифа.
+    pub fees: Fees,
 }
 
 // ======================= Инварианты денег (красная линия №5) =================
@@ -1620,6 +2048,30 @@ pub fn check_snapshot(snap: &AccountSnapshot) -> Vec<Violation> {
         }
     }
 
+    // 2а. Тариф (10.11): ставки в пределах, накопленный доход не отрицательный.
+    //     Ставка вне пределов из хранилища — испорченная строка: по ней
+    //     пошли бы деньги каждой следующей сделки.
+    if snap.fees.validate().is_err() {
+        v(
+            &mut out,
+            format!("тариф счёта вне 0..={MAX_FEE_BPS} bps: {:?}", snap.fees),
+        );
+    }
+    for p in &snap.positions {
+        if p.fees.rates().validate().is_err() {
+            v(
+                &mut out,
+                format!("позиция {}: тариф вне 0..={MAX_FEE_BPS} bps", p.id),
+            );
+        }
+        if p.fees.commission < 0 || p.fees.markup < 0 {
+            v(
+                &mut out,
+                format!("позиция {}: отрицательный накопленный доход площадки", p.id),
+            );
+        }
+    }
+
     // 3. То же для отложенных ордеров: они станут позициями по этим же числам.
     for o in &snap.pendings {
         if o.qty <= 0 {
@@ -1704,6 +2156,7 @@ mod invariant_tests {
             sl: None,
             tp: None,
             leverage: 1,
+            fees: Default::default(),
         }
     }
 
@@ -1723,6 +2176,8 @@ mod invariant_tests {
             pendings: vec![],
             closed: vec![],
             model: PositionModel::Hedging,
+            leverage: None,
+            fees: Default::default(),
         }
     }
 
@@ -2655,5 +3110,759 @@ mod netting_tests {
             restored.positions(u).is_empty(),
             "восстановленный счёт обязан неттить"
         );
+    }
+}
+
+// ============== Плечо счёта и заморозка на исполнении (Р-446) ===============
+#[cfg(test)]
+mod account_leverage_tests {
+    use super::journal::{self, Journal, Origin};
+    use super::*;
+
+    const U: UserId = UserId(7);
+
+    /// Брокер с открытым счётом и журналом, в который принята запись о заведении.
+    fn setup(platform_lev: i128) -> (Broker, Journal) {
+        let mut b = Broker::new(1_000_000_000, platform_lev);
+        assert!(b.open_account(U));
+        let mut j = Journal::new(b.start_balance());
+        commit(&mut b, &mut j);
+        (b, j)
+    }
+
+    /// Забрать события операции, свериться со слепком и принять их в ленту —
+    /// тот же порядок, что у шлюза.
+    fn commit(b: &mut Broker, j: &mut Journal) {
+        let kinds = b.take_events(U);
+        let sealed = j.seal(1, &Origin::System, &kinds);
+        let snap = b.snapshot(U);
+        assert_eq!(
+            journal::reconcile(&j.preview(&sealed), &snap),
+            vec![],
+            "лента сходится со слепком"
+        );
+        for e in sealed {
+            j.commit(e).expect("запись продолжает ленту");
+        }
+    }
+
+    fn marks(px: i64) -> HashMap<u32, i64> {
+        HashMap::from([(1u32, px)])
+    }
+
+    fn lev_of(b: &Broker, id: u64) -> i128 {
+        b.positions(U)
+            .into_iter()
+            .find(|p| p.id == id)
+            .expect("позиция есть")
+            .leverage
+    }
+
+    #[test]
+    fn unassigned_account_trades_at_platform_leverage() {
+        let (mut b, mut j) = setup(20);
+        assert_eq!(b.assigned_leverage(U), None);
+        assert_eq!(b.account_leverage(U), 20, "умолчание — плечо площадки");
+        let id = b
+            .open(
+                U,
+                &marks(5000),
+                1,
+                PosSide::Long,
+                1000,
+                5000,
+                2,
+                3,
+                None,
+                None,
+            )
+            .unwrap();
+        commit(&mut b, &mut j);
+        assert_eq!(lev_of(&b, id), 20);
+    }
+
+    /// Новое плечо — новым позициям; старая держит снимок. Смена журналируется
+    /// и переживает рестарт: свёртка ленты даёт то же плечо, что слепок.
+    #[test]
+    fn new_position_takes_new_leverage_old_keeps_its_own_and_survives_restart() {
+        let (mut b, mut j) = setup(20);
+        let old = b
+            .open(
+                U,
+                &marks(5000),
+                1,
+                PosSide::Long,
+                1000,
+                5000,
+                2,
+                3,
+                None,
+                None,
+            )
+            .unwrap();
+        commit(&mut b, &mut j);
+        let old_margin = b.used_margin(U);
+
+        assert_eq!(b.set_account_leverage(U, 50), Ok(true));
+        assert_eq!(
+            b.take_events_peek(),
+            vec![EventKind::LeverageSet { lev: 50 }],
+            "смена плеча — своя запись"
+        );
+        commit(&mut b, &mut j);
+        assert_eq!(
+            b.used_margin(U),
+            old_margin,
+            "маржа открытой позиции не двинулась"
+        );
+
+        let new = b
+            .open(
+                U,
+                &marks(5000),
+                1,
+                PosSide::Long,
+                1000,
+                5000,
+                2,
+                3,
+                None,
+                None,
+            )
+            .unwrap();
+        commit(&mut b, &mut j);
+        assert_eq!(lev_of(&b, old), 20, "старая позиция — со старым плечом");
+        assert_eq!(lev_of(&b, new), 50, "новая — с плечом счёта");
+
+        // «Рестарт»: лента поднимается из записей, слепок — из хранилища.
+        let events = j.events().to_vec();
+        let reloaded = Journal::load(b.start_balance(), events).expect("лента цела");
+        assert_eq!(reloaded.state().leverage, Some(50), "плечо в свёртке");
+        let snap = b.snapshot(U);
+        assert_eq!(snap.leverage, Some(50), "плечо в слепке");
+        assert!(
+            journal::audit(&reloaded, &snap).ok(),
+            "сверка после рестарта"
+        );
+        let mut b2 = Broker::new(b.start_balance(), 20);
+        b2.restore(U, snap);
+        assert_eq!(
+            b2.account_leverage(U),
+            50,
+            "после подъёма плечо счёта прежнее"
+        );
+    }
+
+    /// Плечо в слепке без записи в ленте — расхождение, а не тихая правка.
+    #[test]
+    fn leverage_without_a_journal_entry_is_a_divergence() {
+        let (mut b, j) = setup(20);
+        b.set_account_leverage(U, 50).unwrap();
+        let _ = b.take_events(U); // запись «потерялась»
+        let ds = journal::reconcile(j.state(), &b.snapshot(U));
+        assert!(
+            ds.iter().any(|d| d.0.contains("плечо счёта")),
+            "расхождение названо: {ds:?}"
+        );
+    }
+
+    #[test]
+    fn leverage_is_validated_and_a_repeat_writes_nothing() {
+        let (mut b, _j) = setup(20);
+        for bad in [0, -1, MAX_LEVERAGE + 1] {
+            assert_eq!(
+                b.set_account_leverage(U, bad),
+                Err(BrokerError::InvalidLeverage),
+                "плечо {bad} не принимается"
+            );
+        }
+        assert_eq!(b.set_account_leverage(U, MAX_LEVERAGE), Ok(true));
+        let _ = b.take_events(U);
+        assert_eq!(b.set_account_leverage(U, MAX_LEVERAGE), Ok(false));
+        assert_eq!(b.pending_events(U), 0, "повтор не пишет запись");
+        assert_eq!(
+            b.set_account_leverage(UserId(999), 10),
+            Err(BrokerError::UnknownAccount),
+            "счёт не заводится ради плеча"
+        );
+    }
+
+    /// Отложенный ордер исполняется по плечу счёта НА МОМЕНТ ИСПОЛНЕНИЯ:
+    /// маржу он не резервирует, допуск идёт при исполнении.
+    #[test]
+    fn pending_order_executes_at_the_leverage_in_force_when_it_fires() {
+        let (mut b, mut j) = setup(20);
+        b.place_pending(U, 1, PosSide::Long, 1000, 4900, 2, 3, None, None)
+            .unwrap();
+        commit(&mut b, &mut j);
+        b.set_account_leverage(U, 5).unwrap();
+        commit(&mut b, &mut j);
+
+        assert_eq!(b.check(&marks(4890), false), vec![U]);
+        commit(&mut b, &mut j);
+        let p = b.positions(U);
+        assert_eq!(p.len(), 1, "ордер исполнен");
+        assert_eq!(p[0].leverage, 5, "плечо — действующее при исполнении");
+    }
+
+    /// Дыра заморозки: ордер, поставленный до заморозки, при срабатывании
+    /// позицию НЕ открывает — снимается записью с причиной.
+    #[test]
+    fn frozen_account_pending_is_rejected_on_fire_not_executed() {
+        let (mut b, mut j) = setup(20);
+        let id = b
+            .place_pending(U, 1, PosSide::Long, 1000, 4900, 2, 3, None, None)
+            .unwrap();
+        commit(&mut b, &mut j);
+
+        let frozen = HashSet::from([U]);
+        assert_eq!(b.check_with_frozen(&marks(4890), false, &frozen), vec![U]);
+        assert_eq!(
+            b.take_events_peek(),
+            vec![EventKind::PendingRejected {
+                id,
+                exec: Some(4890),
+                reason: RejectReason::AccountFrozen,
+            }]
+        );
+        commit(&mut b, &mut j);
+        assert!(b.positions(U).is_empty(), "позиция не открыта");
+        assert!(b.pendings(U).is_empty(), "ордер снят");
+        assert!(j.state().pendings.is_empty(), "и в свёртке тоже");
+    }
+
+    /// Не сработавший ордер замороженного счёта остаётся стоять: снимается он
+    /// только при срабатывании, разморозка до него — и он исполнится.
+    #[test]
+    fn frozen_account_pending_that_does_not_fire_stays() {
+        let (mut b, mut j) = setup(20);
+        b.place_pending(U, 1, PosSide::Long, 1000, 4900, 2, 3, None, None)
+            .unwrap();
+        commit(&mut b, &mut j);
+        let frozen = HashSet::from([U]);
+        assert!(b.check_with_frozen(&marks(5000), false, &frozen).is_empty());
+        assert_eq!(b.pendings(U).len(), 1);
+    }
+
+    impl Broker {
+        /// Посмотреть события очереди, не забирая их.
+        fn take_events_peek(&self) -> Vec<EventKind> {
+            self.accounts
+                .get(&U)
+                .map(|a| a.outbox.clone())
+                .unwrap_or_default()
+        }
+    }
+}
+
+// ============== Тариф счёта: наценка и комиссия (решение 10.11) ==============
+#[cfg(test)]
+mod fees_tests {
+    use super::journal::{self, Journal, Origin};
+    use super::*;
+
+    const U: UserId = UserId(9);
+    /// 50 000.00 при pd=2.
+    const PX: i64 = 5_000_000;
+    /// 1.000 при qd=3.
+    const Q: i64 = 1000;
+
+    fn setup() -> (Broker, Journal) {
+        setup_with(Broker::new(1_000_000_000, 20))
+    }
+
+    fn setup_with(mut b: Broker) -> (Broker, Journal) {
+        assert!(b.open_account(U));
+        let mut j = Journal::new(b.start_balance());
+        commit(&mut b, &mut j);
+        (b, j)
+    }
+
+    /// Тот же порядок, что у шлюза: забрать события, свериться, принять.
+    fn commit(b: &mut Broker, j: &mut Journal) -> Vec<EventKind> {
+        let kinds = b.take_events(U);
+        let sealed = j.seal(1, &Origin::System, &kinds);
+        let snap = b.snapshot(U);
+        assert_eq!(
+            journal::reconcile(&j.preview(&sealed), &snap),
+            vec![],
+            "лента сходится со слепком"
+        );
+        for e in sealed {
+            j.commit(e).expect("запись продолжает ленту");
+        }
+        kinds
+    }
+
+    fn marks(px: i64) -> HashMap<u32, i64> {
+        HashMap::from([(1u32, px)])
+    }
+
+    fn fees(markup_bps: i64, commission_bps: i64) -> Fees {
+        Fees {
+            markup_bps,
+            commission_bps,
+        }
+    }
+
+    fn open(b: &mut Broker, side: PosSide, market: i64) -> Result<u64, BrokerError> {
+        b.open(U, &marks(market), 1, side, Q, market, 2, 3, None, None)
+    }
+
+    fn pos(b: &Broker, id: u64) -> Position {
+        b.positions(U).into_iter().find(|p| p.id == id).unwrap()
+    }
+
+    #[test]
+    fn helpers_round_to_nearest() {
+        // 10 bps от 50 000.00 = 50.00 → 5000 единиц цены.
+        assert_eq!(apply_markup(true, PX, 10), PX + 5000);
+        assert_eq!(apply_markup(false, PX, 10), PX - 5000);
+        assert_eq!(apply_markup(true, PX, 0), PX, "ноль — рынок");
+        // 1 bps от 15 = 0.0015 → 0; от 5000 = 0.5 → половина от нуля = 1.
+        assert_eq!(apply_markup(true, 15, 1), 15);
+        assert_eq!(apply_markup(true, 5000, 1), 5001);
+        // Нотионал 50 050.00 USD = 5 005 000 центов; 7 bps = 3503.5 → 3504.
+        assert_eq!(commission_for(5_005_000, Q, 2, 3, 7, 100), 3504);
+        assert_eq!(commission_for(PX, Q, 2, 3, 0, 100), 0);
+        assert_eq!(markup_amount(PX, PX + 5000, Q, 2, 3, 100), 5000);
+        assert_eq!(markup_amount(PX, PX - 5000, Q, 2, 3, 100), 5000);
+    }
+
+    /// Покупка — дороже рынка, продажа — дешевле; на открытии и на закрытии,
+    /// для обеих сторон.
+    #[test]
+    fn markup_moves_the_price_against_the_client_on_both_sides() {
+        let (mut b, mut j) = setup();
+        b.set_account_fees(U, fees(10, 0)).unwrap();
+        commit(&mut b, &mut j);
+
+        let long = open(&mut b, PosSide::Long, PX).unwrap();
+        commit(&mut b, &mut j);
+        assert_eq!(pos(&b, long).entry, PX + 5000, "покупка дороже ask");
+        let short = open(&mut b, PosSide::Short, PX).unwrap();
+        commit(&mut b, &mut j);
+        assert_eq!(pos(&b, short).entry, PX - 5000, "продажа дешевле bid");
+
+        b.close(U, long, PX).unwrap();
+        commit(&mut b, &mut j);
+        b.close(U, short, PX).unwrap();
+        let kinds = commit(&mut b, &mut j);
+        let deals = b.closed_deals(U);
+        assert_eq!(deals[0].exit, PX - 5000, "закрытие лонга — продажа дешевле");
+        assert_eq!(deals[1].exit, PX + 5000, "закрытие шорта — покупка дороже");
+        for d in &deals {
+            assert_eq!(
+                d.pnl, -10_000,
+                "рынок не двигался — клиент теряет обе наценки"
+            );
+            assert_eq!(d.fees.markup, 10_000, "наценка входа и выхода в сделке");
+            assert_eq!(d.fees.commission, 0);
+            assert_eq!(d.fees.market_exit, Some(PX), "рыночная цена закрытия");
+        }
+        assert!(kinds.contains(&EventKind::MarkupApplied {
+            trade: short,
+            mkt: PX,
+            exec: PX + 5000,
+            amount: 5000
+        }));
+        assert_eq!(b.balance(U), Some(1_000_000_000 - 20_000));
+    }
+
+    /// Комиссия списывается на открытии и на закрытии, отдельными проводками,
+    /// и вся отнесена к сделке.
+    #[test]
+    fn commission_is_charged_on_open_and_on_close() {
+        let (mut b, mut j) = setup();
+        b.set_account_fees(U, fees(0, 7)).unwrap();
+        assert_eq!(
+            commit(&mut b, &mut j),
+            vec![EventKind::FeesSet {
+                markup_bps: 0,
+                commission_bps: 7
+            }]
+        );
+        let id = open(&mut b, PosSide::Long, PX).unwrap();
+        let kinds = commit(&mut b, &mut j);
+        // Нотионал 50 000.00 = 5 000 000 центов · 7 bps = 3500.
+        assert_eq!(
+            kinds.last(),
+            Some(&EventKind::CommissionCharged {
+                amount: 3500,
+                trade: id,
+                waived: 0
+            })
+        );
+        assert_eq!(b.balance(U), Some(1_000_000_000 - 3500));
+        assert_eq!(pos(&b, id).fees.commission, 3500);
+
+        // Закрытие по 51 000.00: нотионал 5 100 000 · 7 bps = 3570.
+        b.close(U, id, 5_100_000).unwrap();
+        let kinds = commit(&mut b, &mut j);
+        assert!(matches!(
+            kinds.as_slice(),
+            [
+                EventKind::CommissionCharged {
+                    amount: 3570,
+                    waived: 0,
+                    ..
+                },
+                EventKind::PositionClosed { .. }
+            ]
+        ));
+        let d = &b.closed_deals(U)[0];
+        assert_eq!(d.pnl, 100_000, "результат — по цене, без комиссии");
+        assert_eq!(d.fees.commission, 3500 + 3570, "комиссия входа и выхода");
+        assert_eq!(b.balance(U), Some(1_000_000_000 + 100_000 - 7070));
+    }
+
+    /// Допуск учитывает комиссию: на маржу хватает, на маржу и комиссию — нет.
+    #[test]
+    fn admission_counts_the_commission() {
+        // Маржа 1:20 под 50 000.00 = 250 000; комиссия 5 bps = 2500.
+        let (mut b, _j) = setup_with(Broker::new(251_000, 20));
+        b.set_account_fees(U, fees(0, 5)).unwrap();
+        assert_eq!(
+            open(&mut b, PosSide::Long, PX),
+            Err(BrokerError::InsufficientMargin)
+        );
+        b.set_account_fees(U, fees(0, 1)).unwrap(); // 500 — влезает
+        assert!(open(&mut b, PosSide::Long, PX).is_ok());
+    }
+
+    /// Стоп-аут закрывает с комиссией.
+    #[test]
+    fn stop_out_pays_commission() {
+        let (mut b, mut j) = setup_with(Broker::new(300_000, 20).with_stop_out_pct(Some(50)));
+        b.set_account_fees(U, fees(0, 10)).unwrap();
+        commit(&mut b, &mut j);
+        let id = open(&mut b, PosSide::Long, PX).unwrap();
+        commit(&mut b, &mut j);
+        // Падение на 4 %: убыток 200 000, уровень маржи ниже 50 % — стоп-аут.
+        let px = 4_800_000;
+        assert_eq!(b.check(&marks(px), false), vec![U]);
+        let kinds = commit(&mut b, &mut j);
+        assert!(b.positions(U).is_empty(), "закрыта стоп-аутом");
+        assert!(
+            kinds.contains(&EventKind::CommissionCharged {
+                amount: commission_for(px, Q, 2, 3, 10, 100),
+                trade: id,
+                waived: 0
+            }),
+            "{kinds:?}"
+        );
+        assert!(kinds.iter().any(|k| matches!(
+            k,
+            EventKind::PositionClosed {
+                cause: CloseCause::StopOut,
+                ..
+            }
+        )));
+    }
+
+    /// Стоп-лосс закрывает с комиссией.
+    #[test]
+    fn stop_loss_pays_commission() {
+        let (mut b, mut j) = setup();
+        b.set_account_fees(U, fees(0, 10)).unwrap();
+        commit(&mut b, &mut j);
+        let id = b
+            .open(
+                U,
+                &marks(PX),
+                1,
+                PosSide::Long,
+                Q,
+                PX,
+                2,
+                3,
+                Some(4_900_000),
+                None,
+            )
+            .unwrap();
+        commit(&mut b, &mut j);
+        b.check(&marks(4_890_000), false);
+        let kinds = commit(&mut b, &mut j);
+        assert!(kinds.contains(&EventKind::CommissionCharged {
+            amount: commission_for(4_890_000, Q, 2, 3, 10, 100),
+            trade: id,
+            waived: 0
+        }));
+        assert_eq!(b.closed_deals(U).len(), 1);
+    }
+
+    /// Отложенный ордер исполняется по тарифу, действующему при ИСПОЛНЕНИИ
+    /// (как с плечом), и платит комиссию.
+    #[test]
+    fn pending_order_pays_at_the_tariff_in_force_when_it_fires() {
+        let (mut b, mut j) = setup();
+        b.place_pending(U, 1, PosSide::Long, Q, 4_900_000, 2, 3, None, None)
+            .unwrap();
+        commit(&mut b, &mut j);
+        b.set_account_fees(U, fees(10, 3)).unwrap();
+        commit(&mut b, &mut j);
+        b.check(&marks(4_890_000), false);
+        let kinds = commit(&mut b, &mut j);
+        let p = b.positions(U)[0].clone();
+        assert_eq!(p.entry, 4_890_000 + 4890, "наценка на исполнении ордера");
+        assert_eq!(p.fees.rates(), fees(10, 3));
+        assert!(kinds
+            .iter()
+            .any(|k| matches!(k, EventKind::CommissionCharged { trade, .. } if *trade == p.id)));
+    }
+
+    /// Смена тарифа не трогает открытые позиции: закрытие — по снимку.
+    /// Тариф переживает рестарт: свёртка ленты сходится со слепком.
+    #[test]
+    fn open_positions_keep_their_tariff_and_everything_survives_a_restart() {
+        let (mut b, mut j) = setup();
+        b.set_account_fees(U, fees(10, 5)).unwrap();
+        commit(&mut b, &mut j);
+        let old = open(&mut b, PosSide::Long, PX).unwrap();
+        commit(&mut b, &mut j);
+        b.set_account_fees(U, fees(0, 0)).unwrap();
+        commit(&mut b, &mut j);
+        let new = open(&mut b, PosSide::Long, PX).unwrap();
+        commit(&mut b, &mut j);
+        assert_eq!(
+            pos(&b, old).fees.rates(),
+            fees(10, 5),
+            "старая — свой тариф"
+        );
+        assert_eq!(pos(&b, new).fees.rates(), fees(0, 0), "новая — тариф счёта");
+        assert_eq!(pos(&b, new).entry, PX, "без наценки");
+
+        // Рестарт посреди жизни позиций.
+        let snap = b.snapshot(U);
+        let reloaded = Journal::load(b.start_balance(), j.events().to_vec()).unwrap();
+        assert!(
+            journal::audit(&reloaded, &snap).ok(),
+            "сверка после рестарта"
+        );
+        assert_eq!(reloaded.state().fees, fees(0, 0));
+        let mut b2 = Broker::new(b.start_balance(), 20);
+        b2.restore(U, snap);
+        let mut j2 = reloaded;
+
+        b2.close(U, old, PX).unwrap();
+        commit(&mut b2, &mut j2);
+        b2.close(U, new, PX).unwrap();
+        commit(&mut b2, &mut j2);
+        let d = b2.closed_deals(U);
+        assert_eq!(
+            d[0].exit,
+            PX - 5000,
+            "старая закрыта с наценкой своего тарифа"
+        );
+        assert!(d[0].fees.commission > 0);
+        assert_eq!(d[1].exit, PX, "новая — без наценки");
+        assert_eq!(
+            d[1].fees,
+            DealFees {
+                commission: 0,
+                markup: 0,
+                market_exit: Some(PX)
+            }
+        );
+        assert!(journal::audit(&j2, &b2.snapshot(U)).ok());
+        let replayed = j2.replay();
+        assert_eq!(replayed.closed[0].fees.market_exit, Some(PX));
+        assert_eq!(replayed.closed[0].fees.markup, d[0].fees.markup);
+    }
+
+    /// Неттинг: доливка и сворачивание — по снимку позиции, остаток
+    /// разворота — по тарифу счёта; свёртка сходится на каждом шаге.
+    #[test]
+    fn netting_reduce_increase_and_flip_reconcile() {
+        let (mut b, mut j) = setup();
+        assert!(b.adopt_model(U, PositionModel::Netting));
+        b.set_account_fees(U, fees(10, 5)).unwrap();
+        commit(&mut b, &mut j);
+        let id = open(&mut b, PosSide::Long, PX).unwrap();
+        commit(&mut b, &mut j);
+        b.set_account_fees(U, fees(20, 1)).unwrap();
+        commit(&mut b, &mut j);
+        // Доливка — по снимку (10 bps).
+        open(&mut b, PosSide::Long, PX).unwrap();
+        commit(&mut b, &mut j);
+        assert_eq!(pos(&b, id).entry, PX + 5000);
+        // Частичное сворачивание.
+        b.open(U, &marks(PX), 1, PosSide::Short, 500, PX, 2, 3, None, None)
+            .unwrap();
+        commit(&mut b, &mut j);
+        assert_eq!(b.closed_deals(U)[0].exit, PX - 5000, "по снимку позиции");
+        assert!(b.closed_deals(U)[0].fees.commission > 0);
+        assert_eq!(pos(&b, id).fees.commission, 0, "накопленное ушло в сделку");
+        // Разворот: 1.5 закрывает остаток, 0.5 открывает шорт по тарифу счёта.
+        let new = b
+            .open(U, &marks(PX), 1, PosSide::Short, 2000, PX, 2, 3, None, None)
+            .unwrap();
+        commit(&mut b, &mut j);
+        assert_ne!(new, id);
+        assert_eq!(pos(&b, new).entry, PX - 10_000, "20 bps — тариф счёта");
+        assert_eq!(pos(&b, new).fees.rates(), fees(20, 1));
+        assert!(journal::audit(&j, &b.snapshot(U)).ok());
+    }
+
+    /// Защита от минуса: комиссия закрытия не уводит остаток ниже нуля —
+    /// непогашенная часть названа (`waived`), убыток компенсируется как раньше.
+    #[test]
+    fn negative_balance_protection_caps_the_commission() {
+        let (mut b, mut j) =
+            setup_with(Broker::new(300_000, 20).with_negative_balance_protection(true));
+        b.set_account_fees(U, fees(0, 10)).unwrap();
+        commit(&mut b, &mut j);
+        let id = open(&mut b, PosSide::Long, PX).unwrap();
+        commit(&mut b, &mut j);
+        let before = b.balance(U).unwrap();
+        // Обвал на 10 %: убыток 500 000 больше остатка.
+        b.close(U, id, 4_500_000).unwrap();
+        b.check(&marks(4_500_000), false);
+        let kinds = commit(&mut b, &mut j);
+        let due = commission_for(4_500_000, Q, 2, 3, 10, 100);
+        assert!(
+            kinds.contains(&EventKind::CommissionCharged {
+                amount: 0,
+                trade: id,
+                waived: due
+            }),
+            "{kinds:?}"
+        );
+        assert_eq!(b.balance(U), Some(0), "защита погасила минус");
+        assert!(kinds.contains(&EventKind::NegativeBalanceCompensated {
+            amount: 500_000 - before
+        }));
+    }
+
+    /// Без защиты комиссия списывается целиком — минус виден проводкой.
+    #[test]
+    fn without_protection_the_commission_is_charged_in_full() {
+        let (mut b, mut j) = setup_with(Broker::new(300_000, 20));
+        b.set_account_fees(U, fees(0, 10)).unwrap();
+        commit(&mut b, &mut j);
+        let id = open(&mut b, PosSide::Long, PX).unwrap();
+        commit(&mut b, &mut j);
+        b.close(U, id, 4_500_000).unwrap();
+        let kinds = commit(&mut b, &mut j);
+        let due = commission_for(4_500_000, Q, 2, 3, 10, 100);
+        assert!(kinds.contains(&EventKind::CommissionCharged {
+            amount: due,
+            trade: id,
+            waived: 0
+        }));
+        assert!(b.balance(U).unwrap() < 0);
+    }
+
+    #[test]
+    fn fees_are_validated_journaled_and_a_repeat_writes_nothing() {
+        let (mut b, j) = setup();
+        let mut j = j;
+        for bad in [
+            fees(-1, 0),
+            fees(0, -1),
+            fees(MAX_FEE_BPS + 1, 0),
+            fees(0, 501),
+        ] {
+            assert_eq!(b.set_account_fees(U, bad), Err(BrokerError::InvalidFees));
+        }
+        assert_eq!(
+            b.set_account_fees(U, fees(MAX_FEE_BPS, MAX_FEE_BPS)),
+            Ok(true)
+        );
+        commit(&mut b, &mut j);
+        assert_eq!(
+            b.set_account_fees(U, fees(MAX_FEE_BPS, MAX_FEE_BPS)),
+            Ok(false)
+        );
+        assert_eq!(b.pending_events(U), 0);
+        assert_eq!(
+            b.set_account_fees(UserId(999), fees(1, 1)),
+            Err(BrokerError::UnknownAccount)
+        );
+        // Тариф в слепке без записи — расхождение.
+        b.set_account_fees(U, fees(1, 1)).unwrap();
+        let _ = b.take_events(U);
+        let ds = journal::reconcile(j.state(), &b.snapshot(U));
+        assert!(ds.iter().any(|d| d.0.contains("тариф счёта")), "{ds:?}");
+    }
+
+    /// Тариф вне пределов, приехавший из хранилища, — нарушение инварианта
+    /// (счёт в карантин), а не ставка, по которой пойдут деньги.
+    #[test]
+    fn a_tariff_out_of_range_in_storage_is_a_violation() {
+        let (mut b, _j) = setup();
+        open(&mut b, PosSide::Long, PX).unwrap();
+        assert_eq!(check_snapshot(&b.snapshot(U)), vec![]);
+        let mut snap = b.snapshot(U);
+        snap.fees = fees(MAX_FEE_BPS + 1, 0);
+        snap.positions[0].fees.commission_bps = -1;
+        snap.positions[0].fees.markup = -5;
+        let v = check_snapshot(&snap);
+        assert_eq!(v.len(), 3, "{v:?}");
+    }
+
+    /// Без тарифа — ровно прежнее: ни одной новой записи, цена — рынок.
+    #[test]
+    fn zero_tariff_is_the_old_behaviour() {
+        let (mut b, mut j) = setup();
+        let id = open(&mut b, PosSide::Long, PX).unwrap();
+        let kinds = commit(&mut b, &mut j);
+        assert_eq!(kinds.len(), 1, "только PositionOpened: {kinds:?}");
+        assert_eq!(pos(&b, id).entry, PX);
+        b.close(U, id, PX).unwrap();
+        let kinds = commit(&mut b, &mut j);
+        assert_eq!(kinds.len(), 1, "только PositionClosed: {kinds:?}");
+        assert_eq!(b.balance(U), Some(1_000_000_000));
+    }
+
+    /// Запись тарифа и проводок — канон и разбор сходятся; мусор — отказ.
+    #[test]
+    fn fee_records_round_trip_and_garbage_is_refused() {
+        for k in [
+            EventKind::FeesSet {
+                markup_bps: 15,
+                commission_bps: 0,
+            },
+            EventKind::MarkupApplied {
+                trade: 3,
+                mkt: 100,
+                exec: 101,
+                amount: 7,
+            },
+            EventKind::CommissionCharged {
+                amount: 5,
+                trade: 3,
+                waived: 0,
+            },
+            EventKind::CommissionCharged {
+                amount: 0,
+                trade: 3,
+                waived: 9,
+            },
+        ] {
+            assert_eq!(
+                EventKind::decode(&k.encode()),
+                Ok(k.clone()),
+                "{}",
+                k.encode()
+            );
+        }
+        assert_eq!(
+            EventKind::CommissionCharged {
+                amount: 5,
+                trade: 3,
+                waived: 0
+            }
+            .encode(),
+            "commission_charged amount=5 trade=3"
+        );
+        for bad in [
+            "fees_set markup_bps=501 commission_bps=0",
+            "fees_set markup_bps=-1 commission_bps=0",
+            "commission_charged amount=-1 trade=3",
+            "markup_applied trade=1 mkt=1 exec=2 amount=-3",
+        ] {
+            assert!(EventKind::decode(bad).is_err(), "{bad}");
+        }
     }
 }

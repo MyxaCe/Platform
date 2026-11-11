@@ -24,9 +24,13 @@ interface Window {
   Api?: any;
   Theming?: any;
   Sso?: any;
+  /** Локализация RU/EN без внешних библиотек (i18n.js). */
+  I18n?: any;
   Diag?: any;
   /** Тексты отказов границы (TRM-43). */
   Rejection?: any;
+  /** Тариф счёта в тикете: цена исполнения и комиссия (10.11). */
+  Tariff?: any;
   Indicators?: any;
   OrderBook?: any;
   AssetStats?: any;
@@ -48,8 +52,10 @@ interface Window {
 declare const Api: any;
 declare const Theming: any;
 declare const Sso: any;
+declare const I18n: any;
 declare const Diag: any;
 declare const Rejection: any;
+declare const Tariff: any;
 declare const Indicators: any;
 declare const OrderBook: any;
 declare const AssetStats: any;

@@ -61,7 +61,7 @@ jobs:
   proverka:
     name: Проверки коммита зелены
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -87,7 +87,9 @@ jobs:
           TREBUEMYE='ci.yml'
 
           GRACE_MIN=3       # за сколько прогон обязан ПОЯВИТЬСЯ
-          DEADLINE_MIN=30   # за сколько обязан ЗАВЕРШИТЬСЯ
+          # 10.11: браузерные проверки нового интерфейса (terminal-ui) + медленная
+          # установка браузера на раннере дали CI 33 мин — 30 обрывали гейт при зелёном CI.
+          DEADLINE_MIN=65   # за сколько обязан ЗАВЕРШИТЬСЯ
 
           obyavleno=0
           for wf in $TREBUEMYE; do obyavleno=$((obyavleno + 1)); done

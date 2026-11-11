@@ -56,7 +56,7 @@ use async_trait::async_trait;
 
 use broker::journal::AccountEvent;
 use broker::AccountSnapshot;
-use domain::account::UserId;
+use domain::account::{AccountKind, UserId};
 
 /// Ошибка хранилища. Наверх поднимается как `503`: данные пользователя не потеряны,
 /// но и не сохранены — операцию следует считать несостоявшейся.
@@ -214,6 +214,42 @@ pub trait Persistence: Send + Sync {
     /// рестартами — иначе после перезапуска пользователь получил бы новый пустой счёт.
     async fn resolve_identity(&self, _tenant: &str, _sub: &str) -> Result<UserId, StoreError> {
         Err(StoreError("identity mapping requires a database".into()))
+    }
+
+    /// Найти или создать счёт **данного рода** этой личности (demo-money).
+    ///
+    /// У человека до двух счетов: демо и реальный. Ключ — `(tenant, sub, kind)`,
+    /// внутренний номер у каждого свой, и весь остальной путь (брокер, журнал,
+    /// хранилище) работает со счётом как прежде — по номеру.
+    ///
+    /// Умолчание: демо — это прежний `resolve_identity`; реального счёта без
+    /// маппинга в базе не бывает, и это отказ, а не подмена демо-счётом.
+    async fn resolve_account(
+        &self,
+        tenant: &str,
+        sub: &str,
+        kind: AccountKind,
+    ) -> Result<UserId, StoreError> {
+        match kind {
+            AccountKind::Demo => self.resolve_identity(tenant, sub).await,
+            AccountKind::Real => Err(StoreError("real accounts require a database".into())),
+        }
+    }
+
+    /// Найти счёт данного рода, **не создавая**. `None` — такого счёта нет.
+    async fn find_account(
+        &self,
+        _tenant: &str,
+        _sub: &str,
+        _kind: AccountKind,
+    ) -> Result<Option<UserId>, StoreError> {
+        Ok(None)
+    }
+
+    /// Род счёта по внутреннему номеру. Счёт без маппинга (автономный
+    /// терминал) — демо: другого рода без маппинга не бывает.
+    async fn account_kind_of(&self, _user: UserId) -> Result<AccountKind, StoreError> {
+        Ok(AccountKind::Demo)
     }
 
     /// Переживает ли состояние перезапуск процесса.

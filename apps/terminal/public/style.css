@@ -3,7 +3,16 @@
    в RGB-каналах и обе темы через data-theme. Здесь мы переводим их в семантические
    цвета терминала — терминал и виджеты (ADR-015) остаются на своих именах.
    Единственная коллизия имён — акцент: у платформы --accent это КАНАЛЫ, у нас
-   --accent был готовым цветом → переименован в --brand, чтобы не конфликтовать. */
+   --accent был готовым цветом → переименован в --brand, чтобы не конфликтовать.
+
+   Редизайн 10.11 (раскладка профессионального терминала): бренд — только акцент
+   (вкладки, фокус, выделение). Покупка/продажа — свои цвета, не брендовые, и
+   подобраны под WCAG AA:
+     • текст цен --up/--down на тёмных панелях — ≥ 5.9:1;
+     • кнопки — тёмные заливки --buy-bg/--sell-bg с белым текстом — ≥ 5.2:1
+       (белый на светлом зелёном платформы был бы 2.4:1);
+     • светлая тема: --positive платформы на белом даёт 4.0:1 — мало, поэтому
+       --up/--down там затемнены здесь, а не в tokens.v1.css (это чужой контракт). */
 :root {
   --bg: rgb(var(--bg-base));
   --panel: rgb(var(--bg-elevated));
@@ -13,226 +22,349 @@
   --muted: rgb(var(--text-secondary));
   --up: rgb(var(--positive));
   --down: rgb(var(--negative));
-  --brand: rgb(var(--brand));
+  --brand: rgb(var(--accent));
   --brand-hover: rgb(var(--accent-hover));
+  --buy-bg: #0b7a52;
+  --buy-bg-hover: #0d8a5d;
+  --sell-bg: #c8323f;
+  --sell-bg-hover: #d63e4b;
+  --warn: #f5a524;
+  --danger-bg: #5c1219;
+  --gap: 4px;
   /* Читаемый текст поверх акцента. Тёмный по умолчанию (акцент светлый);
      загрузчик бренда переставит на светлый, если бренд-цвет тёмный (по яркости). */
   --on-accent: #08090c;
   /* --border приходит из tokens.v1.css (полупрозрачный, свой на каждую тему). */
 }
+[data-theme='light'] {
+  --up: #0b7a52;
+  --down: #c4313e;
+  --panel2: rgb(244 245 247);
+  --panel3: rgb(236 238 241);
+  --danger-bg: #fde8ea;
+}
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
-  font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px; }
+  font-family: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; font-size: 12px; }
+body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
 
 /* Скроллбары */
-* { scrollbar-width: thin; scrollbar-color: #2a3444 transparent; }
-::-webkit-scrollbar { width: 9px; height: 9px; }
+* { scrollbar-width: thin; scrollbar-color: rgba(127,137,153,.35) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #26303f; border-radius: 6px; border: 2px solid var(--panel); }
-::-webkit-scrollbar-thumb:hover { background: #34435a; }
-input, select { outline: none; }
+::-webkit-scrollbar-thumb { background: rgba(127,137,153,.35); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
+input, select { outline: none; font-family: inherit; }
 input:focus, select:focus { border-color: var(--brand) !important; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
 .muted { color: var(--muted); } .small { font-size: 11px; } .ta-r { text-align: right; }
 .hidden { display: none !important; }
+[hidden] { display: none !important; }
 button { font-family: inherit; }
+.up { color: var(--up); } .down { color: var(--down); }
+.num { font-variant-numeric: tabular-nums; }
 
-/* Верхняя панель */
-.top { display: flex; align-items: center; gap: 24px; height: 52px; padding: 0 16px;
+/* ============================ Шапка ============================ */
+.top { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; min-height: 48px; padding: 0 12px;
   background: var(--panel); border-bottom: 1px solid var(--border); }
-.logo { font-weight: 700; font-size: 15px; letter-spacing: .5px; white-space: nowrap; }
-.logo__mark { display: inline-flex; width: 24px; height: 24px; border-radius: 6px; background: var(--brand);
-  color: var(--on-accent); align-items: center; justify-content: center; font-weight: 800; margin-right: 6px; vertical-align: middle; }
+.logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; letter-spacing: .3px; white-space: nowrap; }
+.logo__mark { display: inline-flex; width: 26px; height: 26px; border-radius: 7px; background: var(--brand);
+  color: var(--on-accent); align-items: center; justify-content: center; font-weight: 800; flex: 0 0 26px; }
 .logo__mark img { width: 100%; height: 100%; object-fit: contain; border-radius: 6px; }
-.metrics { display: flex; flex: 1; justify-content: space-between; padding: 0 8px; }
-.metric { display: flex; flex: 1; flex-direction: column; align-items: center; gap: 2px; }
-.metric__l { color: var(--muted); font-size: 10px; letter-spacing: .6px; }
-.metric__v { font-weight: 600; font-variant-numeric: tabular-nums; }
-/* Причина, по которой в метриках прочерки: сессии нет или счёт недоступен (BUG-011).
-   Показывается рядом с метриками, не вместо них — цифры не должны врать молча. */
-.acct-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 600; color: var(--down);
-  border: 1px solid var(--down); border-radius: 6px; padding: 4px 8px; opacity: .9; }
-/* Постоянная пометка о нестойком состоянии. Не «ошибка» — цветом спокойнее, чем
-   acct-warn: это режим работы, а не отказ. Закрыть её нельзя (BUG-011). */
-.volatile-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 600;
-  color: var(--muted); border: 1px dashed var(--border); border-radius: 6px; padding: 4px 8px; }
-.top__right { display: flex; align-items: center; gap: 12px; }
+.feed { font-size: 10px; font-weight: 700; letter-spacing: .6px; color: var(--muted); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 5px; }
+.metrics { display: flex; flex: 1; justify-content: flex-start; gap: 4px 22px; padding: 0 6px; min-width: 0; overflow: hidden; }
+.metric { display: flex; flex-direction: column; gap: 1px; white-space: nowrap; }
+.metric__l { color: var(--muted); font-size: 10.5px; }
+.metric__v { font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }
+.metric__v.lvl-warn { color: var(--warn); } .metric__v.lvl-bad { color: var(--down); }
+/* Род счёта (demo-money). Крупно и цветом: на показе бейдж читают с проектора.
+   Цвета заданы явно, а не токенами темы, — род счёта не должен перекрашиваться
+   вместе с брендом. Контраст: белый на #1d4ed8 — 6.7:1, тёмный на #f59e0b — 9:1. */
+.kind-badge { flex: 0 0 auto; white-space: nowrap; font-size: 13px; font-weight: 800; letter-spacing: .08em;
+  color: #fff; background: #1d4ed8; border: 1px solid #1e40af; border-radius: 6px; padding: 5px 12px; }
+.kind-badge--real { color: #1a1200; background: #f59e0b; border-color: #b45309;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, .35); }
+.frozen-badge { flex: 0 0 auto; white-space: nowrap; font-size: 12px; font-weight: 800; letter-spacing: .05em;
+  color: #fff; background: #b91c1c; border-radius: 6px; padding: 5px 10px; }
+.chip { flex: 0 0 auto; white-space: nowrap; font-size: 10.5px; font-weight: 700; letter-spacing: .04em;
+  color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 3px 7px; }
+.top__right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.lang { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.lang button { background: transparent; border: 0; color: var(--muted); font-size: 11px; font-weight: 700; padding: 5px 8px; cursor: pointer; }
+.lang button.active { background: var(--panel3); color: var(--text); box-shadow: inset 0 -2px 0 var(--brand); }
+.iconbtn-top { cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text);
+  border-radius: 6px; width: 30px; height: 28px; }
+.btn-top { cursor: pointer; display: inline-flex; align-items: center; height: 28px; padding: 0 12px; border-radius: 6px;
+  background: var(--brand); color: var(--on-accent); font-weight: 700; font-size: 12px; text-decoration: none; border: 0; }
+.btn-top--ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
 .btn { cursor: pointer; border: 1px solid var(--border); background: var(--panel2); color: var(--text);
   border-radius: 6px; padding: 7px 12px; }
-.btn--deposit { background: var(--brand); color: var(--on-accent); border-color: var(--brand); font-weight: 700; }
-.usersel { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
-.who { font-size: 12.5px; font-weight: 600; color: var(--muted); max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.status { font-size: 16px; color: var(--down); }
+.status { font-size: 14px; color: var(--down); }
 .status--on { color: var(--up); }
 
-/* Сетка (с ресайзерами) */
-/* Раскладка: слева стакан, по центру график + форма сделки под ним,
-   справа монеты и сделки по инструменту, во всю ширину снизу — ордера/история. */
-.app { display: flex; flex-direction: column; height: calc(100vh - 52px); }
-.grid { display: grid; grid-template-columns: 280px 6px 1fr 6px 320px; flex: 1; min-height: 0; }
-.col-book { background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-.col-right { background: var(--panel); border-left: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
-/* Список монет теперь справа — его собственная разделительная линия слева не нужна. */
+/* ============================ Баннеры ============================ */
+.banners { flex: 0 0 auto; display: flex; flex-direction: column; }
+.banner { display: flex; align-items: center; gap: 12px; padding: 7px 14px; font-size: 12.5px; font-weight: 600; }
+.banner--danger { background: var(--danger-bg); color: var(--text); border-bottom: 1px solid var(--down); box-shadow: inset 4px 0 0 var(--down); }
+.banner--warn { background: rgba(245,165,36,.14); color: var(--text); border-bottom: 1px solid rgba(245,165,36,.5); box-shadow: inset 4px 0 0 var(--warn); }
+.banner__btn { margin-left: auto; cursor: pointer; background: var(--brand); color: var(--on-accent); border: 0; border-radius: 5px; padding: 5px 12px; font-weight: 700; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px; }
+.chips:has(> :not([hidden])) { padding: 5px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
+/* Причина, по которой в метриках прочерки: сессии нет или счёт недоступен (BUG-011). */
+.acct-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 600; color: var(--down);
+  border: 1px solid var(--down); border-radius: 5px; padding: 3px 8px; }
+/* Постоянная пометка о нестойком состоянии: режим работы, а не отказ (BUG-011). */
+.volatile-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 600;
+  color: var(--muted); border: 1px dashed var(--border); border-radius: 5px; padding: 3px 8px; }
+
+/* ============================ Шапка инструмента ============================ */
+.ihead { flex: 0 0 auto; display: flex; align-items: center; gap: 22px; min-height: 52px; padding: 4px 14px;
+  background: var(--panel); border-bottom: 1px solid var(--border); margin-bottom: var(--gap); }
+.ih-pair { display: flex; align-items: center; gap: 8px; background: transparent; border: 0; color: var(--text); cursor: pointer; padding: 4px 6px 4px 0; }
+.ih-coin { width: 24px; height: 24px; position: relative; flex: 0 0 24px; }
+.ih-coin img { width: 24px; height: 24px; }
+.ih-sym { font-size: 18px; white-space: nowrap; } .ih-sym b { font-weight: 700; }
+.ih-caret { display: none; color: var(--muted); }
+.ih-price { display: flex; flex-direction: column; min-width: 120px; }
+.ih-last { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.ih-sub { font-size: 11px; font-variant-numeric: tabular-nums; }
+.ih-stats { display: flex; gap: 22px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.ih-stat { display: flex; flex-direction: column; gap: 2px; white-space: nowrap; }
+.ih-l { color: var(--muted); font-size: 11px; }
+.ih-v { font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ih-source { margin-left: auto; cursor: help; }
+
+/* ============================ Сетка ============================ */
+/* Раскладка терминала: слева глубина рынка, в центре график и форма ордера под
+   ним, справа пары и лента сделок, во всю ширину снизу — позиции/ордера/история/
+   баланс. Ширины колонок и высота низа — переменные, их двигают ресайзеры. */
+.grid { flex: 1; min-height: 0; display: grid; gap: 0;
+  grid-template-columns: var(--lw, 300px) var(--gap) minmax(0, 1fr) var(--gap) var(--rw, 330px);
+  grid-template-rows: minmax(0, 1fr) auto var(--gap) var(--bh, 210px);
+  grid-template-areas:
+    "book rl center rr right"
+    "book rl deal   rr right"
+    "rb   rb rb     rb rb"
+    "bottom bottom bottom bottom bottom"; }
+.col-book { grid-area: book; background: var(--panel); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.center { grid-area: center; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); }
+.deal { grid-area: deal; }
+.col-right { grid-area: right; background: var(--bg); display: flex; flex-direction: column; gap: 0; min-width: 0; min-height: 0; overflow: hidden; }
 .col-right .watch { flex: 1; min-height: 0; border-right: none; }
 #trades { flex: 0 0 auto; min-height: 0; }
-.rsz-v { cursor: col-resize; background: transparent; transition: background .12s; }
+.bottom { grid-area: bottom; background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+.rsz-left { grid-area: rl; } .rsz-right { grid-area: rr; } .rsz-bottom { grid-area: rb; }
+.rsz-v { cursor: col-resize; background: var(--bg); transition: background .12s; }
 .rsz-v:hover, .rsz-v.drag { background: var(--brand); }
-.rsz-h { cursor: row-resize; height: 6px; background: transparent; transition: background .12s; flex: 0 0 6px; }
+.rsz-h { cursor: row-resize; height: var(--gap); background: var(--bg); transition: background .12s; flex: 0 0 var(--gap); }
 .rsz-h:hover, .rsz-h.drag { background: var(--brand); }
 
-
-/* Центр */
-.center { display: flex; flex-direction: column; min-width: 0; }
-/* Тулбар переносит группы кнопок и РАСТЁТ ВНИЗ. Раньше высота была фиксированной, поэтому
-   не поместившиеся кнопки уезжали вверх, поверх панели метрик (BUG-010). На экране 1280px
-   тулбар не помещается в одну строку в принципе: одни таймфреймы занимают 289px. */
-.toolbar { display: flex; flex-wrap: wrap; align-items: center; align-content: center; gap: 8px 8px; min-height: 40px; padding: 4px 12px; border-bottom: 1px solid var(--border); background: var(--panel); overflow: visible; }
-/* Группа таймфреймов не рвётся посередине: переносится целиком на следующую строку тулбара. */
+/* ============================ График ============================ */
+/* Тулбар переносит группы кнопок и РАСТЁТ ВНИЗ (BUG-010): жёсткая высота
+   выталкивала кнопки поверх панели метрик. */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; align-content: center; gap: 6px; min-height: 38px; padding: 3px 10px; border-bottom: 1px solid var(--border); background: var(--panel); overflow: visible; }
 .tfs { display: flex; flex-wrap: nowrap; flex: 0 0 auto; }
-.tfs button { flex: 0 0 auto; background: transparent; border: none; color: var(--muted); padding: 6px 8px; cursor: pointer; border-radius: 4px; font-weight: 600; }
+.tfs button { flex: 0 0 auto; background: transparent; border: none; color: var(--muted); padding: 5px 8px; cursor: pointer; border-radius: 4px; font-weight: 600; font-size: 12px; }
 .tfs button:hover { color: var(--text); }
-.tfs button.active { background: var(--panel3); color: var(--brand); }
-.tb-sep { width: 1px; height: 20px; background: var(--border); margin: 0 2px; }
-.tbbtn { background: var(--panel2); border: 1px solid var(--border); color: var(--text); border-radius: 6px;
-  padding: 6px 10px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-.tbbtn:hover { background: var(--panel3); }
-.tbbtn.on { border-color: var(--brand); color: var(--brand); }
-.tbbtn.iconbtn { padding: 6px 8px; }
-.tbbtn.tbtext { font-weight: 700; letter-spacing: .4px; }
+.tfs button.active { color: var(--text); background: var(--panel3); box-shadow: inset 0 -2px 0 var(--brand); }
+.tb-sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
+.tbbtn { background: transparent; border: 1px solid transparent; color: var(--text); border-radius: 5px;
+  padding: 5px 8px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.tbbtn:hover { background: var(--panel3); border-color: var(--border); }
+.tbbtn.on { color: var(--brand); border-color: var(--border); }
+.tbbtn.iconbtn { padding: 5px 7px; }
+.tbbtn.tbtext { font-weight: 700; letter-spacing: .3px; }
 .ic { display: inline-flex; align-items: center; }
-.ic svg { width: 15px; height: 15px; display: block; }
+.ic svg { width: 16px; height: 16px; display: block; }
 .caret { display: inline-flex; color: var(--muted); }
-.caret svg { width: 10px; height: 10px; }
+.caret svg { width: 11px; height: 11px; }
 .tb-dd { position: relative; }
-.dd { position: absolute; top: 34px; left: 0; z-index: 30; background: var(--panel2); border: 1px solid var(--border);
-  border-radius: 8px; padding: 6px; min-width: 180px; box-shadow: 0 10px 30px rgba(0,0,0,.5); max-height: 70vh; overflow-y: auto; }
+.dd { position: absolute; top: 32px; left: 0; z-index: 30; background: var(--panel2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px; min-width: 180px; box-shadow: 0 10px 30px rgba(0,0,0,.45); max-height: 70vh; overflow-y: auto; }
 .dd--wide { min-width: 240px; }
 .dd-item { padding: 7px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; }
 .dd-item:hover { background: var(--panel3); }
 .dd-item.active { color: var(--brand); }
-.dd-cat { color: var(--brand); font-size: 10px; letter-spacing: .6px; text-transform: uppercase; padding: 8px 8px 4px; }
+.dd-cat { color: var(--muted); font-size: 10px; letter-spacing: .6px; text-transform: uppercase; padding: 8px 8px 4px; font-weight: 700; }
 .dd label { display: flex; align-items: center; gap: 7px; font-size: 12px; cursor: pointer; padding: 4px 8px; border-radius: 5px; }
 .dd label:hover { background: var(--panel3); }
 .dd select { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 6px; width: 100%; margin: 4px 0; }
 .dd .note { color: var(--muted); font-size: 10px; padding: 6px 8px; border-top: 1px solid var(--border); margin-top: 6px; }
 .dd--right { left: auto; right: 0; }
-.tb-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.tb-right { margin-left: auto; display: flex; align-items: center; gap: 4px; }
 #setMenu label { justify-content: space-between; }
-#setMenu input[type="number"] { width: 52px; background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 3px 5px; }
-#setMenu input[type="color"] { width: 28px; height: 22px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); padding: 1px; cursor: pointer; }
-#setMenu select { margin: 4px 0; }
-/* Полноэкранный график */
 .chartwrap:fullscreen { background: var(--bg); }
 .chartwrap { flex: 1; position: relative; min-height: 0; }
 .chart { position: absolute; inset: 0; }
-.legend { position: absolute; top: 10px; left: 12px; z-index: 3; pointer-events: none;
-  background: rgba(16,20,29,.72); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px;
-  font-variant-numeric: tabular-nums; backdrop-filter: blur(2px); }
-.legend__top { font-size: 14px; font-weight: 700; display: flex; align-items: baseline; gap: 8px; }
+.legend { position: absolute; top: 8px; left: 50px; z-index: 3; pointer-events: none;
+  font-variant-numeric: tabular-nums; text-shadow: 0 0 4px rgb(var(--bg-base)); }
+.legend__top { font-size: 13px; font-weight: 700; display: flex; align-items: baseline; gap: 8px; }
 .legend__top .muted { font-size: 11px; font-weight: 400; }
-.legend__time { font-size: 11px; margin: 2px 0 4px; }
-.legend__ohlc { font-size: 12px; color: var(--muted); }
+.legend__time { font-size: 11px; margin: 1px 0 2px; }
+.legend__ohlc { font-size: 11.5px; color: var(--muted); }
 .legend__ohlc b { color: var(--text); font-weight: 600; }
 .legend__ohlc b.up { color: var(--up); } .legend__ohlc b.down { color: var(--down); }
+.legend__ma { font-size: 11.5px; margin-top: 2px; display: flex; gap: 10px; }
 .watermark { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  font-size: 46px; font-weight: 800; color: rgba(255,255,255,.03); z-index: 1; pointer-events: none; }
+  font-size: 46px; font-weight: 800; color: rgba(127,137,153,.06); z-index: 1; pointer-events: none; }
 
-/* Нижняя лента */
-.bottom { height: 190px; border-top: 1px solid var(--border); background: var(--panel); display: flex; flex-direction: column; }
-
-
-.sltp { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.sltp input { width: 100%; background: var(--panel2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 8px; text-align: center; font-variant-numeric: tabular-nums; }
-.trades__head { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; padding: 5px 12px; color: var(--muted); font-size: 10px; }
-.tape { overflow-y: auto; flex: 1; }
-.tape .t { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; padding: 2px 12px; font-variant-numeric: tabular-nums; }
-.tape .t .px.buy { color: var(--up); } .tape .t .px.sell { color: var(--down); }
-.tape .t span:nth-child(2), .tape .t span:nth-child(3), .tape .t span:nth-child(4) { text-align: right; }
-.tape .t .tm { color: var(--muted); }
-
-/* Панель сделки */
-.deal { background: var(--panel); border-top: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
-.deal__tabs { display: flex; }
-.deal__tabs button { flex: 1; background: var(--panel2); border: none; border-bottom: 2px solid transparent; color: var(--muted);
-  padding: 12px; cursor: pointer; font-weight: 700; font-size: 11px; letter-spacing: .5px; }
-.deal__tabs button.active { color: var(--text); border-bottom-color: var(--brand); background: var(--panel); }
-.deal__sym { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border); }
-.deal__symname { font-size: 18px; font-weight: 700; }
+/* ============================ Форма ордера ============================ */
+.deal { position: relative; background: var(--panel); border-top: var(--gap) solid var(--bg); display: flex; flex-direction: column; min-height: 0; }
+.deal__tabs { display: flex; align-items: center; gap: 18px; padding: 0 14px; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
+.deal__tabs > button { background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--muted);
+  padding: 10px 0 8px; cursor: pointer; font-weight: 700; font-size: 13px; }
+.deal__tabs > button.active { color: var(--text); border-bottom-color: var(--brand); }
+.deal__tabs > button:disabled { cursor: not-allowed; opacity: .55; }
+.deal__tabs small { font-size: 9.5px; font-weight: 700; text-transform: uppercase; border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; margin-left: 2px; }
+.deal__acct { margin-left: auto; display: flex; gap: 16px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.deal__acct b { font-weight: 600; }
+.deal__sym { display: none; }
+.deal__symname { font-size: 17px; font-weight: 700; }
 .deal__change { font-weight: 700; }
 .deal__change.up { color: var(--up); } .deal__change.down { color: var(--down); }
-.deal__body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-.lbl { color: var(--muted); font-size: 10px; letter-spacing: .6px; }
-.lotrow { display: grid; grid-template-columns: 40px 1fr 40px; gap: 8px; }
-.lotbtn { font-size: 18px; padding: 0; }
-.lotrow input, .pricerow input { width: 100%; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
-  border-radius: 6px; padding: 9px; text-align: center; font-size: 15px; font-variant-numeric: tabular-nums; }
-.pricerow { display: flex; flex-direction: column; gap: 6px; }
-.orderbtn { border: none; border-radius: 6px; padding: 14px; font-weight: 700; font-size: 15px; cursor: pointer; color: #fff;
-  display: flex; justify-content: space-between; }
-.orderbtn.buy { background: var(--up); } .orderbtn.sell { background: var(--down); }
+.deal__body { display: grid; gap: 8px 12px; padding: 10px 14px 6px;
+  grid-template-columns: minmax(130px, 1fr) minmax(190px, 1.3fr) minmax(110px, .9fr) minmax(110px, .9fr);
+  grid-template-areas:
+    "price size sl tp"
+    "info  info info info"
+    "btns  btns btns btns"
+    "msg   msg  msg  msg"; align-items: end; }
+#priceRow { grid-area: price; } .fld--size { grid-area: size; } .fld--sl { grid-area: sl; } .fld--tp { grid-area: tp; }
+.deal__info { grid-area: info; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 16px; min-height: 18px; }
+.deal__btns { grid-area: btns; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.dealmsg { grid-area: msg; min-height: 15px; font-size: 11.5px; }
+.fld { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.lbl { color: var(--muted); font-size: 11px; }
+.lbl-row { display: flex; justify-content: space-between; align-items: center; }
+.inp { position: relative; display: flex; align-items: center; }
+.inp__u { position: absolute; right: 9px; color: var(--muted); font-size: 11px; pointer-events: none; }
+.inp--static { height: 34px; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); display: flex; align-items: center; padding: 0 10px; }
+/* Режим формы: в «Рынке» поле цены заменено надписью «По рынку», в «Лимите» — наоборот. */
+.deal[data-mode="market"] .inp--limit { display: none; }
+.deal[data-mode="limit"] .inp--static { display: none; }
+.deal input[type=number] { width: 100%; height: 34px; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 0 10px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.deal .inp input { padding-right: 46px; }
+.lotrow { display: grid; grid-template-columns: 34px 1fr 34px; gap: 6px; }
+.lotrow input { text-align: center; }
+.lotbtn { font-size: 16px; padding: 0; height: 34px; }
+.shares { display: inline-flex; gap: 4px; }
+.shares button { background: var(--panel2); border: 1px solid var(--border); color: var(--muted); border-radius: 4px; font-size: 10.5px; padding: 2px 7px; cursor: pointer; }
+.shares button:hover { color: var(--text); border-color: var(--brand); }
+.unit-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+.ubtn { background: transparent; border: none; color: var(--muted); padding: 2px 9px; cursor: pointer; font-size: 10.5px; font-weight: 700; }
+.ubtn.active { background: var(--panel3); color: var(--text); box-shadow: inset 0 -2px 0 var(--brand); }
+.orderbtn { border: none; border-radius: 6px; padding: 0 16px; height: 40px; font-weight: 700; font-size: 14px; cursor: pointer; color: #fff;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.orderbtn.buy { background: var(--buy-bg); } .orderbtn.buy:hover { background: var(--buy-bg-hover); }
+.orderbtn.sell { background: var(--sell-bg); } .orderbtn.sell:hover { background: var(--sell-bg-hover); }
 .orderbtn span { font-variant-numeric: tabular-nums; }
-.dealmsg { min-height: 16px; font-size: 11px; text-align: center; }
-/* Размещение виджета стакана в правой панели — зона страницы-хоста; внутренний вид
-   стакана живёт в самом orderbook.js (ADR-015). */
-/* Форма сделки под графиком — раскладываем в строку, чтобы не съедать высоту графика. */
-.deal { overflow: hidden; flex: 0 0 auto; }
-.deal__body { flex-direction: row; align-items: flex-end; flex-wrap: wrap; padding: 10px 12px; gap: 10px; overflow-x: auto; }
-.deal__body > * { flex: 0 0 auto; }
-.deal__body .lotrow { width: 150px; }
-.deal__body .pricerow, .deal__body .sltp { min-width: 150px; }
-.deal__body .sltp { width: 220px; }
-.deal__body .orderbtn { min-width: 150px; margin: 0; }
-.deal__body #sizeEq { min-width: 90px; }
-.deal__body .dealmsg { flex: 1 0 100%; text-align: left; }
-.deal__tabs { flex: 0 0 auto; }
-.deal__sym { padding: 8px 12px; }
+.orderbtn:disabled { opacity: .45; cursor: not-allowed; }
+/* Заморозка: форма закрыта плашкой, а не просто серыми кнопками — человек
+   должен понять ПОЧЕМУ, не нажимая. */
+.deal__frozen { position: absolute; inset: 40px 0 0 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent); backdrop-filter: blur(1.5px); text-align: center; padding: 10px; }
+.deal__frozen b { color: var(--down); font-size: 14px; letter-spacing: .03em; }
+.deal__frozen span { color: var(--text); font-size: 12px; }
+#loading { z-index: 5; }
+input.flash { animation: flashbg .4s ease; }
+@keyframes flashbg { 0% { background: var(--brand); color: var(--on-accent); } 100% { background: inherit; } }
 
-/* ================= UI v2 (icons, coins, toggles, settings, tooltip) ======== */
-.ic svg { width: 17px; height: 17px; }
-.caret svg { width: 11px; height: 11px; }
+/* ============================ Бегущая строка ============================ */
+.tape { flex: 0 0 26px; height: 26px; overflow: hidden; position: relative; background: var(--panel); border-top: var(--gap) solid var(--bg); }
+.tape__track { display: inline-flex; white-space: nowrap; align-items: center; height: 100%; animation: tape 90s linear infinite; will-change: transform; }
+.tape:hover .tape__track { animation-play-state: paused; }
+.tape__it { display: inline-flex; gap: 6px; align-items: center; padding: 0 16px; font-size: 11.5px; cursor: pointer; font-variant-numeric: tabular-nums; border-right: 1px solid var(--border); }
+.tape__it b { font-weight: 600; }
+@keyframes tape { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+@media (prefers-reduced-motion: reduce) { .tape__track { animation: none; } .tape { overflow-x: auto; } }
 
-
-/* Indicator toggles */
+/* ================= Мелочи (переключатели, настройки, подсказка) ================= */
 .dd-toggle { padding: 6px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; color: var(--text); }
 .dd-toggle:hover { background: var(--panel3); }
-.dd-toggle.on { color: var(--brand); background: rgba(240,185,11,.09); }
+.dd-toggle.on { color: var(--brand); background: color-mix(in srgb, var(--brand) 10%, transparent); }
 .osc-list { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
-
-/* Custom switch */
-.sw { appearance: none; -webkit-appearance: none; width: 34px; height: 18px; border-radius: 10px; background: #2a3444; position: relative; cursor: pointer; transition: .15s; flex: 0 0 34px; }
+.sw { appearance: none; -webkit-appearance: none; width: 34px; height: 18px; border-radius: 10px; background: rgba(127,137,153,.4); position: relative; cursor: pointer; transition: .15s; flex: 0 0 34px; }
 .sw:checked { background: var(--brand); }
 .sw::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: .15s; }
 .sw:checked::after { left: 18px; }
-
-/* Settings menu */
 .setmenu { min-width: 252px; }
 .setrow { display: flex !important; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 8px; font-size: 12px; }
 .setrow__r { display: inline-flex; align-items: center; gap: 8px; }
 .setmenu input[type=number] { width: 54px; background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 4px 6px; }
 .setmenu input[type=color] { width: 30px; height: 22px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); padding: 1px; cursor: pointer; }
 .setmenu select { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 5px; }
-
-/* Tooltip */
-.tip { position: fixed; z-index: 100; transform: translateX(-50%); background: #1b2433; color: var(--text); border: 1px solid var(--border);
-  padding: 4px 8px; border-radius: 6px; font-size: 11px; white-space: nowrap; pointer-events: none; box-shadow: 0 6px 18px rgba(0,0,0,.5); }
+.tip { position: fixed; z-index: 100; transform: translateX(-50%); background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  padding: 4px 8px; border-radius: 6px; font-size: 11px; white-space: nowrap; pointer-events: none; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
 .tip.hidden { display: none; }
-
-/* Loading spinner */
-.loading { position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center; background: rgba(11,14,20,.4); }
+.loading { position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center; background: rgba(11,14,20,.3); }
 .loading.hidden { display: none; }
-.spinner { width: 30px; height: 30px; border: 3px solid #2a3444; border-top-color: var(--brand); border-radius: 50%; animation: spin .7s linear infinite; }
+.spinner { width: 30px; height: 30px; border: 3px solid rgba(127,137,153,.35); border-top-color: var(--brand); border-radius: 50%; animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.mtabs { display: none; }
+.mclose { display: none; }
 
+/* ============================ Узкий десктоп ============================ */
+@media (max-width: 1360px) {
+  .metrics { gap: 4px 14px; }
+  .ihead { gap: 16px; } .ih-stats { gap: 16px; }
+  .deal__body { grid-template-columns: minmax(110px, 1fr) minmax(170px, 1.3fr) minmax(90px, .9fr) minmax(90px, .9fr); }
+}
+@media (max-width: 1200px) {
+  .logo__name { display: none; }
+  #modelBadge { display: none !important; }
+}
 
-
-
-
-/* ================= Size unit toggle ================= */
-.lbl-row { display: flex; justify-content: space-between; align-items: center; }
-.unit-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-.ubtn { background: var(--panel2); border: none; color: var(--muted); padding: 3px 12px; cursor: pointer; font-size: 11px; font-weight: 700; }
-.ubtn.active { background: var(--brand); color: var(--on-accent); }
-#sizeEq { text-align: right; margin-top: -4px; }
-
-#loading { z-index: 5; }
-input.flash { animation: flashbg .4s ease; }
-@keyframes flashbg { 0% { background: var(--brand); color: var(--on-accent); } 100% { background: inherit; } }
+/* ============================ Телефон ============================ */
+/* Одна панель на экран, переключают вкладки «График / Стакан / Ордер / Позиции».
+   Список пар — поверх всего по кнопке пары в шапке инструмента. */
+@media (max-width: 860px) {
+  .top { flex-wrap: wrap; gap: 8px; padding: 6px 10px; }
+  .logo__name, .feed { display: none; }
+  .kind-badge { font-size: 12px; padding: 4px 9px; }
+  .metrics { order: 10; flex: 1 0 100%; overflow-x: auto; gap: 14px; padding: 2px 0 0; scrollbar-width: none; }
+  .metric__v { font-size: 12.5px; }
+  .top__right { gap: 6px; }
+  .btn-top { padding: 0 9px; }
+  .ihead { gap: 12px; flex-wrap: wrap; padding: 6px 10px; margin-bottom: 0; }
+  .ih-caret { display: inline; }
+  .ih-sym { font-size: 16px; }
+  .ih-price { min-width: 0; }
+  .ih-last { font-size: 17px; }
+  .ih-stats { flex: 1 0 100%; gap: 16px; }
+  .ih-source { display: none; }
+  .mtabs { display: flex; flex: 0 0 auto; background: var(--panel); border-bottom: 1px solid var(--border); }
+  .mtabs button { flex: 1; background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--muted); font-weight: 700; font-size: 13px; padding: 10px 0; }
+  .mtabs button.active { color: var(--text); border-bottom-color: var(--brand); }
+  .grid { display: flex; flex-direction: column; }
+  .rsz { display: none !important; }
+  .grid > .col-book, .grid > .center, .grid > .deal, .grid > .col-right, .grid > .bottom { display: none; }
+  body[data-mtab="chart"] .grid > .center { display: flex; flex: 1; }
+  body[data-mtab="book"] .grid > .col-book { display: flex; flex: 1.4; }
+  body[data-mtab="book"] .grid > .col-right { display: flex; flex: 1; }
+  body[data-mtab="book"] .col-right .watch { display: none; }
+  body[data-mtab="book"] #trades { flex: 1; height: auto !important; }
+  body[data-mtab="order"] .grid > .deal { display: flex; flex: 1; overflow-y: auto; border-top: 0; }
+  body[data-mtab="positions"] .grid > .bottom { display: flex; flex: 1; }
+  .toolbar { padding: 3px 6px; gap: 4px; }
+  /* Рисование пальцем по графику на телефоне не работает как надо — панель
+     инструментов отдала бы графику треть ширины. Остаётся на десктопе. */
+  .drawtools { display: none !important; }
+  .legend { left: 10px; }
+  .statbar { overflow-x: auto; scrollbar-width: none; }
+  .statbar .stat { flex: 0 0 auto; padding: 0 10px; }
+  .tb-sep, #pipsBtn, #resetBtn, #fullBtn, #sltpBtn { display: none; }
+  .deal__sym { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  .deal__tabs { gap: 14px; }
+  .deal__acct { flex-direction: column; gap: 0; align-items: flex-end; font-size: 11px; }
+  .deal__body { grid-template-columns: 1fr 1fr; grid-template-areas: "price price" "size size" "sl tp" "info info" "btns btns" "msg msg"; padding: 12px 14px; }
+  .deal input[type=number] { height: 40px; font-size: 15px; }
+  .orderbtn { height: 58px; font-size: 15px; flex-direction: column; justify-content: center; gap: 2px; }
+  .deal__btns { grid-template-columns: 1fr 1fr; }
+  /* Список пар — выдвижная панель на весь экран. */
+  body.m-watch .grid > .col-right { display: flex; position: fixed; inset: 0; z-index: 50; background: var(--panel); padding-top: env(safe-area-inset-top); }
+  body.m-watch .col-right .watch { display: flex; }
+  body.m-watch #trades { display: none; }
+  body.m-watch .mclose { display: block; align-self: flex-end; margin: 6px 10px 0; background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 6px; width: 34px; height: 30px; font-size: 14px; }
+  .tape { display: none; }
+}

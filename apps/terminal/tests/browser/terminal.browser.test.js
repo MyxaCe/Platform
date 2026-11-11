@@ -67,7 +67,7 @@ test('терминал открывается без единой ошибки �
   assert.equal(built.watch, 2, 'список инструментов построен');
   assert.ok(built.book > 0, 'стакан построен');
   assert.equal(built.stats, 3, 'полоса статистики построена');
-  assert.equal(built.tabs, 4, 'нижняя панель построена');
+  assert.equal(built.tabs, 5, 'нижняя панель построена: позиции, ордера, история, баланс, сигналы');
   assert.ok(built.canvas, 'слой рисования создан');
 });
 
@@ -589,8 +589,131 @@ test('счёт ещё не заведён: прочерки И названна�
   assert.equal(seen.warnHidden, false, 'причина обязана быть видна: прочерков мало');
   assert.match(
     String(seen.warnText),
-    /FIRST TRADE/,
+    // Язык по умолчанию — русский (10.11); в английском та же фраза.
+    /FIRST TRADE|ПЕРВОЙ СДЕЛКОЙ/,
     `состояние обязано быть названо словами, показано: ${seen.warnText}`,
   );
   assert.equal(seen.badgeHidden, true, 'модель ещё не выбрана — значка быть не должно');
+});
+
+// ---- 10. Редизайн 10.11: вход верхним уровнем, язык, маржа, заморозка ------
+
+test('вход верхним уровнем: токен из фрагмента обменян, фрагмент стёрт сразу', async (t) => {
+  const term = await openTerminal({ query: '?site=apex-ru#handoff=handoff-top&account=real' });
+  t.after(term.cleanup);
+  await settle(term.page, 1500);
+
+  const minted = term.seen.find((r) => r.path === '/v1/session' && r.method === 'POST');
+  assert.ok(minted, 'терминал обязан сходить за сессией без родителя');
+  assert.match(minted.body, /handoff-top/);
+  const where = await term.page.evaluate(() => ({ hash: location.hash, search: location.search, acc: sessionStorage.getItem('terminal:sso.account') }));
+  assert.equal(where.hash, '', 'токен не должен оставаться в адресной строке');
+  assert.equal(where.search, '?site=apex-ru', 'тенант в адресе остаётся');
+  assert.equal(where.acc, 'real', 'род счёта запомнен для продления');
+  assert.ok(term.seen.some((r) => r.auth && r.auth.includes('session-for-handoff-top')), 'торговые ручки зовутся с сессией');
+
+  const ui = await term.page.evaluate(() => {
+    const a = /** @type {HTMLAnchorElement} */ (document.getElementById('toCabinet'));
+    return { hidden: a.hidden, href: a.href, logout: document.getElementById('logoutBtn').hidden };
+  });
+  assert.equal(ui.hidden, false, 'верхним уровнем видна кнопка «В кабинет»');
+  assert.equal(ui.href, term.origin + '/', 'адрес кабинета — из белого списка конфига');
+  assert.equal(ui.logout, false, 'с сессией видна кнопка «Выйти»');
+  assert.deepEqual(term.errors, []);
+});
+
+test('чужой кабинет во фрагменте не принимается: «В кабинет» ведёт только по белому списку', async (t) => {
+  const term = await openTerminal({ query: '?site=apex-ru#handoff=h&account=demo&cabinet=https%3A%2F%2Fevil.example' });
+  t.after(term.cleanup);
+  await settle(term.page, 1000);
+  const href = await term.page.evaluate(() => /** @type {HTMLAnchorElement} */ (document.getElementById('toCabinet')).href);
+  assert.equal(href, term.origin + '/');
+});
+
+test('во фрейме кабинета кнопок «В кабинет»/«Выйти» нет', async (t) => {
+  const term = await withParent(t);
+  await term.page.evaluate(() => window.__send({ type: 'sso.token', token: 'handoff-abc' }));
+  await settle(term.page, 1000);
+  const frame = term.page.frames().find((f) => f.url().includes('site=apex-ru'));
+  const ui = await frame.evaluate(() => ({ cab: document.getElementById('toCabinet').hidden, out: document.getElementById('logoutBtn').hidden }));
+  assert.deepEqual(ui, { cab: true, out: true });
+});
+
+test('переключатель RU/EN переводит интерфейс без перезагрузки и без потери сессии', async (t) => {
+  const term = await openTerminal({ query: '?site=apex-ru#handoff=handoff-lang&account=demo' });
+  t.after(term.cleanup);
+  await settle(term.page, 1200);
+  const label = () => term.page.evaluate(() => document.querySelector('[data-i18n="acct.balance"]').textContent);
+  assert.equal(await label(), 'Баланс', 'по умолчанию — русский');
+  await term.page.click('.lang [data-lang="en"]');
+  await settle(term.page, 600);
+  assert.equal(await label(), 'Balance');
+  const after = await term.page.evaluate(() => ({ lang: document.documentElement.lang, book: document.querySelector('.ob__head').textContent, token: !!window.Sso.token() }));
+  assert.equal(after.lang, 'en');
+  assert.match(after.book, /Market depth/);
+  assert.match(after.book, /Binance/, 'источник глубины назван и по-английски');
+  assert.equal(after.token, true, 'смена языка сессию не трогает');
+});
+
+test('маржин-колл: уровень ниже порога — красный баннер с уровнем и порогами', async (t) => {
+  const term = await openTerminal({
+    query: '?site=apex-ru#handoff=h-mc&account=demo',
+    routes: {
+      '/account': () => ({
+        opened: true, balance: 1000000, equity: 16000, used_margin: 20000, free_margin: -4000, open_pnl: -984000,
+        model: 'netting', margin_level_pct: 80, margin_call_level_pct: 100, stop_out_level_pct: 50, leverage: 50, kind: 'demo',
+      }),
+    },
+  });
+  t.after(term.cleanup);
+  await settle(term.page, 1500);
+  const ui = await term.page.evaluate(() => {
+    const b = document.getElementById('mcBanner');
+    return { hidden: b.hidden, text: b.textContent, visible: b.getBoundingClientRect().height > 0, lvl: document.getElementById('mLevel').className };
+  });
+  assert.equal(ui.hidden, false);
+  assert.ok(ui.visible, 'баннер виден, а не только выставлен');
+  assert.match(ui.text, /80%.*100%.*50%/);
+  assert.match(ui.lvl, /lvl-bad/);
+});
+
+test('заморозка: бейдж, баннер, тикет закрыт плашкой, кнопки не нажимаются', async (t) => {
+  const term = await openTerminal({
+    query: '?site=apex-ru#handoff=h-fz&account=real',
+    routes: {
+      '/account': () => ({
+        opened: true, balance: 1000000, equity: 1000000, used_margin: 0, free_margin: 1000000, open_pnl: 0,
+        model: 'netting', leverage: 10, kind: 'real', trading_frozen: true,
+      }),
+    },
+  });
+  t.after(term.cleanup);
+  await settle(term.page, 1500);
+  const ui = await term.page.evaluate(() => ({
+    kind: document.getElementById('kindBadge').textContent,
+    badge: document.getElementById('frozenBadge').hidden,
+    banner: document.getElementById('frozenBanner').hidden,
+    overlay: document.getElementById('dealFrozen').getBoundingClientRect().height > 0,
+    buy: /** @type {HTMLButtonElement} */ (document.getElementById('btnBuy')).disabled,
+  }));
+  assert.equal(ui.kind, 'REAL ACCOUNT');
+  assert.deepEqual([ui.badge, ui.banner, ui.overlay, ui.buy], [false, false, true, true]);
+});
+
+test('телефон: вкладки показывают одну панель, «Ордер» открывает тикет', async (t) => {
+  const term = await openTerminal({ query: '?site=apex-ru' });
+  t.after(term.cleanup);
+  await term.page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
+  await settle(term.page, 800);
+  const vis = () => term.page.evaluate(() => {
+    const v = (/** @type {string} */ s) => document.querySelector(s).getBoundingClientRect().height > 0;
+    return { tabs: v('#mtabs'), chart: v('.center'), deal: v('#deal'), book: v('#book'), bottom: v('#bottom') };
+  });
+  assert.deepEqual(await vis(), { tabs: true, chart: true, deal: false, book: false, bottom: false });
+  await term.page.click('#mtabs [data-m="order"]');
+  await settle(term.page, 300);
+  assert.deepEqual(await vis(), { tabs: true, chart: false, deal: true, book: false, bottom: false });
+  const fits = await term.page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+  assert.ok(fits, 'страница не шире экрана телефона');
+  assert.deepEqual(term.errors, []);
 });

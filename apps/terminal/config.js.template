@@ -15,10 +15,13 @@
 //                     порядок переезда контура и выкатки терминала значения не
 //                     имеет.
 //
-//   CABINET_ORIGIN  — origin кабинета-родителя для postMessage/SSO (напр.
-//                     http://localhost:3002).
+//   CABINET_ORIGIN  — origin кабинета для postMessage/SSO (напр.
+//                     http://localhost:3002). Можно НЕСКОЛЬКО через пробел или
+//                     запятую — по кабинету на сайт. Это же БЕЛЫЙ СПИСОК для
+//                     входа верхним уровнем: «В кабинет» и продление сессии
+//                     (`/api/sso/launch`) ведут только на эти origin'ы.
 // Тенант (?site=) терминал берёт из своего URL. Секретов здесь нет и быть не должно.
 window.TERMINAL_CONFIG = {
   brandUrl: "${BRAND_URL}",
-  cabinetOrigins: ["${CABINET_ORIGIN}"]
+  cabinetOrigins: "${CABINET_ORIGIN}".split(/[\s,]+/).filter(Boolean)
 };

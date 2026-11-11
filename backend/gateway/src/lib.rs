@@ -16,6 +16,8 @@ pub mod feed;
 /// вызывается сегодня только из тестов: он участник сверки реализаций между
 /// репозиториями, и прятать его значило бы прятать сам факт сверки.
 pub mod jurisdiction;
+/// Внутренние денежные ручки: пополнение и вывод от имени сайта (демо-деньги).
+mod money;
 mod sso;
 
 use std::collections::HashMap;
@@ -53,7 +55,15 @@ type DepthCache = HashMap<(u32, usize), (Instant, feed::Depth)>;
 /// Кэш статистики: инструмент → (время, изменения по таймфреймам).
 type StatsCache = HashMap<u32, (Instant, Vec<StatDto>)>;
 /// Счёт → внешняя личность `(tenant, sub)`; `None` — счёт не привязан к сайту.
-type IdentityCache = HashMap<UserId, Option<(String, String)>>;
+type IdentityCache = HashMap<UserId, Option<BusIdentity>>;
+
+/// Внешняя личность счёта для шины: сайт, пользователь сайта, род счёта.
+#[derive(Clone)]
+struct BusIdentity {
+    tenant: String,
+    sub: String,
+    kind: AccountKind,
+}
 
 /// Таймфреймы для статистики актива.
 const STAT_TFS: [u32; 8] = [60, 300, 900, 1800, 3600, 14400, 86400, 604800];
@@ -130,6 +140,31 @@ pub struct AppState {
     /// копится, потому что слать некуда» — разные состояния, и чинятся разными
     /// людьми.
     bus_enabled: bool,
+    /// Общий секрет внутренних денежных ручек (`INTERNAL_MONEY_TOKEN`).
+    ///
+    /// `None` — ручки **выключены** и отвечают `404`, как несуществующие:
+    /// fail-closed. Незаданный секрет не может означать «пускать всех».
+    internal_money_token: Option<Arc<str>>,
+    /// Сериализует денежные ручки целиком: «нет ли уже такого `external_ref`
+    /// → провести → записать». Без него два одновременных повтора одного
+    /// крипто-депозита оба увидели бы «ещё не было» и зачислили дважды.
+    money_lock: Arc<Mutex<()>>,
+    /// Разрешена ли торговля на РЕАЛЬНЫХ счетах (`REAL_TRADING_ENABLED=1`).
+    ///
+    /// Критерий владельца (TRM-44): реальными средствами не торгуют, пока
+    /// личность не проверена, а состояния проверки у терминала нет. Ворота
+    /// стоят закрытыми по умолчанию; открывает их площадка явной настройкой —
+    /// тогда за проверку отвечает кабинет, выпускающий токен с
+    /// `account_kind = real` только проверенным.
+    real_trading_enabled: bool,
+    /// Публиковать ли события РЕАЛЬНЫХ счетов на шину (`BUS_REAL_ACCOUNT_EVENTS=1`).
+    ///
+    /// Потребитель сайта ключует проекцию парой `(tenant, userId)` и про род
+    /// счёта не знает: событие реального счёта легло бы в строку демо-счёта и
+    /// испортило бы её. Пока потребитель не научился различать `accountKind`,
+    /// события реальных счетов не собираются вовсе; деньги реального счёта
+    /// сайт видит в ответах внутренних ручек и в `GET .../accounts`.
+    bus_real_events: bool,
 }
 
 pub fn build_state() -> AppState {
@@ -255,6 +290,29 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
             "[gateway] ВНИМАНИЕ: MARGIN_STOP_OUT_LEVEL_PERCENT не задан — принудительного закрытия по марже НЕТ. Счёт может уйти в минус без ограничения сверху. Порог задаёт юрисдикция (CMS-24), выдумывать его здесь нельзя."
         ),
     }
+    // Плечо площадки. Умолчание 1 — поведение без переменной прежнее.
+    // Плечо записывается В ПОЗИЦИЮ при открытии, поэтому смена значения
+    // между выпусками не трогает маржу уже открытых позиций (TRM-53).
+    let leverage = leverage_from_env(std::env::var("PLATFORM_LEVERAGE").ok().as_deref());
+    println!("[gateway] плечо площадки: 1:{leverage}");
+    let internal_money_token =
+        money::token_from_env(std::env::var("INTERNAL_MONEY_TOKEN").ok().as_deref());
+    let env_flag = |name: &str| {
+        matches!(
+            std::env::var(name).ok().as_deref().map(str::trim),
+            Some("1") | Some("true")
+        )
+    };
+    let real_trading_enabled = env_flag("REAL_TRADING_ENABLED");
+    let bus_real_events = env_flag("BUS_REAL_ACCOUNT_EVENTS");
+    if real_trading_enabled {
+        println!("[gateway] торговля на реальных счетах: РАЗРЕШЕНА (проверку личности обеспечивает кабинет)");
+    } else {
+        eprintln!("[gateway] торговля на реальных счетах закрыта (REAL_TRADING_ENABLED не задан): открытие позиций на real — 403 identity_not_verified");
+    }
+    if !bus_real_events {
+        eprintln!("[gateway] события реальных счетов на шину НЕ публикуются (BUS_REAL_ACCOUNT_EVENTS не задан): потребитель ещё не различает accountKind");
+    }
     let feed_instruments = feed::instruments();
     let symbols = symbol_index(&feed_instruments);
     let tenant_instruments = TenantSource::from_env(&symbols);
@@ -270,12 +328,12 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         stats_cache: Arc::new(Mutex::new(HashMap::new())),
         tenant_instruments: Arc::new(tenant_instruments),
         broker: Arc::new(Mutex::new(
-            Broker::new(start_cents, 1)
+            Broker::new(start_cents, leverage)
                 .with_stop_out_pct(stop_out_pct)
                 .with_margin_call_pct(margin_call_pct)
                 .with_margin_call_rearm_band_pct(rearm_band_pct)
                 .with_negative_balance_protection(protect_negative),
-        )), // старт из env, leverage 1
+        )), // старт и плечо — из env
         store,
         acct_locks: Arc::new(Mutex::new(HashMap::new())),
         quarantined: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -284,6 +342,32 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         sso_enabled,
         identities: Arc::new(Mutex::new(HashMap::new())),
         bus_enabled: false,
+        internal_money_token,
+        money_lock: Arc::new(Mutex::new(())),
+        real_trading_enabled,
+        bus_real_events,
+    }
+}
+
+/// Плечо площадки из окружения (`PLATFORM_LEVERAGE`).
+///
+/// Не задано — `1`, как было до переменной. Неразборчивое, ноль, отрицательное
+/// или больше 1000 — тоже `1`, и громко: испорченная настройка плеча не должна
+/// молча превращаться ни в «без маржи», ни в деление на ноль.
+fn leverage_from_env(raw: Option<&str>) -> i128 {
+    const DEFAULT: i128 = 1;
+    const MAX: i128 = 1000;
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => DEFAULT,
+        Some(s) => match s.parse::<i128>() {
+            Ok(l) if (1..=MAX).contains(&l) => l,
+            _ => {
+                eprintln!(
+                    "[gateway] PLATFORM_LEVERAGE=«{s}» не целое от 1 до {MAX} — взято плечо {DEFAULT}"
+                );
+                DEFAULT
+            }
+        },
     }
 }
 
@@ -420,11 +504,18 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
 /// (standalone), и событие по нему никому не адресовано; отказ означает «мы не
 /// знаем», и выдавать его за первое значило бы тихо терять события при моргнувшей
 /// базе. Поэтому отказ громкий и не кешируется.
-async fn identity_for_bus(st: &AppState, user: UserId) -> Option<(String, String)> {
+async fn identity_for_bus(st: &AppState, user: UserId) -> Option<BusIdentity> {
     if let Some(found) = st.identities.lock().await.get(&user) {
         return found.clone();
     }
-    match st.store.identity_of(user).await {
+    let read = async {
+        let Some((tenant, sub)) = st.store.identity_of(user).await? else {
+            return Ok(None);
+        };
+        let kind = st.store.account_kind_of(user).await?;
+        Ok::<_, persistence::StoreError>(Some(BusIdentity { tenant, sub, kind }))
+    };
+    match read.await {
         Ok(found) => {
             st.identities.lock().await.insert(user, found.clone());
             found
@@ -456,18 +547,24 @@ async fn bus_envelopes(
     if kinds.is_empty() {
         return Vec::new();
     }
-    let Some((tenant, sub)) = identity_for_bus(st, user).await else {
+    let Some(id) = identity_for_bus(st, user).await else {
         return Vec::new();
     };
+    if id.kind == AccountKind::Real && !st.bus_real_events {
+        return Vec::new();
+    }
     let Some(last) = sealed.last() else {
         return Vec::new();
     };
+    let account_id = bus::account_uuid(&id.tenant, &id.sub, id.kind);
     let who = bus::Addressee {
-        tenant: &tenant,
-        sub: &sub,
+        tenant: &id.tenant,
+        sub: &id.sub,
         user: user.0,
         seq: last.seq(),
         at_ms: last.at_ms(),
+        kind: id.kind,
+        account_id: &account_id,
     };
     let by_id = |id: u32| feed_by_id(st, id);
     bus::envelopes_for(&who, &before, snap, kinds, &by_id)
@@ -553,11 +650,16 @@ fn deal_error(e: broker::BrokerError) -> ApiErr {
         E::UnknownAccount => err(StatusCode::NOT_FOUND, "unknown_account"),
         E::NotADemoAccount => err(StatusCode::CONFLICT, "not_a_demo_account"),
         E::AccountNotFlat => err(StatusCode::CONFLICT, "account_not_flat"),
+        E::InvalidLeverage => err(StatusCode::BAD_REQUEST, "invalid_leverage"),
+        E::InvalidFees => err(StatusCode::BAD_REQUEST, "invalid_fees"),
     }
 }
 
-fn profile_for_new_account(user: UserId) -> AccountProfile {
-    AccountProfile::legacy_demo(user)
+fn profile_for_new_account(user: UserId, kind: AccountKind) -> AccountProfile {
+    AccountProfile {
+        kind,
+        ..AccountProfile::legacy_demo(user)
+    }
 }
 
 /// Завести счёт отдельной записью журнала — **до** первой операции и
@@ -634,17 +736,35 @@ async fn ensure_account_opened(st: &AppState, user: UserId) -> Result<(), ApiErr
         return Ok(());
     }
 
+    // Род счёта — из маппинга личности (demo-money). Не прочитали — счёт не
+    // заводим: завести реальный счёт демо-счётом значило бы выдать бумажные
+    // деньги за настоящие.
+    let kind = st.store.account_kind_of(user).await.map_err(|e| {
+        eprintln!(
+            "[gateway] род счёта {} не прочитан — счёт НЕ заводится: {e}",
+            user.0
+        );
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "identity_store_unavailable",
+        )
+    })?;
+
     // Сумму спрашиваем ДО лока брокера: чтение сетевое, и держать под ним лок
     // незачем. Отказ здесь означает, что счёт не заведён вовсе, — и это
-    // правильнее, чем завести его выдуманной суммой.
-    let demo_start = demo_start_for(st, user).await?;
+    // правильнее, чем завести его выдуманной суммой. Реальный счёт открывается
+    // нулём (`start_balance_for`), и сайт о сумме не спрашиваем вовсе.
+    let demo_start = match kind {
+        AccountKind::Demo => demo_start_for(st, user).await?,
+        AccountKind::Real => 0,
+    };
 
     let (kinds, snap, start_balance) = {
         let mut b = st.broker.lock().await;
         // Повторная проверка под локом: между быстрым путём и этим местом счёт мог
         // завести соседний запрос. `open_account` отдаёт `false` — уходим, запись
         // уже сделана тем, кто успел первым.
-        if !b.open_account_with(user, profile_for_new_account(user), demo_start) {
+        if !b.open_account_with(user, profile_for_new_account(user, kind), demo_start) {
             return Ok(());
         }
         (b.take_events(user), b.snapshot(user), b.start_balance())
@@ -736,6 +856,38 @@ async fn with_account<T>(
     origin: Origin,
     f: impl FnOnce(&mut Broker) -> Result<T, ApiErr>,
 ) -> Result<T, ApiErr> {
+    with_account_gated(st, user, origin, Gate::Any, f).await
+}
+
+/// Что операции нужно от счёта сверх «не в карантине».
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    /// Закрытие, снятие ордера, пополнение — разрешены и замороженному счёту.
+    Any,
+    /// Открытие позиции, новый ордер, вывод, сброс демо — замороженному нельзя.
+    NotFrozen,
+}
+
+/// Заморожена ли торговля по счёту оператором. Источник — свёртка журнала
+/// (`TradingFreezeSet`): другого хранилища у заморозки нет, и после рестарта
+/// она поднимается вместе с лентой.
+async fn trading_frozen(st: &AppState, user: UserId) -> bool {
+    st.journals
+        .lock()
+        .await
+        .get(&user)
+        .is_some_and(|j| j.state().trading_frozen)
+}
+
+/// [`with_account`] с проверкой заморозки **под локом счёта**: проверка до лока
+/// пропустила бы операцию, пришедшую одновременно с заморозкой.
+async fn with_account_gated<T>(
+    st: &AppState,
+    user: UserId,
+    origin: Origin,
+    gate: Gate,
+    f: impl FnOnce(&mut Broker) -> Result<T, ApiErr>,
+) -> Result<T, ApiErr> {
     // Счёт в карантине не мутируем: его состояние уже неверно, и любая операция
     // поверх него закрепила бы порчу. Читать при этом можно.
     if st.quarantined.lock().await.contains(&user) {
@@ -749,6 +901,10 @@ async fn with_account<T>(
     // операция уже не может родить счёт, а значит и уронить его рождение своим
     // отказом: `f` ниже работает по заведомо существующему счёту.
     ensure_account_opened(st, user).await?;
+
+    if gate == Gate::NotFrozen && trading_frozen(st, user).await {
+        return Err(err(StatusCode::FORBIDDEN, "account_frozen"));
+    }
 
     let (out, before, snap, kinds, start_balance) = {
         let mut b = st.broker.lock().await;
@@ -1298,7 +1454,9 @@ async fn ensure_can_open(st: &AppState, who: &Principal, instrument: u32) -> Res
     //
     // Сегодня ветка недостижима — реальных счетов терминал не открывает. Она
     // стоит здесь затем, чтобы путь к ним нельзя было открыть, не увидев её.
-    if st.broker.lock().await.snapshot(who.user).profile.kind == AccountKind::Real {
+    if st.broker.lock().await.snapshot(who.user).profile.kind == AccountKind::Real
+        && !st.real_trading_enabled
+    {
         return Err(err(StatusCode::FORBIDDEN, "identity_not_verified"));
     }
 
@@ -1387,12 +1545,15 @@ pub fn router(state: AppState) -> Router {
         // SSO платформы (ADR-023, Т2): обмен handoff-JWT на сессию терминала и логаут.
         .route("/v1/session", post(session_create))
         .route("/v1/session/logout", post(session_logout))
+        // Внутренние денежные ручки. Наружу не публикуются: nginx терминала
+        // проксирует только явный список префиксов и `/internal` закрывает сам.
+        .merge(money::routes())
         .with_state(state)
 }
 
 // ============================ DTO ==========================================
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct ErrResp {
     error: String,
 }
@@ -1493,6 +1654,12 @@ struct ClosedDto {
     /// разрыва не было, то есть отвечал бы за прошлое, которого не видел.
     #[serde(skip_serializing_if = "Option::is_none")]
     across_gap: Option<bool>,
+    /// Вся комиссия сделки (открытие и закрытие), в наименьших единицах
+    /// валюты счёта (10.11). Ноль — тарифа не было.
+    commission: i128,
+    /// Рыночная цена закрытия до наценки. Поля нет у сделок до тарифов.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    market_exit: Option<i64>,
 }
 #[derive(Serialize)]
 struct AccountDto {
@@ -1539,6 +1706,25 @@ struct AccountDto {
     /// знать, рискует ли он остаться должным.
     negative_balance_protection: bool,
     open_pnl: Option<i128>,
+    /// Плечо, с которым откроется СЛЕДУЮЩАЯ позиция: плечо счёта (Р-446,
+    /// назначает сайт), а если его не назначали — плечо площадки
+    /// (`PLATFORM_LEVERAGE`). У открытых позиций плечо своё, записанное при
+    /// открытии.
+    leverage: i128,
+    /// Тариф для СЛЕДУЮЩЕЙ позиции (10.11): наценка на спред и комиссия от
+    /// нотионала, bps. Нули — без тарифа. Фронт показывает по ним «Комиссия ≈»
+    /// в тикете; открытые позиции держат свой тариф снимком.
+    markup_bps: i64,
+    commission_bps: i64,
+    /// Торговля заморожена оператором: открытие, новые ордера и вывод
+    /// отклоняются (`account_frozen`), закрытие и стоп-аут работают.
+    trading_frozen: bool,
+    /// Род счёта: `demo` | `real`. По нему фронт рисует бейдж.
+    kind: &'static str,
+    /// Внешний идентификатор счёта (тот же `accountId`, что на шине). `null` —
+    /// счёт не привязан к сайту (автономный терминал).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_id: Option<String>,
 }
 #[derive(Serialize)]
 struct InstrumentDto {
@@ -1562,6 +1748,12 @@ struct InstrumentDto {
     /// То же решение, что у `/stats`, где `change` обнуляем с самого начала:
     /// два ответа одного сервиса про одну величину обязаны говорить одинаково.
     change: Option<f64>,
+    /// 24ч-минимум, объём (база, raw `qty_decimals`) и оборот (котируемая,
+    /// raw `price_decimals`) — для шапки инструмента. `null` — тикера нет или
+    /// поле не разобралось: прочерк, а не ноль (BUG-011).
+    low: Option<i64>,
+    volume: Option<i64>,
+    quote_volume: Option<i64>,
 }
 #[derive(Serialize)]
 struct DepthResp {
@@ -1620,6 +1812,8 @@ struct HealthDto {
     /// хранилища (КОНТРАКТЫ §5в), и по той же причине: снаружи общий счёт
     /// неотличим от своего, пока на нём не окажется чужая сделка.
     shared_account: bool,
+    /// Включены ли внутренние денежные ручки (задан ли `INTERNAL_MONEY_TOKEN`).
+    internal_money: bool,
 }
 
 /// Насколько старым может быть последнее сообщение Binance, чтобы фид считался живым.
@@ -1640,6 +1834,7 @@ async fn health(State(st): State<AppState>) -> Json<HealthDto> {
         bus: st.bus_enabled,
         outbox_pending: st.store.outbox_backlog().await.ok(),
         shared_account: !st.sso_enabled,
+        internal_money: st.internal_money_token.is_some(),
     })
 }
 
@@ -1710,6 +1905,9 @@ async fn list_instruments(
                 ask: t.map(|t| t.ask),
                 high: t.map(|t| t.high),
                 change: t.map(|t| t.change),
+                low: t.and_then(|t| t.low),
+                volume: t.and_then(|t| t.volume),
+                quote_volume: t.and_then(|t| t.quote_volume),
             }
         })
         .collect();
@@ -1905,7 +2103,7 @@ async fn open_deal(
     // Снимаются ДО лока счёта: тикеры живут под своим локом, и брать два лока
     // во вложенном порядке — способ получить взаимную блокировку.
     let m = marks(&st).await;
-    let id = with_account(&st, user, Origin::Client, |b| {
+    let id = with_account_gated(&st, user, Origin::Client, Gate::NotFrozen, |b| {
         b.open(
             user,
             &m,
@@ -1919,8 +2117,21 @@ async fn open_deal(
             req.tp,
         )
         .map_err(deal_error)
+        .map(|id| {
+            // Цена входа — та, по которой ИСПОЛНЕНО (с наценкой тарифа), а
+            // не рыночная: позицию человек видит по ней же. У неттинга —
+            // средневзвешенный вход позиции после операции.
+            let exec = b
+                .positions(user)
+                .into_iter()
+                .find(|p| p.id == id)
+                .map(|p| p.entry)
+                .unwrap_or(entry);
+            (id, exec)
+        })
     })
     .await?;
+    let (id, entry) = id;
     Ok(Json(DealDto {
         id,
         instrument: req.instrument,
@@ -1958,7 +2169,7 @@ async fn place_pending(
     }
     let fi = feed_by_id(&st, req.instrument)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
-    let id = with_account(&st, user, Origin::Client, |b| {
+    let id = with_account_gated(&st, user, Origin::Client, Gate::NotFrozen, |b| {
         b.place_pending(
             user,
             req.instrument,
@@ -2060,6 +2271,8 @@ async fn list_closed(
             pnl: d.pnl,
             level: d.level,
             across_gap: d.across_gap,
+            commission: d.fees.commission,
+            market_exit: d.fees.market_exit,
             price_decimals: d.pd,
             qty_decimals: d.qd,
         })
@@ -2147,6 +2360,13 @@ async fn account(
 ) -> Result<Json<AccountDto>, ApiErr> {
     let user = require_user(&st, &headers).await?;
     let m = marks(&st).await;
+    // До лока брокера: журналы и брокер вложенно не берём.
+    let frozen = trading_frozen(&st, user).await;
+    let ident = identity_for_bus(&st, user).await;
+    let kind = ident.as_ref().map(|i| i.kind).unwrap_or_default();
+    let account_id = ident
+        .as_ref()
+        .map(|i| bus::account_uuid(&i.tenant, &i.sub, i.kind));
     let b = st.broker.lock().await;
 
     // Счёт заводится лениво — при первой операции (TRM-46). Пока его нет,
@@ -2171,6 +2391,12 @@ async fn account(
             margin_call_level_pct: b.margin_call_pct(),
             negative_balance_protection: b.negative_balance_protection(),
             open_pnl: None,
+            leverage: b.account_leverage(user),
+            markup_bps: 0,
+            commission_bps: 0,
+            trading_frozen: false,
+            kind: kind.tag(),
+            account_id,
         }));
     }
 
@@ -2205,6 +2431,12 @@ async fn account(
         margin_call_level_pct: b.margin_call_pct(),
         negative_balance_protection: b.negative_balance_protection(),
         open_pnl: Some(open_pnl),
+        leverage: b.account_leverage(user),
+        markup_bps: b.account_fees(user).markup_bps,
+        commission_bps: b.account_fees(user).commission_bps,
+        trading_frozen: frozen,
+        kind: b.snapshot(user).profile.kind.tag(),
+        account_id,
     }))
 }
 
@@ -2310,7 +2542,7 @@ async fn demo_reset(
     headers: HeaderMap,
 ) -> Result<Json<AccountDto>, ApiErr> {
     let user = require_user(&st, &headers).await?;
-    with_account(&st, user, Origin::Client, |b| {
+    with_account_gated(&st, user, Origin::Client, Gate::NotFrozen, |b| {
         b.reset_demo(user).map(|_| ()).map_err(|e| match e {
             // Коды различимы: «не демо» чинит не тот, кто «закройте позиции».
             broker::BrokerError::NotADemoAccount => {
@@ -2350,9 +2582,17 @@ async fn session_create(
         .validate(&req.token, &req.site)
         .await
         .map_err(sso_err)?;
+    // Какой счёт открыть — называет кабинет claim-ом `account_kind`; нет его —
+    // демо, как было до разделения. Незнакомое значение — отказ, а не демо:
+    // род счёта решает, настоящие ли это деньги.
+    let kind = match claims.account_kind.as_deref() {
+        None => AccountKind::Demo,
+        Some(k) => AccountKind::parse(k)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "unknown_account_kind"))?,
+    };
     let user = st
         .store
-        .resolve_identity(&claims.tenant, &claims.sub)
+        .resolve_account(&claims.tenant, &claims.sub, kind)
         .await
         .map_err(|_| {
             err(
@@ -2360,6 +2600,8 @@ async fn session_create(
                 "identity store unavailable",
             )
         })?;
+    sync_leverage_claim(&st, user, claims.leverage).await?;
+    sync_fees_claim(&st, user, claims.markup_bps, claims.commission_bps).await?;
     let expires_in = st
         .sso
         .mint(claims.jti.clone(), user, claims.tenant.clone())
@@ -2368,6 +2610,96 @@ async fn session_create(
         token: claims.jti,
         expires_in,
     }))
+}
+
+/// Плечо счёта из токена входа (Р-446): кабинет кладёт в claim `leverage`
+/// итог портфеля / override клиента на момент выпуска. Это синхронизация, а
+/// не основной путь — основной путь у админки, внутренний маршрут
+/// `.../leverage`. Здесь догоняется то, что мимо него: новый клиент в
+/// портфеле по умолчанию, счёт, впервые заведённый этим входом, смена,
+/// случившаяся, пока терминал лежал. Терминал продлевает сессию повторным
+/// handoff-ом (≤ 15 мин), так что плечо догоняет сайт и без маршрута.
+///
+/// Нет claim-а — плечо счёта не трогаем (старый кабинет, standalone).
+/// Синхронизация не удалась — входа нет: торговать по плечу, которое сайт
+/// уже отменил, хуже, чем не войти (fail-closed). Счёт в карантине не
+/// мутируем — читать его можно и без синхронизации.
+async fn sync_leverage_claim(
+    st: &AppState,
+    user: UserId,
+    claim: Option<i64>,
+) -> Result<(), ApiErr> {
+    let Some(lev) = claim else {
+        return Ok(());
+    };
+    let lev = i128::from(lev);
+    if !(1..=broker::MAX_LEVERAGE).contains(&lev) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid_leverage"));
+    }
+    if st.quarantined.lock().await.contains(&user) {
+        return Ok(());
+    }
+    let op = journal::Operator::new(
+        "cabinet-sso",
+        "плечо счёта из токена входа кабинета (портфель/override клиента)",
+        "sso-login",
+    )
+    .expect("поля заданы константами");
+    if let Err(e) = money::apply_leverage(st, user, lev, op).await {
+        eprintln!(
+            "[sso] плечо счёта {} из токена не применено ({}): вход отклонён",
+            user.0, e.1 .0.error
+        );
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "leverage_sync_failed"));
+    }
+    Ok(())
+}
+
+/// Тариф счёта из токена входа (решение владельца 10.11): кабинет кладёт в
+/// claims `markup_bps` / `commission_bps` итог портфеля / override клиента.
+/// Как с плечом: синхронизация при входе и продлении, основной путь — у
+/// админки (`.../fees`).
+///
+/// Нет обоих claim-ов — тариф не трогаем. Есть один — второй остаётся
+/// прежним (старый кабинет, знающий только одну ставку, не обнуляет другую).
+/// Вне `0..=MAX_FEE_BPS` — отказ входа (`400 invalid_fees`). Синхронизация не
+/// удалась — входа нет (fail-closed): торговать по тарифу, который сайт уже
+/// сменил, — значит считать доход площадки и кешбэк по чужим ставкам.
+async fn sync_fees_claim(
+    st: &AppState,
+    user: UserId,
+    markup: Option<i64>,
+    commission: Option<i64>,
+) -> Result<(), ApiErr> {
+    if markup.is_none() && commission.is_none() {
+        return Ok(());
+    }
+    let ok = |v: Option<i64>| v.is_none_or(|v| (0..=broker::MAX_FEE_BPS).contains(&v));
+    if !ok(markup) || !ok(commission) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid_fees"));
+    }
+    if st.quarantined.lock().await.contains(&user) {
+        return Ok(());
+    }
+    let current = st.broker.lock().await.account_fees(user);
+    let fees = broker::Fees {
+        markup_bps: markup.unwrap_or(current.markup_bps),
+        commission_bps: commission.unwrap_or(current.commission_bps),
+    };
+    let op = journal::Operator::new(
+        "cabinet-sso",
+        "тариф счёта из токена входа кабинета (портфель/override клиента)",
+        "sso-login",
+    )
+    .expect("поля заданы константами");
+    if let Err(e) = money::apply_fees(st, user, fees, op).await {
+        eprintln!(
+            "[sso] тариф счёта {} из токена не применён ({}): вход отклонён",
+            user.0, e.1 .0.error
+        );
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "fees_sync_failed"));
+    }
+    Ok(())
 }
 
 /// Погасить сессию терминала (логаут из кабинета).
@@ -2424,7 +2756,23 @@ pub async fn monitor_tick(st: &AppState) {
     // снова непрерывен. Порог тот же, что у `/health`: два разных
     // числа для одного вопроса однажды разойдутся.
     let across_gap = st.note_feed_gap();
-    let changed = { st.broker.lock().await.check(&m, across_gap) };
+    // Замороженные счета — по свёртке журналов (заморозку держит шлюз, не
+    // брокер). Их сработавшие отложенные ордера снимаются, а не исполняются:
+    // проверка на постановке ордера не закрывает ордер, поставленный ДО
+    // заморозки. Порядок локов «журналы → брокер» — тот же, что у
+    // `commit_journal`.
+    let changed = {
+        let js = st.journals.lock().await;
+        let frozen: std::collections::HashSet<UserId> = js
+            .iter()
+            .filter(|(_, j)| j.state().trading_frozen)
+            .map(|(u, _)| *u)
+            .collect();
+        st.broker
+            .lock()
+            .await
+            .check_with_frozen(&m, across_gap, &frozen)
+    };
     for user in changed {
         let lock = account_lock(st, user).await;
         let _guard = lock.lock().await;
@@ -2512,7 +2860,10 @@ async fn send_margin_calls(st: &AppState, marks: &HashMap<u32, i64>) {
                 b.stop_out_pct(),
             )
         };
-        let Some((tenant, sub)) = identity_for_bus(st, user).await else {
+        let Some(id) = identity_for_bus(st, user)
+            .await
+            .filter(|id| id.kind == AccountKind::Demo || st.bus_real_events)
+        else {
             // Адресата нет — предупреждать некого. Молчим не потому, что
             // неважно, а потому что отправить некуда: счёт не привязан к сайту.
             eprintln!(
@@ -2533,12 +2884,15 @@ async fn send_margin_calls(st: &AppState, marks: &HashMap<u32, i64>) {
                 .map(|e| e.seq())
                 .unwrap_or(0)
         };
+        let account_id = bus::account_uuid(&id.tenant, &id.sub, id.kind);
         let who = bus::Addressee {
-            tenant: &tenant,
-            sub: &sub,
+            tenant: &id.tenant,
+            sub: &id.sub,
             user: user.0,
             seq,
             at_ms: now_ms(),
+            kind: id.kind,
+            account_id: &account_id,
         };
         // Предупреждение бывает только у счёта с открытыми позициями —
         // значит счёт существует. `expect` здесь документирует это условие, а
@@ -3041,10 +3395,13 @@ mod invariant_wiring_tests {
                 sl: None,
                 tp: None,
                 leverage: 1,
+                fees: Default::default(),
             }],
             pendings: vec![],
             closed: vec![],
             model: broker::PositionModel::Hedging,
+            leverage: None,
+            fees: Default::default(),
         }
     }
 
@@ -3272,6 +3629,7 @@ mod journal_wiring_tests {
                 high: px,
                 bid: px,
                 ask: px,
+                ..Default::default()
             },
         );
     }
@@ -4410,6 +4768,7 @@ mod bus_wiring_tests {
                 high: px,
                 bid: px,
                 ask: px,
+                ..Default::default()
             },
         );
     }
@@ -4831,6 +5190,7 @@ mod margin_wiring_tests {
                 high: px,
                 bid: px,
                 ask: px,
+                ..Default::default()
             },
         );
     }
@@ -4993,5 +5353,25 @@ mod margin_wiring_tests {
             "нотионал 0.01 × $50 000 = $500: {acc}"
         );
         assert_eq!(acc["margin_level_pct"], 20_000, "{acc}");
+    }
+}
+
+#[cfg(test)]
+mod leverage_env_tests {
+    use super::leverage_from_env;
+
+    #[test]
+    fn leverage_defaults_to_one_and_refuses_nonsense() {
+        assert_eq!(
+            leverage_from_env(None),
+            1,
+            "без переменной поведение прежнее"
+        );
+        assert_eq!(leverage_from_env(Some("")), 1);
+        assert_eq!(leverage_from_env(Some(" 20 ")), 20);
+        assert_eq!(leverage_from_env(Some("1000")), 1000);
+        for bad in ["0", "-5", "1001", "20x", "1.5"] {
+            assert_eq!(leverage_from_env(Some(bad)), 1, "«{bad}»");
+        }
     }
 }
