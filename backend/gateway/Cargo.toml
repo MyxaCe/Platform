@@ -58,3 +58,6 @@ async-trait = "0.1"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# Живая проверка отката SL/TP (17.11) чистит строки счёта перед прогоном.
+# Та же версия и набор, что у `persistence`: новых крейтов не тянет.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "bigdecimal"] }

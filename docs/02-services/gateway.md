@@ -42,6 +42,8 @@ docker compose down --remove-orphans
 | POST | `/pending` | лимитный ордер `{instrument, side, qty, price, sl?, tp?}` |
 | GET | `/pending` | отложенные ордера |
 | DELETE | `/pending/{id}` | отменить лимитный ордер |
+| PUT | `/deals/{id}/levels` | поставить/сдвинуть/снять SL/TP позиции `{sl?: n\|null, tp?: n\|null}` (поля нет — оставить); запись — под `SLTP_EDIT_ENABLED=1`, иначе `409 sltp_edit_disabled`. Отказы: `422 *_too_close` (минимум от bid/ask закрытия), `409 *_already_reached`, `404 unknown_position`, `403 account_frozen`, `423 account_quarantined`. Журнал: `position_levels_changed` |
+| PUT | `/pending/{id}/levels` | то же для отложенного ордера; минимум — от цены ордера. Журнал: `pending_levels_changed` |
 | GET | `/account` | `{balance, equity, used_margin, free_margin, open_pnl}` (центы) |
 | WS | `/stream` | живая лента событий Binance (JSON) |
 

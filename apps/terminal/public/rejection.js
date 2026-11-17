@@ -65,6 +65,15 @@
       'Your account is blocked by an operator: opening positions, new orders and withdrawals are disabled. You can still close existing positions. Please contact support.',
     identity_store_unavailable:
       'We could not confirm which site your account belongs to, so it was not opened. Nothing is wrong with your request — this is a platform-side outage.',
+    // Изменение SL/TP (17.11). Флаг выключен — это решение выката, а не
+    // ошибка человека: так и говорим.
+    sltp_edit_disabled:
+      'Changing SL/TP of an open position or order is not available yet. To change a level now, close the position or cancel the order and place it again.',
+    unknown_position:
+      'This position is no longer open — it may have just been closed by its stop loss or take profit.',
+    unknown_pending:
+      'This order is no longer active — it may have just been filled or cancelled.',
+    invalid_level: 'Enter a price above zero, or leave the field empty to remove the level.',
   };
 
   // НЕ закрыты здесь намеренно, и названы, чтобы следующий не считал их

@@ -557,12 +557,22 @@ fn positions_json(
             );
             continue;
         };
-        items.push(serde_json::json!({
+        let mut item = serde_json::json!({
             "symbol": platform_symbol(&f),
             "side": side_tag(p.side),
             "volume": num(&decimal(p.qty, p.qd)),
             "entryPrice": num(&decimal(p.entry, p.pd)),
-        }));
+        });
+        // SL/TP — ДОБАВОЧНЫЕ поля (17.11): незнакомое поле потребитель срезает
+        // молча, а отсутствие значит «уровня нет». `null` не шлём: строгая
+        // схема могла бы принять его за число, которого нет.
+        if let Some(sl) = p.sl {
+            item["stopLoss"] = num(&decimal(sl, p.pd));
+        }
+        if let Some(tp) = p.tp {
+            item["takeProfit"] = num(&decimal(tp, p.pd));
+        }
+        items.push(item);
     }
     serde_json::Value::Array(items)
 }
@@ -1337,6 +1347,42 @@ mod tests {
         assert_eq!(p["symbol"], "BTCUSD");
         assert_eq!(p["side"], "sell");
         assert_eq!(p["volume"], serde_json::json!(0.5));
+        assert_eq!(p["entryPrice"], serde_json::json!(69_000.0));
+        assert!(
+            p.get("stopLoss").is_none() && p.get("takeProfit").is_none(),
+            "уровней нет — полей нет: {p}"
+        );
+    }
+
+    /// SL/TP едут в снимке позиций добавочными полями (17.11): прежние поля и
+    /// их значения не меняются, новые — десятичными, как цена входа.
+    #[test]
+    fn positions_snapshot_carries_levels_as_additive_fields() {
+        let mut after = after_one_deal(None, Some(false));
+        after.positions = vec![Position {
+            id: 2,
+            instrument: 1,
+            side: PosSide::Long,
+            qty: 50_000,
+            entry: 6_900_000,
+            pd: 2,
+            qd: 5,
+            margin: 100_000,
+            sl: Some(6_850_050),
+            tp: None,
+            leverage: 1,
+            fees: Default::default(),
+        }];
+        let evs = envelopes_for(&who(9), &before_empty(), &after, &[], &known);
+        let e = evs.iter().find(|e| e.event == EV_BALANCE_CHANGED).unwrap();
+        let p = &e.data["positions"][0];
+        let keys: Vec<&String> = p.as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys,
+            ["entryPrice", "side", "stopLoss", "symbol", "volume"],
+            "прежние четыре поля на месте, добавлено одно"
+        );
+        assert_eq!(p["stopLoss"], serde_json::json!(68_500.5));
         assert_eq!(p["entryPrice"], serde_json::json!(69_000.0));
     }
 

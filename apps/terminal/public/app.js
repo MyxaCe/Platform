@@ -474,6 +474,9 @@ const panel = Positions.mount(document.getElementById('bottom'), {
   // Позиции нужны графику для линий SL/TP — виджет отдаёт их хосту, а не лезет в график сам.
   onDeals: (list) => { currentDeals = list.filter((d) => d.instrument === selected); redrawPriceLines(); },
   onChange: () => pollAccount(),
+  // Изменение SL/TP (17.11): ячейки уровней — кнопки, только если шлюз
+  // разрешил запись (`/account.sltp_edit`) и счёт не заморожен.
+  levels: { enabled: () => sltpEdit && !(lastAccount && lastAccount.trading_frozen), edit: openLevels },
   signals: () => computeSignals(),
   balance: () => balanceRows(),
   t: wT,
@@ -804,6 +807,32 @@ function stopRef(it) {
   return Number.isInteger(raw) && raw > 0 ? raw : null;
 }
 function resetStops() { stopAuto.sl = true; stopAuto.tp = true; }
+
+// ---- Изменение SL/TP открытой позиции и ордера (levels.js, 17.11) ---------
+// Запись включает шлюз флагом (`SLTP_EDIT_ENABLED`) и сообщает о нём в
+// `/account.sltp_edit`. Пока флаг выключен, ячейки SL/TP — просто текст.
+let sltpEdit = false;
+/**
+ * Окно изменения уровней. Цена отсчёта — та же, что у шлюза: у позиции цена
+ * закрытия (bid покупки, ask продажи), у ордера — его цена.
+ * @param {'deal'|'pending'} kind @param {any} row @param {'sl'|'tp'} field
+ */
+function openLevels(kind, row, field) {
+  Levels.open({
+    kind, row, field, t: wT,
+    ref: () => {
+      if (kind === 'pending') return row.price;
+      const it = META[row.instrument];
+      const raw = it ? (row.side === 'buy' ? it.bid : it.ask) : null;
+      return Number.isInteger(raw) && raw > 0 ? raw : null;
+    },
+    bps: () => minStopBps,
+    submit: (/** @type {any} */ body) => (kind === 'deal' ? api.editDealLevels(row.id, body) : api.editPendingLevels(row.id, body)),
+    rejection: rejectionText,
+    // Таблица и линии SL/TP графика перерисовываются из ответа /deals.
+    onDone: () => { panel.refresh(); pollAccount(); },
+  });
+}
 function refreshStops() {
   const it = META[selected];
   const hint = document.getElementById('stopsHint');
@@ -1153,6 +1182,11 @@ async function pollAccount() {
     };
     // Минимум стопов площадки. Поля нет (прежний шлюз) — 0: так он и проверяет.
     minStopBps = Number.isInteger(a.min_stop_bps) && a.min_stop_bps > 0 ? a.min_stop_bps : 0;
+    // Изменение SL/TP: поля нет (прежний шлюз) или `false` (флаг выключен) —
+    // кнопок нет. Сменилось — перерисовать строки сразу, а не через опрос.
+    const edit = a.sltp_edit === true;
+    if (edit !== sltpEdit) { sltpEdit = edit; panel.refresh(); }
+    if (!edit) Levels.close();
     updateDealPanel();
     if (a.opened === false) {
       // Счёта ещё нет: шлюз отдаёт `null` вместо цифр, и подставлять сюда ноль

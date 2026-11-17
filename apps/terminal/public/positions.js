@@ -8,6 +8,10 @@
  *     pips: () => false,         // показывать ли пипсы в P&L (тумблер хоста)
  *     onDeals: (list) => {},     // хост получает позиции (рисует SL/TP-линии на графике)
  *     onChange: () => {},        // после закрытия сделки / отмены ордера — обновить метрики
+ *     levels: {                  // изменение SL/TP (опц., 17.11): ячейки SL/TP становятся кнопками
+ *       enabled: () => true,     //   можно ли сейчас (флаг шлюза `/account.sltp_edit`, счёт не заморожен)
+ *       edit: (kind, row, field) => {}, // 'deal'|'pending', строка списка, 'sl'|'tp' — окно открывает хост
+ *     },
  *     signals: () => [{ symbol, name, tf, dir }],  // сигналы считает хост (из свечей)
  *     balance: () => [[label, value, cls?]] | null, // вкладка «Баланс» (опц.): сводку счёта даёт хост
  *     t: (key, en) => string,    // перевод (опц.): без него — английский
@@ -47,6 +51,36 @@
 .deal-row span:nth-child(n+3) { text-align: right; }
 .deal-row span:nth-child(2) { text-align: left; }
 .ta-r { text-align: right; }
+.deal-row .lvlbtn { justify-self: end; display: inline-flex; align-items: center; gap: 5px; background: transparent; border: 1px dashed transparent; border-radius: 4px;
+  padding: 2px 5px; margin: -3px -6px -3px 0; font: inherit; cursor: pointer; white-space: nowrap; }
+.deal-row .lvlbtn:not(.sl):not(.tp) { color: var(--muted,#6b7688); }
+.deal-row .lvlbtn .pen { display: inline-flex; opacity: .4; color: var(--muted,#6b7688); }
+.deal-row .lvlbtn:hover, .deal-row .lvlbtn:focus-visible { border-color: var(--border,#1f2735); background: var(--panel2,#151a25); outline: none; }
+.deal-row .lvlbtn:hover .pen, .deal-row .lvlbtn:focus-visible .pen { opacity: 1; color: var(--text,#d7dce5); }
+@media (hover: none) { .deal-row .lvlbtn .pen { opacity: .75; } }
+/* Телефон (17.11): позиции и ордера — карточкой в три строки, а не таблицей в
+   девять колонок. Таблица не помещалась уже до правки SL/TP — кнопка «Закрыть»
+   уезжала за край экрана; редактируемым уровням нужна площадь пальца. Подписи
+   берутся из data-l ячейки, заголовок таблицы на телефоне не нужен. */
+@media (max-width: 860px) {
+  .pane[data-pane="deals"] .deals__head, .pane[data-pane="pending"] .deals__head { display: none; }
+  .pane[data-pane="deals"] .deal-row, .pane[data-pane="pending"] .deal-row {
+    grid-template-columns: 1fr 1fr 1fr; column-gap: 10px; row-gap: 9px; padding: 11px 14px; align-items: end; }
+  .pane[data-pane="deals"] .deal-row { grid-template-areas: "sym sd pnl" "qty entry mark" "sl tp act"; }
+  .pane[data-pane="pending"] .deal-row { grid-template-areas: "sym sd act" "qty price ." "sl tp ."; }
+  .deal-row .c-sym { grid-area: sym; font-weight: 600; }
+  :is(.pane[data-pane="deals"], .pane[data-pane="pending"]) .deal-row .sd { grid-area: sd; }
+  .deal-row .c-qty { grid-area: qty; } .deal-row .c-entry { grid-area: entry; } .deal-row .c-mark { grid-area: mark; }
+  .deal-row .c-price { grid-area: price; } .pane[data-pane="deals"] .deal-row .pnl { grid-area: pnl; font-weight: 600; }
+  .deal-row .c-sl { grid-area: sl; } .deal-row .c-tp { grid-area: tp; } .deal-row .c-act { grid-area: act; }
+  .pane[data-pane="deals"] .deal-row > *, .pane[data-pane="pending"] .deal-row > * { text-align: left; justify-self: start; }
+  .pane[data-pane="deals"] .deal-row > .pnl, .pane[data-pane="deals"] .deal-row > .c-mark,
+  .pane[data-pane] .deal-row > .c-act { text-align: right; justify-self: end; }
+  .deal-row [data-l]::before { content: attr(data-l); display: block; color: var(--muted,#6b7688); font-size: 10.5px; font-weight: 400; margin-bottom: 2px; }
+  .pane[data-pane] .deal-row > .lvlbtn { flex-wrap: wrap; justify-self: stretch; padding: 4px 6px; margin: -5px 0 -5px -7px; border-color: var(--border,#1f2735); border-style: dashed; }
+  .deal-row .lvlbtn[data-l]::before { flex-basis: 100%; text-align: left; }
+  .deal-row .c-act { padding: 8px 14px; font-size: 12.5px; }
+}
 `;
   if (!document.getElementById('positions-css')) {
     const s = document.createElement('style'); s.id = 'positions-css'; s.textContent = CSS;
@@ -107,13 +141,40 @@
       if (key === 'balance') refreshBalance();
     }
 
+    // Строки последнего опроса — окну изменения SL/TP нужна вся строка, а не id.
+    const rowsById = { deal: new Map(), pending: new Map() };
+    /** Можно ли сейчас менять SL/TP: решает хост (флаг шлюза, заморозка). */
+    const editable = () => !!(ctx.levels && ctx.levels.enabled());
+    const PEN = '<span class="pen" aria-hidden="true"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></span>';
+    /** Ячейка уровня: кнопка, если менять можно, иначе текст — как было. */
+    const lvlCell = (/** @type {string} */ kind, /** @type {any} */ d, /** @type {'sl'|'tp'} */ k, /** @type {(raw: any) => string} */ f) => {
+      const cls = `lvl${d[k] != null ? ' ' + k : ''} c-${k}`;
+      const label = ` data-l="${k === 'sl' ? t('f.sl', 'Stop Loss') : t('f.tp', 'Take Profit')}"`;
+      if (!editable()) return `<span class="${cls}"${label}>${f(d[k])}</span>`;
+      const tip = k === 'sl' ? t('lv.edit.sl', 'Change Stop Loss') : t('lv.edit.tp', 'Change Take Profit');
+      return `<button type="button" class="${cls} lvlbtn" data-kind="${kind}" data-id="${d.id}" data-f="${k}" title="${tip}" aria-label="${tip}"${label}>${f(d[k])}${PEN}</button>`;
+    };
+    /** Подпись ячейки для карточки на телефоне (`data-l`). */
+    const lab = (/** @type {string} */ key, /** @type {string} */ en) => ` data-l="${t(key, en)}"`;
+    /** Клик по ячейке уровня — окно изменения у хоста. */
+    const onLevel = (/** @type {Event} */ e) => {
+      const b = /** @type {HTMLElement|null} */ (/** @type {Element} */ (e.target).closest('.lvlbtn'));
+      if (!b || !ctx.levels) return false;
+      const kind = /** @type {'deal'|'pending'} */ (b.dataset.kind);
+      const row = rowsById[kind].get(+b.dataset.id);
+      if (row) ctx.levels.edit(kind, row, b.dataset.f);
+      return true;
+    };
+
     // Кнопки внутри строк вешаются делегированием: строки перерисовываются каждый тик.
     rowsEl('deals').addEventListener('click', async (e) => {
+      if (onLevel(e)) return;
       const b = e.target.closest('.closebtn'); if (!b) return;
       const { ok } = await ctx.api.closeDeal(+b.dataset.id);
       if (ok) { refresh(); if (ctx.onChange) ctx.onChange(); }
     });
     rowsEl('pending').addEventListener('click', async (e) => {
+      if (onLevel(e)) return;
       const b = e.target.closest('.closebtn'); if (!b) return;
       const { ok } = await ctx.api.cancelPending(+b.dataset.id);
       if (ok) { refresh(); if (ctx.onChange) ctx.onChange(); }
@@ -133,20 +194,22 @@
       const list = await ctx.api.deals();
       if (!list) { if (denied()) { rowsEl('deals').innerHTML = empty(noSession()); setCount('deals', 0); } return; }
       if (ctx.onDeals) ctx.onDeals(list);
+      rowsById.deal = new Map(list.map((d) => [d.id, d]));
       setCount('deals', list.length);
       rowsEl('deals').innerHTML = list.map((d) => {
         const pos = d.pnl >= 0, f = pxOf(d);
         const p = pips() ? ` (${d.side === 'buy' ? d.mark - d.entry : d.entry - d.mark}p)` : '';
-        return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lotOf(d)}</span><span>${f(d.entry)}</span><span>${f(d.mark)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${fmtUsd(d.pnl)}${p}</span><span class="lvl${d.sl != null ? ' sl' : ''}">${f(d.sl)}</span><span class="lvl${d.tp != null ? ' tp' : ''}">${f(d.tp)}</span><button class="closebtn" data-id="${d.id}">${t('p.close', 'Close')}</button></div>`;
+        return `<div class="deal-row"><span class="c-sym">${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span class="c-qty"${lab('p.qty', 'Size')}>${lotOf(d)}</span><span class="c-entry"${lab('p.entry', 'Entry')}>${f(d.entry)}</span><span class="c-mark"${lab('p.mark', 'Current')}>${f(d.mark)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${fmtUsd(d.pnl)}${p}</span>${lvlCell('deal', d, 'sl', f)}${lvlCell('deal', d, 'tp', f)}<button class="closebtn c-act" data-id="${d.id}">${t('p.close', 'Close')}</button></div>`;
       }).join('') || empty(t('p.noPositions', 'No open positions'));
     }
     async function refreshPending() {
       const list = await ctx.api.pending();
       if (!list) { if (denied()) { rowsEl('pending').innerHTML = empty(noSession()); setCount('pending', 0); } return; }
+      rowsById.pending = new Map(list.map((d) => [d.id, d]));
       setCount('pending', list.length);
       rowsEl('pending').innerHTML = list.map((d) => {
         const f = pxOf(d);
-        return `<div class="deal-row"><span>${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span>${lotOf(d)}</span><span>${f(d.price)}</span><span>${f(d.sl)}</span><span>${f(d.tp)}</span><button class="closebtn" data-id="${d.id}">${t('p.cancel', 'Cancel')}</button></div>`;
+        return `<div class="deal-row"><span class="c-sym">${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span class="c-qty"${lab('p.qty', 'Size')}>${lotOf(d)}</span><span class="c-price"${lab('p.price', 'Price')}>${f(d.price)}</span>${lvlCell('pending', d, 'sl', f)}${lvlCell('pending', d, 'tp', f)}<button class="closebtn c-act" data-id="${d.id}">${t('p.cancel', 'Cancel')}</button></div>`;
       }).join('') || empty(t('p.noOrders', 'No limit orders'));
     }
     async function refreshClosed() {

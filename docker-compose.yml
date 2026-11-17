@@ -88,6 +88,11 @@ services:
       # которым сайт ещё не назначил своё (PUT /internal/sites/{tenant}/settings/stops).
       # 0 — ограничения нет.
       MIN_STOP_BPS: ${MIN_STOP_BPS:-0}
+      # Изменение SL/TP открытых позиций и ордеров (17.11). ВЫКАТ В ДВА ШАГА:
+      # сначала образ с 0 (новые записи журнала читаются, но не пишутся —
+      # откат на прежний образ свободен), потом 1. После первой записи откат —
+      # только на образ не старше того, где это появилось.
+      SLTP_EDIT_ENABLED: ${SLTP_EDIT_ENABLED:-0}
       BUS_URL: ${BUS_URL:-}
       BUS_EXCHANGE: ${BUS_EXCHANGE:-platform.events}
     extra_hosts:

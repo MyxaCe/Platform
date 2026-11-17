@@ -16,6 +16,8 @@ pub mod feed;
 /// вызывается сегодня только из тестов: он участник сверки реализаций между
 /// репозиториями, и прятать его значило бы прятать сам факт сверки.
 pub mod jurisdiction;
+/// Изменение SL/TP у открытой позиции и ордера (17.11), запись — под флагом.
+mod levels;
 /// Внутренние денежные ручки: пополнение и вывод от имени сайта (демо-деньги).
 mod money;
 mod sso;
@@ -30,7 +32,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
@@ -159,6 +161,11 @@ pub struct AppState {
     /// тогда за проверку отвечает кабинет, выпускающий токен с
     /// `account_kind = real` только проверенным.
     real_trading_enabled: bool,
+    /// Запись изменений SL/TP (`SLTP_EDIT_ENABLED=1`). Выключено — ручки
+    /// изменения отвечают `409 sltp_edit_disabled`, а фронт кнопку не
+    /// показывает (`/account.sltp_edit`). Чтение записей этого вида работает
+    /// всегда: это первый шаг выката в два шага (см. `levels`).
+    sltp_edit_enabled: bool,
     /// Публиковать ли события РЕАЛЬНЫХ счетов на шину (`BUS_REAL_ACCOUNT_EVENTS=1`).
     ///
     /// Потребитель сайта ключует проекцию парой `(tenant, userId)` и про род
@@ -308,6 +315,15 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         )
     };
     let real_trading_enabled = env_flag("REAL_TRADING_ENABLED");
+    let sltp_edit_enabled =
+        levels::enabled_from_env(std::env::var("SLTP_EDIT_ENABLED").ok().as_deref());
+    if sltp_edit_enabled {
+        println!(
+            "[gateway] изменение SL/TP открытых позиций и ордеров: ВКЛЮЧЕНО (SLTP_EDIT_ENABLED=1)"
+        );
+    } else {
+        println!("[gateway] изменение SL/TP: выключено (SLTP_EDIT_ENABLED не 1) — ручки отвечают 409 sltp_edit_disabled; записи этого вида при этом читаются");
+    }
     let bus_real_events = env_flag("BUS_REAL_ACCOUNT_EVENTS");
     if real_trading_enabled {
         println!("[gateway] торговля на реальных счетах: РАЗРЕШЕНА (проверку личности обеспечивает кабинет)");
@@ -349,6 +365,7 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         internal_money_token,
         money_lock: Arc::new(Mutex::new(())),
         real_trading_enabled,
+        sltp_edit_enabled,
         bus_real_events,
         stops: stops::from_env(),
     }
@@ -923,33 +940,59 @@ async fn with_account_gated<T>(
     gate: Gate,
     f: impl FnOnce(&mut Broker) -> Result<T, ApiErr>,
 ) -> Result<T, ApiErr> {
-    // Счёт в карантине не мутируем: его состояние уже неверно, и любая операция
-    // поверх него закрепила бы порчу. Читать при этом можно.
-    if st.quarantined.lock().await.contains(&user) {
-        return Err(err(StatusCode::LOCKED, "account_quarantined"));
-    }
-
     let lock = account_lock(st, user).await;
-    let _guard = lock.lock().await;
+    let mut attempts = 0u32;
+    let (out, before, snap, kinds, start_balance, _guard) = loop {
+        // Счёт в карантине не мутируем: его состояние уже неверно, и любая операция
+        // поверх него закрепила бы порчу. Читать при этом можно. Проверка — на
+        // каждом заходе: пока мы уступали лок, карантин мог объявить монитор.
+        if st.quarantined.lock().await.contains(&user) {
+            return Err(err(StatusCode::LOCKED, "account_quarantined"));
+        }
 
-    // Счёт заводится ДО операции и своей записью (TRM-46). После этого ни одна
-    // операция уже не может родить счёт, а значит и уронить его рождение своим
-    // отказом: `f` ниже работает по заведомо существующему счёту.
-    ensure_account_opened(st, user).await?;
+        let guard = lock.clone().lock_owned().await;
 
-    if gate == Gate::NotFrozen && trading_frozen(st, user).await {
-        return Err(err(StatusCode::FORBIDDEN, "account_frozen"));
-    }
+        // Счёт заводится ДО операции и своей записью (TRM-46). После этого ни одна
+        // операция уже не может родить счёт, а значит и уронить его рождение своим
+        // отказом: `f` ниже работает по заведомо существующему счёту.
+        ensure_account_opened(st, user).await?;
 
-    let (out, before, snap, kinds, start_balance) = {
-        let mut b = st.broker.lock().await;
-        let before = b.snapshot(user);
-        let out = f(&mut b);
-        // Очередь сливается ВСЕГДА, в том числе на отказе: события несостоявшейся
-        // операции не должны уехать в журнал прицепом к следующей.
-        let kinds = b.take_events(user);
-        let snap = b.snapshot(user);
-        (out, before, snap, kinds, b.start_balance())
+        if gate == Gate::NotFrozen && trading_frozen(st, user).await {
+            return Err(err(StatusCode::FORBIDDEN, "account_frozen"));
+        }
+
+        {
+            let mut b = st.broker.lock().await;
+            // ЧУЖИЕ события в очереди счёта — это монитор (17.11). Он мутирует
+            // брокер под своим локом, а записывает ленту, только взяв лок
+            // счёта, — который сейчас у нас. Слей мы очередь здесь, его
+            // `PositionClosed` ушёл бы в никуда (на отказе операции) или в
+            // журнал под чужим источником, а монитор, дойдя до лока, нашёл бы
+            // пустую очередь при изменившемся слепке и отправил бы счёт в
+            // карантин. Найдено гонкой «правка SL против срабатывания стопа»;
+            // та же дыра была у закрытия и снятия ордера.
+            if b.pending_events(user) == 0 {
+                let before = b.snapshot(user);
+                let out = f(&mut b);
+                // Очередь сливается ВСЕГДА, в том числе на отказе: события
+                // несостоявшейся операции не должны уехать в журнал прицепом
+                // к следующей.
+                let kinds = b.take_events(user);
+                let snap = b.snapshot(user);
+                break (out, before, snap, kinds, b.start_balance(), guard);
+            }
+        }
+        // Уступаем лок счёта монитору: он запишет своё, и мы зайдём заново.
+        drop(guard);
+        attempts += 1;
+        if attempts > 200 {
+            eprintln!(
+                "[gateway] счёт {}: события монитора не записаны за 1 с — операция отклонена",
+                user.0
+            );
+            return Err(err(StatusCode::SERVICE_UNAVAILABLE, "account_busy"));
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
     };
     let out = out?;
 
@@ -1573,6 +1616,8 @@ pub fn router(state: AppState) -> Router {
         .route("/deals/:id/close", post(close_deal))
         .route("/pending", post(place_pending).get(list_pending))
         .route("/pending/:id", delete(cancel_pending))
+        .route("/deals/:id/levels", put(levels::edit_deal_levels))
+        .route("/pending/:id/levels", put(levels::edit_pending_levels))
         .route("/account", get(account))
         .route("/account/journal", get(account_journal))
         .route("/account/demo-reset", post(demo_reset))
@@ -1771,6 +1816,9 @@ struct AccountDto {
     /// `settings/stops`). `0` — ограничения нет. Тикет подставляет уровни по
     /// нему, а шлюз отказывает в более близких (`422 *_too_close`).
     min_stop_bps: i64,
+    /// Можно ли менять SL/TP у открытых позиций и ордеров (`SLTP_EDIT_ENABLED`).
+    /// `false` — фронт кнопку изменения не показывает.
+    sltp_edit: bool,
 }
 #[derive(Serialize)]
 struct InstrumentDto {
@@ -2456,6 +2504,7 @@ async fn account(
             kind: kind.tag(),
             account_id,
             min_stop_bps,
+            sltp_edit: st.sltp_edit_enabled,
         }));
     }
 
@@ -2497,6 +2546,7 @@ async fn account(
         kind: b.snapshot(user).profile.kind.tag(),
         account_id,
         min_stop_bps,
+        sltp_edit: st.sltp_edit_enabled,
     }))
 }
 
