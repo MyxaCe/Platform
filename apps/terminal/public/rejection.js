@@ -46,6 +46,12 @@
       'Your stop loss is already on the other side of the price — the position would close immediately. Move it below the current price for a buy, above it for a sell.',
     take_profit_already_reached:
       'Your take profit is already reached — the position would close immediately. Move it above the current price for a buy, below it for a sell.',
+    // Минимальное расстояние стопов площадки (settings/stops). Тоже два кода:
+    // поля разные, и сдвигать их в разные стороны.
+    stop_loss_too_close:
+      'Your stop loss is closer to the price than the minimum distance set by the site. Move it further away: lower for a buy, higher for a sell.',
+    take_profit_too_close:
+      'Your take profit is closer to the price than the minimum distance set by the site. Move it further away: higher for a buy, lower for a sell.',
     // Р-293. Счёт заводится первой операцией, и сумму для него называет САЙТ.
     // Три кода, потому что чинят их три разных человека: владелец в админке,
     // команда развёртывания, снова развёртывание. Один текст на всех отправил
@@ -59,6 +65,15 @@
       'Your account is blocked by an operator: opening positions, new orders and withdrawals are disabled. You can still close existing positions. Please contact support.',
     identity_store_unavailable:
       'We could not confirm which site your account belongs to, so it was not opened. Nothing is wrong with your request — this is a platform-side outage.',
+    // Изменение SL/TP (17.11). Флаг выключен — это решение выката, а не
+    // ошибка человека: так и говорим.
+    sltp_edit_disabled:
+      'Changing SL/TP of an open position or order is not available yet. To change a level now, close the position or cancel the order and place it again.',
+    unknown_position:
+      'This position is no longer open — it may have just been closed by its stop loss or take profit.',
+    unknown_pending:
+      'This order is no longer active — it may have just been filled or cancelled.',
+    invalid_level: 'Enter a price above zero, or leave the field empty to remove the level.',
   };
 
   // НЕ закрыты здесь намеренно, и названы, чтобы следующий не считал их

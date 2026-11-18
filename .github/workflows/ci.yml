@@ -205,9 +205,17 @@ jobs:
       # молча. Харнесс без браузера падает громко (так и задумано), но падать
       # он должен от настоящей поломки, а не от того, что мы не позаботились.
       - name: Браузер для браузерных проверок
+        # Образ раннера уже несёт Chrome, и харнесс его находит
+        # (tests/helpers/browser.js). apt — только запасной путь: зеркала Ubuntu
+        # дважды подряд роняли шаг кодом 100 до первого теста (6d8e659, 3d0d94a).
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq chromium-browser || sudo apt-get install -y -qq chromium
+          for b in google-chrome google-chrome-stable chromium chromium-browser; do
+            if command -v "$b" >/dev/null; then echo "Найден: $(command -v "$b")"; exit 0; fi
+          done
+          for i in 1 2 3; do
+            sudo apt-get update -qq && { sudo apt-get install -y -qq chromium-browser || sudo apt-get install -y -qq chromium; } && break
+            echo "apt: попытка $i не удалась, жду"; sleep 20
+          done
           echo "Найден: $(command -v chromium-browser || command -v chromium)"
 
       - name: Проверка типов, тесты модульные и браузерные

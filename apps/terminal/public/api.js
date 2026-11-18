@@ -223,6 +223,14 @@
       placePending: (body) => authedMutate('/pending', 'POST', body),
       /** @param {number} id */
       cancelPending: (id) => authedMutate(`/pending/${id}`, 'DELETE'),
+
+      // ---- Изменение SL/TP (17.11; запись — под флагом шлюза `sltp_edit`) ---
+      // Тело `{ sl?, tp? }`: число — поставить/сдвинуть, `null` — снять, поля
+      // нет — оставить как есть.
+      /** @param {number} id @param {{ sl?: number|null, tp?: number|null }} body */
+      editDealLevels: (id, body) => authedMutate(`/deals/${id}/levels`, 'PUT', body),
+      /** @param {number} id @param {{ sl?: number|null, tp?: number|null }} body */
+      editPendingLevels: (id, body) => authedMutate(`/pending/${id}/levels`, 'PUT', body),
     };
   }
 

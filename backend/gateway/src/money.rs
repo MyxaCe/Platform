@@ -145,7 +145,7 @@ fn fail(code: StatusCode, error: &str, detail: Option<String>) -> Response {
     (code, Json(body)).into_response()
 }
 
-fn authorize(st: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
+pub(crate) fn authorize(st: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
     let Some(expected) = st.internal_money_token.as_deref() else {
         // Ручки выключены — отвечаем как несуществующий путь, без тела.
         return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
@@ -1023,6 +1023,16 @@ mod tests {
     impl Persistence for Linked {
         async fn init(&self) -> Result<(), persistence::StoreError> {
             self.inner.init().await
+        }
+        async fn load_site_min_stops(&self) -> Result<Vec<(String, i64)>, persistence::StoreError> {
+            self.inner.load_site_min_stops().await
+        }
+        async fn save_site_min_stop(
+            &self,
+            tenant: &str,
+            bps: i64,
+        ) -> Result<(), persistence::StoreError> {
+            self.inner.save_site_min_stop(tenant, bps).await
         }
         async fn load_all(&self) -> Result<persistence::LoadedState, persistence::StoreError> {
             self.inner.load_all().await
@@ -2738,5 +2748,197 @@ mod tests {
             assert!(charged.iter().all(|o| o == &journal::Origin::System));
         }
         assert!(st.quarantined.lock().await.is_empty(), "сверка сошлась");
+    }
+
+    // ---- Минимум стопов площадки (settings/stops) -------------------------
+
+    fn stops_uri() -> String {
+        format!("/internal/sites/{TENANT}/settings/stops")
+    }
+
+    async fn put_stops(
+        app: &Router,
+        token: Option<&str>,
+        b: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = Request::builder()
+            .method("PUT")
+            .uri(stops_uri())
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            req = req.header(TOKEN_HEADER, t);
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                req.body(Body::from(serde_json::to_vec(&b).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let s = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (
+            s,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_stops_setting_is_behind_the_secret_validates_and_is_idempotent() {
+        let app = router(state(None));
+        let (s, _) = put_stops(&app, Some(TOKEN), serde_json::json!({"min_stop_bps": 50})).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "секрет не задан — ручки нет");
+
+        let st = state(Some(TOKEN));
+        let app = router(st.clone());
+        let (s, _) = put_stops(&app, None, serde_json::json!({"min_stop_bps": 50})).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        let (s, _) = get(&app, &stops_uri(), None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        let (s, _) = put_stops(&app, Some("wrong"), serde_json::json!({"min_stop_bps": 50})).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+
+        // До первой записи — умолчание окружения (в тестах MIN_STOP_BPS не задан).
+        let (s, v) = get(&app, &stops_uri(), Some(TOKEN)).await;
+        assert_eq!(
+            (s, v),
+            (StatusCode::OK, serde_json::json!({"min_stop_bps": 0}))
+        );
+
+        for bad in [
+            serde_json::json!({"min_stop_bps": -1}),
+            serde_json::json!({"min_stop_bps": 10_001}),
+            serde_json::json!({"min_stop_bps": 12.5}),
+            serde_json::json!({"min_stop_bps": "50"}),
+            serde_json::json!({"min_stop_bps": null}),
+            serde_json::json!({}),
+        ] {
+            let (s, v) = put_stops(&app, Some(TOKEN), bad.clone()).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}");
+            assert!(
+                v["error"] == "invalid_min_stop_bps" || v["error"] == "bad_request",
+                "{bad}: {v}"
+            );
+        }
+
+        for _ in 0..2 {
+            let (s, v) =
+                put_stops(&app, Some(TOKEN), serde_json::json!({"min_stop_bps": 50})).await;
+            assert_eq!(
+                (s, v),
+                (StatusCode::OK, serde_json::json!({"min_stop_bps": 50}))
+            );
+        }
+        let (_, v) = get(&app, &stops_uri(), Some(TOKEN)).await;
+        assert_eq!(v, serde_json::json!({"min_stop_bps": 50}));
+        // Границы диапазона допустимы.
+        for edge in [0, 10_000] {
+            let (s, v) =
+                put_stops(&app, Some(TOKEN), serde_json::json!({"min_stop_bps": edge})).await;
+            assert_eq!(
+                (s, v),
+                (StatusCode::OK, serde_json::json!({"min_stop_bps": edge}))
+            );
+        }
+        // Чужая площадка своего значения не получила.
+        assert_eq!(st.stops.for_tenant(Some("other-site")).await, 0);
+        // Настройка — не событие счёта: ни одной записи журнала.
+        assert!(
+            st.journals.lock().await.is_empty(),
+            "журналы счетов не тронуты"
+        );
+    }
+
+    /// Значение площадки переживает рестарт: оно в хранилище, а не только в памяти.
+    #[tokio::test]
+    async fn the_stops_setting_survives_a_restart() {
+        let store = linked();
+        let app = router(state_with(store.clone(), Some(TOKEN)));
+        let (s, _) = put_stops(&app, Some(TOKEN), serde_json::json!({"min_stop_bps": 75})).await;
+        assert_eq!(s, StatusCode::OK);
+
+        let st2 = state_with(store, Some(TOKEN));
+        restore_state(&st2).await.unwrap();
+        assert_eq!(st2.stops.for_tenant(Some(TENANT)).await, 75);
+        let (_, v) = get(&router(st2), &stops_uri(), Some(TOKEN)).await;
+        assert_eq!(v, serde_json::json!({"min_stop_bps": 75}));
+    }
+
+    /// Граница на сервере: ближе минимума — `422` с причиной и числами, на
+    /// рыночном и на лимитном ордере, для покупки и для продажи.
+    #[tokio::test]
+    async fn stops_closer_than_the_minimum_are_refused_by_the_gateway() {
+        let mut st = state(Some(TOKEN));
+        // Без площадки (SSO в тестах выключен) действует умолчание.
+        st.stops = Arc::new(super::super::stops::StopSettings::new(100));
+        let app = router(st.clone());
+        // ask = bid = 4 800 000 → 1 % = 48 000.
+        price(&st, 1, 4_800_000).await;
+
+        let body = |side: &str, sl: Option<i64>, tp: Option<i64>| serde_json::json!({"instrument": 1, "side": side, "qty": 1000, "sl": sl, "tp": tp});
+        let (s, v) = send(&app, "POST", "/deals", body("buy", Some(4_760_000), None)).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+        assert_eq!(v["error"], "stop_loss_too_close");
+        assert_eq!(v["min_stop_bps"], 100);
+        assert_eq!(v["min_distance"], 48_000);
+        assert_eq!(v["limit"], 4_752_000);
+        assert!(v["detail"].as_str().unwrap().contains("47520.00"), "{v}");
+
+        let (s, v) = send(&app, "POST", "/deals", body("buy", None, Some(4_840_000))).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(v["error"], "take_profit_too_close");
+        let (s, v) = send(&app, "POST", "/deals", body("sell", Some(4_840_000), None)).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(v["limit"], 4_848_000);
+        let (s, v) = send(&app, "POST", "/deals", body("sell", None, Some(4_760_000))).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(v["error"], "take_profit_too_close");
+        assert!(
+            st.broker.lock().await.positions(DEFAULT_USER).is_empty(),
+            "ни одна не открыта"
+        );
+
+        // Ровно на минимуме — можно; без уровней — можно.
+        let (s, v) = send(
+            &app,
+            "POST",
+            "/deals",
+            body("buy", Some(4_752_000), Some(4_848_000)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let (s, _) = send(&app, "POST", "/deals", body("buy", None, None)).await;
+        assert_eq!(s, StatusCode::OK);
+
+        // Лимитный: от цены ордера (4 000 000 → 40 000), а не от рынка.
+        let limit = |sl: i64, tp: i64| serde_json::json!({"instrument": 1, "side": "buy", "qty": 1000, "price": 4_000_000, "sl": sl, "tp": tp});
+        let (s, v) = send(&app, "POST", "/pending", limit(3_970_000, 4_040_000)).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(v["error"], "stop_loss_too_close");
+        let (s, v) = send(&app, "POST", "/pending", limit(3_960_000, 4_040_000)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+
+        // Ноль — ограничения нет.
+        st.stops = Arc::new(super::super::stops::StopSettings::new(0));
+        let app = router(st.clone());
+        let (s, _) = send(
+            &app,
+            "POST",
+            "/deals",
+            body("buy", Some(4_799_000), Some(4_801_000)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+    }
+
+    /// `/account` отдаёт минимум стопов — по нему тикет подставляет уровни.
+    #[tokio::test]
+    async fn the_account_tells_the_ticket_the_minimum() {
+        let mut st = state(Some(TOKEN));
+        st.stops = Arc::new(super::super::stops::StopSettings::new(40));
+        let (s, v) = get(&router(st), "/account", None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["min_stop_bps"], 40, "{v}");
     }
 }

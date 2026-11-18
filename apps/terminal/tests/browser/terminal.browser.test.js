@@ -717,3 +717,140 @@ test('телефон: вкладки показывают одну панель,
   assert.ok(fits, 'страница не шире экрана телефона');
   assert.deepEqual(term.errors, []);
 });
+
+// ---- 11. Минимум стопов, график на весь экран (11.11) ----------------------
+
+/** Счёт с минимумом стопов площадки 50 bps (0.5 %). */
+const STOPS_ACCOUNT = {
+  '/account': () => ({
+    opened: true, balance: 1000000, equity: 1000000, used_margin: 0, free_margin: 1000000, open_pnl: 0,
+    model: 'netting', leverage: 10, kind: 'demo', min_stop_bps: 50,
+  }),
+};
+
+test('тикет подставляет SL/TP на минимальном расстоянии и зеркалит их для продажи', async (t) => {
+  const term = await openTerminal({ query: '?site=apex-ru#handoff=h-stops&account=demo', routes: STOPS_ACCOUNT });
+  t.after(term.cleanup);
+  await settle(term.page, 1800);
+  const read = () => term.page.evaluate(() => ({
+    sl: parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('sl')).value),
+    tp: parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('tp')).value),
+    hint: document.getElementById('stopsHint').textContent,
+    buyShown: document.getElementById('btnBuy').getBoundingClientRect().height > 0,
+    sellShown: document.getElementById('btnSell').getBoundingClientRect().height > 0,
+  }));
+  // ask 65 001.00 → 0.5 % = 325.01 (вверх), у рынка + запас 10 % = 357.52.
+  const buy = await read();
+  assert.equal(buy.sl, 64643.48);
+  assert.equal(buy.tp, 65358.52);
+  assert.match(buy.hint, /0\.50%.*325\.01/, `минимум назван: «${buy.hint}»`);
+  assert.deepEqual([buy.buyShown, buy.sellShown], [true, false], 'видна кнопка выбранной стороны');
+
+  await term.page.click('#sideSell');
+  await settle(term.page, 200);
+  // bid 65 000.00 → 325.00 + 32.50.
+  const sell = await read();
+  assert.equal(sell.sl, 65357.5);
+  assert.equal(sell.tp, 64642.5);
+  assert.deepEqual([sell.buyShown, sell.sellShown], [false, true]);
+});
+
+test('ближе минимума тикет не отправляет, а называет ближайший допустимый уровень', async (t) => {
+  const term = await openTerminal({ query: '?site=apex-ru#handoff=h-stops2&account=demo', routes: STOPS_ACCOUNT });
+  t.after(term.cleanup);
+  await settle(term.page, 1800);
+  const sl = /** @type {any} */ (await term.page.$('#sl'));
+  await sl.click({ clickCount: 3 });
+  await sl.type('64900');
+  await settle(term.page, 100);
+  const before = term.seen.filter((r) => r.path === '/deals' && r.method === 'POST').length;
+  await term.page.click('#btnBuy');
+  await settle(term.page, 400);
+  const ui = await term.page.evaluate(() => ({
+    msg: document.getElementById('dealMsg').textContent,
+    bad: document.getElementById('sl').classList.contains('bad'),
+    kept: /** @type {HTMLInputElement} */ (document.getElementById('sl')).value,
+  }));
+  assert.equal(term.seen.filter((r) => r.path === '/deals' && r.method === 'POST').length, before, 'запрос не ушёл');
+  assert.ok(ui.bad, 'поле подсвечено');
+  assert.match(ui.msg, /Stop Loss.*64,675\.99/, `причина и уровень: «${ui.msg}»`);
+  assert.equal(ui.kept, '64900', 'тронутое человеком поле тикет не переписывает');
+});
+
+test('отказ шлюза «стоп ближе минимума» показан словами и с уровнем шлюза', async (t) => {
+  const term = await openTerminal({
+    query: '?site=apex-ru#handoff=h-stops3&account=demo',
+    routes: Object.assign({}, STOPS_ACCOUNT, {
+      '/deals': (_u, req) => (req.method === 'POST'
+        ? { __status: 422, body: { error: 'take_profit_too_close', limit: 6540000, min_stop_bps: 50, min_distance: 32501, reference: 6500100 } }
+        : []),
+    }),
+  });
+  t.after(term.cleanup);
+  await settle(term.page, 1800);
+  await term.page.click('#btnBuy');
+  await settle(term.page, 500);
+  const msg = await term.page.evaluate(() => document.getElementById('dealMsg').textContent);
+  assert.match(msg, /Take Profit/);
+  assert.doesNotMatch(msg, /take_profit_too_close/, 'не сырым кодом');
+  assert.match(msg, /65,400\.00/, `ближайший уровень от шлюза: «${msg}»`);
+});
+
+/** Размер графика: секция, область и холст библиотеки. */
+const chartBox = (/** @type {any} */ ctx) => ctx.evaluate(() => {
+  const sec = document.querySelector('.center').getBoundingClientRect();
+  const c = /** @type {HTMLCanvasElement} */ (document.querySelector('#chart canvas'));
+  return {
+    fs: document.fullscreenElement === document.querySelector('.center'),
+    max: document.querySelector('.center').classList.contains('is-max'),
+    w: Math.round(sec.width), h: Math.round(sec.height),
+    canvasW: c ? c.clientWidth : 0,
+    toolbar: document.querySelector('.toolbar').getBoundingClientRect().height > 0,
+    vw: innerWidth, vh: innerHeight,
+  };
+});
+
+test('график на весь экран: Fullscreen API, тулбар остаётся, график перерисован, выход кнопкой', async (t) => {
+  const term = await openTerminal({ query: '?site=apex-ru' });
+  t.after(term.cleanup);
+  await settle(term.page, 1500);
+  const before = await chartBox(term.page);
+  await term.page.click('#fullBtn');
+  await settle(term.page, 600);
+  const on = await chartBox(term.page);
+  assert.equal(on.fs, true, 'во весь экран уходит вся секция графика');
+  assert.ok(on.toolbar, 'тулбар с кнопкой выхода на экране');
+  assert.ok(on.canvasW > before.canvasW + 200, `график перерисован под новый размер: ${before.canvasW} → ${on.canvasW}`);
+  await term.page.click('#fullBtn');
+  await settle(term.page, 600);
+  const off = await chartBox(term.page);
+  assert.equal(off.fs, false);
+  assert.ok(Math.abs(off.canvasW - before.canvasW) < 4, 'размер вернулся');
+  assert.deepEqual(term.errors, []);
+});
+
+test('во фрейме без allow="fullscreen" график разворачивается на окно, Esc и кнопка возвращают', async (t) => {
+  // Ровно так терминал живёт в кабинете: фрейм с другого origin, API закрыт.
+  // Прежде кнопка здесь не делала ничего — отказ глотался молча.
+  const term = await withParent(t, { foreign: true });
+  const frame = term.page.frames().find((f) => f.url().includes('site=apex-ru'));
+  assert.equal(await frame.evaluate(() => document.fullscreenEnabled), false, 'предпосылка: API во фрейме закрыт');
+  const before = await chartBox(frame);
+  await frame.click('#fullBtn');
+  await settle(term.page, 600);
+  const on = await chartBox(frame);
+  assert.equal(on.max, true, 'запасной режим включён');
+  assert.deepEqual([on.w, on.h], [on.vw, on.vh], 'секция графика — на всё окно терминала');
+  assert.ok(on.canvasW > before.canvasW + 200, `график перерисован: ${before.canvasW} → ${on.canvasW}`);
+  await frame.focus('#fullBtn');
+  await term.page.keyboard.press('Escape');
+  await settle(term.page, 500);
+  assert.equal((await chartBox(frame)).max, false, 'Esc возвращает раскладку');
+  await frame.click('#fullBtn');
+  await settle(term.page, 300);
+  await frame.click('#fullBtn');
+  await settle(term.page, 500);
+  const off = await chartBox(frame);
+  assert.equal(off.max, false, 'кнопка тоже возвращает');
+  assert.ok(Math.abs(off.canvasW - before.canvasW) < 4);
+});

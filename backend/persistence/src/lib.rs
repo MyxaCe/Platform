@@ -252,6 +252,30 @@ pub trait Persistence: Send + Sync {
         Ok(AccountKind::Demo)
     }
 
+    /// Минимальное расстояние стопов площадок: `(tenant, min_stop_bps)` по всем
+    /// площадкам, которым его назначали (настройка сайта, `settings/stops`).
+    ///
+    /// **Настройка площадки, а не событие счёта**, и живёт отдельно от журнала
+    /// намеренно: новый вид записи в журнале счёта делает откат на прежний
+    /// образ невозможным (прежний образ не разберёт запись и отправит счёт в
+    /// карантин). Отдельную строку настроек прежний образ просто не читает.
+    ///
+    /// Умолчание — пусто, и это правда, а не послабление: хранилище, которое
+    /// настроек не держит, ничего и не назначало, — действует значение
+    /// окружения. Записать в такое хранилище нельзя (см. [`Self::save_site_min_stop`]).
+    async fn load_site_min_stops(&self) -> Result<Vec<(String, i64)>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Записать минимальное расстояние стопов площадки (перезапись, идемпотентно).
+    ///
+    /// Умолчание **отказывает**: хранилище, не заявившее настройки, их не
+    /// хранит, и «записано», сказанное без записи, обнаружилось бы только после
+    /// рестарта.
+    async fn save_site_min_stop(&self, _tenant: &str, _bps: i64) -> Result<(), StoreError> {
+        Err(StoreError("хранилище не держит настройки площадок".into()))
+    }
+
     /// Переживает ли состояние перезапуск процесса.
     ///
     /// Нужен не коду, а человеку: в памяти счёт после рестарта выглядит как настоящий
@@ -291,6 +315,8 @@ pub struct MemoryStore {
     /// выполняется, а не обходится стороной (тот же урок, что с `NoopStore`).
     outbox: std::sync::Mutex<Vec<MemoryOutboxRow>>,
     next_outbox_id: std::sync::atomic::AtomicI64,
+    /// Настройки площадок (минимум стопов). Как и всё здесь — не durable.
+    site_min_stops: std::sync::Mutex<std::collections::BTreeMap<String, i64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -508,6 +534,22 @@ impl Persistence for MemoryStore {
             .lock()
             .map_err(|_| StoreError("память исходящей очереди испорчена".into()))?;
         Ok(q.iter().filter(|r| !r.published).count() as i64)
+    }
+
+    async fn load_site_min_stops(&self) -> Result<Vec<(String, i64)>, StoreError> {
+        let m = self
+            .site_min_stops
+            .lock()
+            .map_err(|_| StoreError("память настроек испорчена".into()))?;
+        Ok(m.iter().map(|(t, b)| (t.clone(), *b)).collect())
+    }
+
+    async fn save_site_min_stop(&self, tenant: &str, bps: i64) -> Result<(), StoreError> {
+        self.site_min_stops
+            .lock()
+            .map_err(|_| StoreError("память настроек испорчена".into()))?
+            .insert(tenant.to_string(), bps);
+        Ok(())
     }
 
     /// Личностей здесь нет: `resolve_identity` у этого хранилища отказывает, а

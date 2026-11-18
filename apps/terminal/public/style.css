@@ -12,7 +12,17 @@
      • кнопки — тёмные заливки --buy-bg/--sell-bg с белым текстом — ≥ 5.2:1
        (белый на светлом зелёном платформы был бы 2.4:1);
      • светлая тема: --positive платформы на белом даёт 4.0:1 — мало, поэтому
-       --up/--down там затемнены здесь, а не в tokens.v1.css (это чужой контракт). */
+       --up/--down там затемнены здесь, а не в tokens.v1.css (это чужой контракт).
+
+   Редизайн десктопа 11.11 (TRM-редизайн, см. _brain/TRM-редизайн/README.md).
+   Принципы, по которым правится всё ниже:
+     • одна поверхность панелей и волосяные линии между ними (1px) вместо
+       тёмных полос по 4px и трёх оттенков фона;
+     • цвет несёт смысл, а не украшает: зелёный/красный — только покупка,
+       продажа и знак результата; бренд — активная вкладка и фокус;
+     • вес шрифта: 400 подписи, 500 значения, 600 заголовки панелей — без 700/800
+       и без капса, кроме коротких меток состояния;
+     • сетка отступов 4/8/12/16, высота строки управления 32px, шапки панелей 36px. */
 :root {
   --bg: rgb(var(--bg-base));
   --panel: rgb(var(--bg-elevated));
@@ -30,7 +40,12 @@
   --sell-bg-hover: #d63e4b;
   --warn: #f5a524;
   --danger-bg: #5c1219;
-  --gap: 4px;
+  /* Линия между панелями: щель сетки, через которую виден фон страницы. */
+  --gap: 1px;
+  /* Поле ввода и подложка кнопок — на тон светлее панели. */
+  --field: rgb(255 255 255 / 0.035);
+  --field-hover: rgb(255 255 255 / 0.06);
+  --hair: rgb(255 255 255 / 0.06);
   /* Читаемый текст поверх акцента. Тёмный по умолчанию (акцент светлый);
      загрузчик бренда переставит на светлый, если бренд-цвет тёмный (по яркости). */
   --on-accent: #08090c;
@@ -42,6 +57,9 @@
   --panel2: rgb(244 245 247);
   --panel3: rgb(236 238 241);
   --danger-bg: #fde8ea;
+  --field: rgb(10 12 18 / 0.035);
+  --field-hover: rgb(10 12 18 / 0.06);
+  --hair: rgb(10 12 18 / 0.07);
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
@@ -49,10 +67,10 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); c
 body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
 
 /* Скроллбары */
-* { scrollbar-width: thin; scrollbar-color: rgba(127,137,153,.35) transparent; }
+* { scrollbar-width: thin; scrollbar-color: rgba(127,137,153,.3) transparent; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(127,137,153,.35); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb { background: rgba(127,137,153,.3); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
 input, select { outline: none; font-family: inherit; }
 input:focus, select:focus { border-color: var(--brand) !important; }
 button:focus-visible, a:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
@@ -64,116 +82,137 @@ button { font-family: inherit; }
 .num { font-variant-numeric: tabular-nums; }
 
 /* ============================ Шапка ============================ */
-.top { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; min-height: 48px; padding: 0 12px;
-  background: var(--panel); border-bottom: 1px solid var(--border); }
-.logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; letter-spacing: .3px; white-space: nowrap; }
-.logo__mark { display: inline-flex; width: 26px; height: 26px; border-radius: 7px; background: var(--brand);
-  color: var(--on-accent); align-items: center; justify-content: center; font-weight: 800; flex: 0 0 26px; }
+.top { flex: 0 0 auto; display: flex; align-items: center; gap: 16px; min-height: 44px; padding: 0 12px;
+  background: var(--panel); border-bottom: 1px solid var(--hair); }
+.logo { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; white-space: nowrap; }
+.logo__mark { display: inline-flex; width: 24px; height: 24px; border-radius: 6px; background: var(--brand);
+  color: var(--on-accent); align-items: center; justify-content: center; font-weight: 700; flex: 0 0 24px; font-size: 13px; }
 .logo__mark img { width: 100%; height: 100%; object-fit: contain; border-radius: 6px; }
-.feed { font-size: 10px; font-weight: 700; letter-spacing: .6px; color: var(--muted); border: 1px solid var(--border);
-  border-radius: 4px; padding: 1px 5px; }
-.metrics { display: flex; flex: 1; justify-content: flex-start; gap: 4px 22px; padding: 0 6px; min-width: 0; overflow: hidden; }
-.metric { display: flex; flex-direction: column; gap: 1px; white-space: nowrap; }
+/* Состояние фида — короткая метка, без рамки: цвет слова и есть сигнал. */
+.feed { font-size: 10px; font-weight: 600; letter-spacing: .5px; color: var(--muted); padding: 0 2px; }
+.feed.up { color: var(--up); }
+.metrics { display: flex; flex: 1; justify-content: flex-start; gap: 4px 24px; padding: 0 4px; min-width: 0; overflow: hidden; }
+.metric { display: flex; flex-direction: column; gap: 2px; white-space: nowrap; }
 .metric__l { color: var(--muted); font-size: 10.5px; }
-.metric__v { font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }
+.metric__v { font-weight: 500; font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .metric__v.lvl-warn { color: var(--warn); } .metric__v.lvl-bad { color: var(--down); }
-/* Род счёта (demo-money). Крупно и цветом: на показе бейдж читают с проектора.
-   Цвета заданы явно, а не токенами темы, — род счёта не должен перекрашиваться
-   вместе с брендом. Контраст: белый на #1d4ed8 — 6.7:1, тёмный на #f59e0b — 9:1. */
-.kind-badge { flex: 0 0 auto; white-space: nowrap; font-size: 13px; font-weight: 800; letter-spacing: .08em;
-  color: #fff; background: #1d4ed8; border: 1px solid #1e40af; border-radius: 6px; padding: 5px 12px; }
-.kind-badge--real { color: #1a1200; background: #f59e0b; border-color: #b45309;
-  box-shadow: 0 0 0 2px rgba(245, 158, 11, .35); }
-.frozen-badge { flex: 0 0 auto; white-space: nowrap; font-size: 12px; font-weight: 800; letter-spacing: .05em;
-  color: #fff; background: #b91c1c; border-radius: 6px; padding: 5px 10px; }
-.chip { flex: 0 0 auto; white-space: nowrap; font-size: 10.5px; font-weight: 700; letter-spacing: .04em;
-  color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 3px 7px; }
+/* Род счёта (demo-money). Заметно и на проекторе, но тоном, а не заливкой:
+   цвет не перекрашивается вместе с брендом. Контраст текста на подложке ≥ 7:1. */
+.kind-badge { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 600; letter-spacing: .06em;
+  color: #a9c1ff; background: rgba(29, 78, 216, .18); border: 1px solid rgba(96, 135, 245, .45); border-radius: 4px; padding: 3px 8px; }
+.kind-badge--real { color: #fcd27b; background: rgba(245, 158, 11, .14); border-color: rgba(245, 158, 11, .55); }
+[data-theme='light'] .kind-badge { color: #1d3fae; }
+[data-theme='light'] .kind-badge--real { color: #8a4a05; }
+.frozen-badge { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 600; letter-spacing: .05em;
+  color: #fff; background: #b91c1c; border-radius: 4px; padding: 3px 8px; }
+.chip { flex: 0 0 auto; white-space: nowrap; font-size: 10.5px; font-weight: 500; letter-spacing: .04em;
+  color: var(--muted); border: 1px solid var(--hair); border-radius: 4px; padding: 2px 6px; }
 .top__right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
-.lang { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-.lang button { background: transparent; border: 0; color: var(--muted); font-size: 11px; font-weight: 700; padding: 5px 8px; cursor: pointer; }
-.lang button.active { background: var(--panel3); color: var(--text); box-shadow: inset 0 -2px 0 var(--brand); }
-.iconbtn-top { cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text);
-  border-radius: 6px; width: 30px; height: 28px; }
-.btn-top { cursor: pointer; display: inline-flex; align-items: center; height: 28px; padding: 0 12px; border-radius: 6px;
-  background: var(--brand); color: var(--on-accent); font-weight: 700; font-size: 12px; text-decoration: none; border: 0; }
-.btn-top--ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
-.btn { cursor: pointer; border: 1px solid var(--border); background: var(--panel2); color: var(--text);
-  border-radius: 6px; padding: 7px 12px; }
-.status { font-size: 14px; color: var(--down); }
+.lang { display: inline-flex; border-radius: 4px; overflow: hidden; background: var(--field); }
+.lang button { background: transparent; border: 0; color: var(--muted); font-size: 11px; font-weight: 600; padding: 4px 8px; cursor: pointer; }
+.lang button.active { color: var(--text); background: var(--field-hover); }
+.iconbtn-top { cursor: pointer; border: 0; background: var(--field); color: var(--muted);
+  border-radius: 4px; width: 28px; height: 26px; }
+.iconbtn-top:hover { color: var(--text); background: var(--field-hover); }
+.btn-top { cursor: pointer; display: inline-flex; align-items: center; height: 26px; padding: 0 10px; border-radius: 4px;
+  background: transparent; color: var(--text); font-weight: 500; font-size: 12px; text-decoration: none; border: 1px solid var(--border); }
+.btn-top:hover { background: var(--field-hover); }
+.btn-top--ghost { color: var(--muted); }
+.btn { cursor: pointer; border: 1px solid var(--border); background: var(--field); color: var(--text);
+  border-radius: 4px; padding: 7px 12px; }
+.btn:hover { background: var(--field-hover); }
+.status { font-size: 10px; color: var(--down); }
 .status--on { color: var(--up); }
 
 /* ============================ Баннеры ============================ */
 .banners { flex: 0 0 auto; display: flex; flex-direction: column; }
-.banner { display: flex; align-items: center; gap: 12px; padding: 7px 14px; font-size: 12.5px; font-weight: 600; }
-.banner--danger { background: var(--danger-bg); color: var(--text); border-bottom: 1px solid var(--down); box-shadow: inset 4px 0 0 var(--down); }
-.banner--warn { background: rgba(245,165,36,.14); color: var(--text); border-bottom: 1px solid rgba(245,165,36,.5); box-shadow: inset 4px 0 0 var(--warn); }
-.banner__btn { margin-left: auto; cursor: pointer; background: var(--brand); color: var(--on-accent); border: 0; border-radius: 5px; padding: 5px 12px; font-weight: 700; }
+.banner { display: flex; align-items: center; gap: 12px; padding: 7px 14px; font-size: 12.5px; font-weight: 500; }
+.banner--danger { background: var(--danger-bg); color: var(--text); border-bottom: 1px solid var(--down); box-shadow: inset 3px 0 0 var(--down); }
+.banner--warn { background: rgba(245,165,36,.12); color: var(--text); border-bottom: 1px solid rgba(245,165,36,.4); box-shadow: inset 3px 0 0 var(--warn); }
+.banner__btn { margin-left: auto; cursor: pointer; background: var(--brand); color: var(--on-accent); border: 0; border-radius: 4px; padding: 5px 12px; font-weight: 600; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px; }
-.chips:has(> :not([hidden])) { padding: 5px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.chips:has(> :not([hidden])) { padding: 4px 12px; border-bottom: 1px solid var(--hair); background: var(--panel); }
+/* Метки состояния — предложением, а не капсом: словарь держит их заглавными
+   (их читают и проверки), здесь только показ. */
+.acct-warn, .volatile-warn { text-transform: lowercase; }
+.acct-warn::first-letter, .volatile-warn::first-letter { text-transform: uppercase; }
 /* Причина, по которой в метриках прочерки: сессии нет или счёт недоступен (BUG-011). */
-.acct-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 600; color: var(--down);
-  border: 1px solid var(--down); border-radius: 5px; padding: 3px 8px; }
+.acct-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 500; color: var(--down);
+  background: color-mix(in srgb, var(--down) 10%, transparent); border-radius: 4px; padding: 2px 8px; }
 /* Постоянная пометка о нестойком состоянии: режим работы, а не отказ (BUG-011). */
-.volatile-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 600;
-  color: var(--muted); border: 1px dashed var(--border); border-radius: 5px; padding: 3px 8px; }
+.volatile-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 400;
+  color: var(--muted); padding: 2px 0 2px 12px;
+  background: radial-gradient(circle at 3px 50%, var(--warn) 2.5px, transparent 3px) no-repeat; }
 
 /* ============================ Шапка инструмента ============================ */
-.ihead { flex: 0 0 auto; display: flex; align-items: center; gap: 22px; min-height: 52px; padding: 4px 14px;
-  background: var(--panel); border-bottom: 1px solid var(--border); margin-bottom: var(--gap); }
-.ih-pair { display: flex; align-items: center; gap: 8px; background: transparent; border: 0; color: var(--text); cursor: pointer; padding: 4px 6px 4px 0; }
-.ih-coin { width: 24px; height: 24px; position: relative; flex: 0 0 24px; }
-.ih-coin img { width: 24px; height: 24px; }
-.ih-sym { font-size: 18px; white-space: nowrap; } .ih-sym b { font-weight: 700; }
-.ih-caret { display: none; color: var(--muted); }
+.ihead { flex: 0 0 auto; display: flex; align-items: center; gap: 24px; min-height: 48px; padding: 4px 12px;
+  background: var(--panel); border-bottom: 1px solid var(--hair); }
+.ih-pair { display: flex; align-items: center; gap: 8px; background: transparent; border: 0; color: var(--text); cursor: pointer;
+  padding: 4px 8px 4px 4px; margin-left: -4px; border-radius: 4px; }
+.ih-pair:hover { background: var(--field-hover); }
+.ih-coin { width: 22px; height: 22px; position: relative; flex: 0 0 22px; }
+.ih-coin img { width: 22px; height: 22px; }
+.ih-sym { font-size: 16px; white-space: nowrap; } .ih-sym b { font-weight: 600; }
+.ih-caret { display: none; color: var(--muted); font-size: 11px; }
 .ih-price { display: flex; flex-direction: column; min-width: 120px; }
-.ih-last { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.ih-last { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .ih-sub { font-size: 11px; font-variant-numeric: tabular-nums; }
-.ih-stats { display: flex; gap: 22px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.ih-stats { display: flex; gap: 24px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .ih-stat { display: flex; flex-direction: column; gap: 2px; white-space: nowrap; }
-.ih-l { color: var(--muted); font-size: 11px; }
-.ih-v { font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.ih-source { margin-left: auto; cursor: help; }
+.ih-l { color: var(--muted); font-size: 10.5px; }
+.ih-v { font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.ih-source { margin-left: auto; cursor: help; border: 0; padding: 0; font-weight: 400; letter-spacing: 0; }
 
 /* ============================ Сетка ============================ */
-/* Раскладка терминала: слева глубина рынка, в центре график и форма ордера под
-   ним, справа пары и лента сделок, во всю ширину снизу — позиции/ордера/история/
-   баланс. Ширины колонок и высота низа — переменные, их двигают ресайзеры. */
-.grid { flex: 1; min-height: 0; display: grid; gap: 0;
-  grid-template-columns: var(--lw, 300px) var(--gap) minmax(0, 1fr) var(--gap) var(--rw, 330px);
-  grid-template-rows: minmax(0, 1fr) auto var(--gap) var(--bh, 210px);
+/* Слева — рынок (глубина и под ней лента сделок), в центре — график, справа
+   во всю высоту — заявка человека; под рынком и графиком — позиции/ордера/
+   история/баланс. Пары — выпадающим списком из шапки инструмента. Ширины
+   колонок и высота низа — переменные, их двигают ресайзеры; сами ресайзеры —
+   волосяные линии между панелями. */
+.grid { flex: 1; min-height: 0; display: grid; gap: 0; background: var(--bg);
+  grid-template-columns: var(--lw, 280px) var(--gap) minmax(0, 1fr) var(--gap) var(--rw, 312px);
+  grid-template-rows: minmax(0, 1fr) var(--gap) var(--bh, 196px);
   grid-template-areas:
-    "book rl center rr right"
-    "book rl deal   rr right"
-    "rb   rb rb     rb rb"
-    "bottom bottom bottom bottom bottom"; }
-.col-book { grid-area: book; background: var(--panel); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+    "left   rl     center rr right"
+    "rb     rb     rb     rr right"
+    "bottom bottom bottom rr right"; }
+.col-left { grid-area: left; display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--bg); }
+.col-book { background: var(--panel); display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
 .center { grid-area: center; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); }
-.deal { grid-area: deal; }
-.col-right { grid-area: right; background: var(--bg); display: flex; flex-direction: column; gap: 0; min-width: 0; min-height: 0; overflow: hidden; }
-.col-right .watch { flex: 1; min-height: 0; border-right: none; }
-#trades { flex: 0 0 auto; min-height: 0; }
+.col-right { grid-area: right; background: var(--panel); display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow-y: auto; }
+#trades { flex: 0 0 auto; min-height: 0; display: flex; flex-direction: column; background: var(--panel); }
+#trades > .trades { flex: 1; }
 .bottom { grid-area: bottom; background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
 .rsz-left { grid-area: rl; } .rsz-right { grid-area: rr; } .rsz-bottom { grid-area: rb; }
+/* Линия толщиной в пиксель, но хватать её — за полосу 7px: тонкую цель не поймать. */
+.rsz { position: relative; z-index: 4; }
 .rsz-v { cursor: col-resize; background: var(--bg); transition: background .12s; }
-.rsz-v:hover, .rsz-v.drag { background: var(--brand); }
+.rsz-v::after { content: ''; position: absolute; top: 0; bottom: 0; left: -3px; right: -3px; }
 .rsz-h { cursor: row-resize; height: var(--gap); background: var(--bg); transition: background .12s; flex: 0 0 var(--gap); }
-.rsz-h:hover, .rsz-h.drag { background: var(--brand); }
+.rsz-h::after { content: ''; position: absolute; left: 0; right: 0; top: -3px; bottom: -3px; }
+.rsz-v:hover, .rsz-v.drag, .rsz-h:hover, .rsz-h.drag { background: var(--brand); }
+
+/* ============================ Список пар ============================ */
+/* Под заявкой, до низа колонки. Заявка не сжимается: при низком окне колонка
+   прокручивается, а не режет кнопку. */
+.pairs { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 220px; border-top: 1px solid var(--hair); }
+.pairs .watch { flex: 1; min-height: 0; border-right: 0; }
 
 /* ============================ График ============================ */
 /* Тулбар переносит группы кнопок и РАСТЁТ ВНИЗ (BUG-010): жёсткая высота
    выталкивала кнопки поверх панели метрик. */
-.toolbar { display: flex; flex-wrap: wrap; align-items: center; align-content: center; gap: 6px; min-height: 38px; padding: 3px 10px; border-bottom: 1px solid var(--border); background: var(--panel); overflow: visible; }
-.tfs { display: flex; flex-wrap: nowrap; flex: 0 0 auto; }
-.tfs button { flex: 0 0 auto; background: transparent; border: none; color: var(--muted); padding: 5px 8px; cursor: pointer; border-radius: 4px; font-weight: 600; font-size: 12px; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; align-content: center; gap: 4px; min-height: 36px; padding: 2px 8px; border-bottom: 1px solid var(--hair); background: var(--panel); overflow: visible; }
+.tfs { display: flex; flex-wrap: nowrap; flex: 0 0 auto; gap: 1px; }
+.tfs button { flex: 0 0 auto; background: transparent; border: none; color: var(--muted); padding: 5px 8px; cursor: pointer; border-radius: 4px; font-weight: 500; font-size: 12px; }
 .tfs button:hover { color: var(--text); }
-.tfs button.active { color: var(--text); background: var(--panel3); box-shadow: inset 0 -2px 0 var(--brand); }
-.tb-sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
-.tbbtn { background: transparent; border: 1px solid transparent; color: var(--text); border-radius: 5px;
+.tfs button.active { color: var(--text); background: var(--field-hover); }
+.tb-sep { width: 1px; height: 16px; background: var(--hair); margin: 0 4px; }
+.tbbtn { background: transparent; border: 1px solid transparent; color: var(--muted); border-radius: 4px;
   padding: 5px 8px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-.tbbtn:hover { background: var(--panel3); border-color: var(--border); }
-.tbbtn.on { color: var(--brand); border-color: var(--border); }
+.tbbtn:hover { background: var(--field-hover); color: var(--text); }
+.tbbtn.on { color: var(--text); background: var(--field-hover); }
 .tbbtn.iconbtn { padding: 5px 7px; }
-.tbbtn.tbtext { font-weight: 700; letter-spacing: .3px; }
+.tbbtn.tbtext { font-weight: 500; letter-spacing: .2px; }
 .ic { display: inline-flex; align-items: center; }
 .ic svg { width: 16px; height: 16px; display: block; }
 .caret { display: inline-flex; color: var(--muted); }
@@ -183,105 +222,131 @@ button { font-family: inherit; }
   border-radius: 8px; padding: 6px; min-width: 180px; box-shadow: 0 10px 30px rgba(0,0,0,.45); max-height: 70vh; overflow-y: auto; }
 .dd--wide { min-width: 240px; }
 .dd-item { padding: 7px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; }
-.dd-item:hover { background: var(--panel3); }
+.dd-item:hover { background: var(--field-hover); }
 .dd-item.active { color: var(--brand); }
-.dd-cat { color: var(--muted); font-size: 10px; letter-spacing: .6px; text-transform: uppercase; padding: 8px 8px 4px; font-weight: 700; }
+.dd-cat { color: var(--muted); font-size: 10px; letter-spacing: .6px; text-transform: uppercase; padding: 8px 8px 4px; font-weight: 600; }
 .dd label { display: flex; align-items: center; gap: 7px; font-size: 12px; cursor: pointer; padding: 4px 8px; border-radius: 5px; }
-.dd label:hover { background: var(--panel3); }
+.dd label:hover { background: var(--field-hover); }
 .dd select { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 6px; width: 100%; margin: 4px 0; }
 .dd .note { color: var(--muted); font-size: 10px; padding: 6px 8px; border-top: 1px solid var(--border); margin-top: 6px; }
 .dd--right { left: auto; right: 0; }
-.tb-right { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+.tb-right { margin-left: auto; display: flex; align-items: center; gap: 2px; }
 #setMenu label { justify-content: space-between; }
-.chartwrap:fullscreen { background: var(--bg); }
 .chartwrap { flex: 1; position: relative; min-height: 0; }
 .chart { position: absolute; inset: 0; }
+/* График на весь экран: настоящий (Fullscreen API) и запасной — слой поверх
+   окна, когда API закрыт (терминал во фрейме кабинета без allow="fullscreen"). */
+.center:fullscreen { background: var(--panel); width: 100%; height: 100%; }
+.center.is-max { position: fixed; inset: 0; z-index: 70; }
 .legend { position: absolute; top: 8px; left: 50px; z-index: 3; pointer-events: none;
   font-variant-numeric: tabular-nums; text-shadow: 0 0 4px rgb(var(--bg-base)); }
-.legend__top { font-size: 13px; font-weight: 700; display: flex; align-items: baseline; gap: 8px; }
+.legend__top { font-size: 12.5px; font-weight: 600; display: flex; align-items: baseline; gap: 8px; }
 .legend__top .muted { font-size: 11px; font-weight: 400; }
 .legend__time { font-size: 11px; margin: 1px 0 2px; }
 .legend__ohlc { font-size: 11.5px; color: var(--muted); }
-.legend__ohlc b { color: var(--text); font-weight: 600; }
+.legend__ohlc b { color: var(--text); font-weight: 500; }
 .legend__ohlc b.up { color: var(--up); } .legend__ohlc b.down { color: var(--down); }
 .legend__ma { font-size: 11.5px; margin-top: 2px; display: flex; gap: 10px; }
 .watermark { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  font-size: 46px; font-weight: 800; color: rgba(127,137,153,.06); z-index: 1; pointer-events: none; }
+  font-size: 46px; font-weight: 700; color: rgba(127,137,153,.05); z-index: 1; pointer-events: none; }
 
 /* ============================ Форма ордера ============================ */
-.deal { position: relative; background: var(--panel); border-top: var(--gap) solid var(--bg); display: flex; flex-direction: column; min-height: 0; }
-.deal__tabs { display: flex; align-items: center; gap: 18px; padding: 0 14px; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
+/* Одна колонка и на десктопе, и на телефоне: сторона → цена → объём → SL/TP →
+   кнопка. Сторона выбирается переключателем; видна кнопка только выбранной. */
+.deal { position: relative; background: var(--panel); display: flex; flex-direction: column; min-height: 0; flex: 0 0 auto; }
+.deal__tabs { display: flex; align-items: center; gap: 16px; padding: 0 12px; height: 36px; border-bottom: 1px solid var(--hair); flex: 0 0 auto; }
 .deal__tabs > button { background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--muted);
-  padding: 10px 0 8px; cursor: pointer; font-weight: 700; font-size: 13px; }
+  padding: 0; height: 36px; cursor: pointer; font-weight: 600; font-size: 12.5px; }
 .deal__tabs > button.active { color: var(--text); border-bottom-color: var(--brand); }
-.deal__tabs > button:disabled { cursor: not-allowed; opacity: .55; }
-.deal__tabs small { font-size: 9.5px; font-weight: 700; text-transform: uppercase; border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; margin-left: 2px; }
-.deal__acct { margin-left: auto; display: flex; gap: 16px; font-size: 12px; font-variant-numeric: tabular-nums; }
-.deal__acct b { font-weight: 600; }
+.deal__tabs > button:disabled { cursor: not-allowed; opacity: .5; }
+.deal__tabs small { font-size: 9.5px; font-weight: 500; text-transform: uppercase; color: var(--muted); margin-left: 2px; }
 .deal__sym { display: none; }
-.deal__symname { font-size: 17px; font-weight: 700; }
-.deal__change { font-weight: 700; }
+.deal__symname { font-size: 16px; font-weight: 600; }
+.deal__change { font-weight: 600; }
 .deal__change.up { color: var(--up); } .deal__change.down { color: var(--down); }
-.deal__body { display: grid; gap: 8px 12px; padding: 10px 14px 6px;
-  grid-template-columns: minmax(130px, 1fr) minmax(190px, 1.3fr) minmax(110px, .9fr) minmax(110px, .9fr);
+.deal__body { display: grid; gap: 12px 8px; padding: 12px;
+  grid-template-columns: 1fr 1fr;
   grid-template-areas:
-    "price size sl tp"
-    "info  info info info"
-    "btns  btns btns btns"
-    "msg   msg  msg  msg"; align-items: end; }
+    "side  side"
+    "price price"
+    "size  size"
+    "info  info"
+    "sl    tp"
+    "hint  hint"
+    "btns  btns"
+    "msg   msg"
+    "acct  acct"; align-items: end; }
+.side { grid-area: side; display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 2px; background: var(--field); border-radius: 6px; }
+.side__b { height: 30px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-weight: 600; font-size: 12.5px; cursor: pointer; }
+.side__b:hover { color: var(--text); }
+.side__b--buy.active { background: var(--buy-bg); color: #fff; }
+.side__b--sell.active { background: var(--sell-bg); color: #fff; }
 #priceRow { grid-area: price; } .fld--size { grid-area: size; } .fld--sl { grid-area: sl; } .fld--tp { grid-area: tp; }
-.deal__info { grid-area: info; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 16px; min-height: 18px; }
-.deal__btns { grid-area: btns; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.dealmsg { grid-area: msg; min-height: 15px; font-size: 11.5px; }
-.fld { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.deal__info { grid-area: info; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; min-height: 18px; margin-top: -4px; }
+.stops-hint { grid-area: hint; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: -6px; min-height: 16px; }
+.linkbtn { background: transparent; border: 0; padding: 0; color: var(--brand); cursor: pointer; font-size: 11px; }
+.linkbtn:hover { text-decoration: underline; }
+.deal__btns { grid-area: btns; display: grid; grid-template-columns: 1fr; }
+.deal[data-side="buy"] #btnSell, .deal[data-side="sell"] #btnBuy { display: none; }
+.dealmsg { grid-area: msg; min-height: 0; font-size: 11.5px; line-height: 1.4; }
+.dealmsg:empty { display: none; }
+.deal__acct { grid-area: acct; display: flex; justify-content: space-between; gap: 12px; font-size: 11.5px; font-variant-numeric: tabular-nums;
+  padding-top: 10px; border-top: 1px solid var(--hair); }
+.deal__acct b { font-weight: 500; }
+.fld { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .lbl { color: var(--muted); font-size: 11px; }
 .lbl-row { display: flex; justify-content: space-between; align-items: center; }
 .inp { position: relative; display: flex; align-items: center; }
-.inp__u { position: absolute; right: 9px; color: var(--muted); font-size: 11px; pointer-events: none; }
-.inp--static { height: 34px; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); display: flex; align-items: center; padding: 0 10px; }
+.inp__u { position: absolute; right: 10px; color: var(--muted); font-size: 11px; pointer-events: none; }
+.inp--static { height: 32px; border-radius: 4px; color: var(--muted); display: flex; align-items: center; padding: 0 10px; background: var(--field); }
 /* Режим формы: в «Рынке» поле цены заменено надписью «По рынку», в «Лимите» — наоборот. */
 .deal[data-mode="market"] .inp--limit { display: none; }
 .deal[data-mode="limit"] .inp--static { display: none; }
-.deal input[type=number] { width: 100%; height: 34px; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
-  border-radius: 6px; padding: 0 10px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.deal input[type=number] { width: 100%; height: 32px; background: var(--field); border: 1px solid transparent; color: var(--text);
+  border-radius: 4px; padding: 0 10px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.deal input[type=number]:hover { background: var(--field-hover); }
+/* Уровень ближе минимума площадки: поле красное ещё до отправки. */
+.deal input[type=number].bad { border-color: var(--down) !important; color: var(--down); }
 .deal .inp input { padding-right: 46px; }
-.lotrow { display: grid; grid-template-columns: 34px 1fr 34px; gap: 6px; }
+.lotrow { display: grid; grid-template-columns: 32px 1fr 32px; gap: 4px; }
 .lotrow input { text-align: center; }
-.lotbtn { font-size: 16px; padding: 0; height: 34px; }
+.lotbtn { font-size: 15px; padding: 0; height: 32px; border: 0; color: var(--muted); }
+.lotbtn:hover { color: var(--text); }
 .shares { display: inline-flex; gap: 4px; }
-.shares button { background: var(--panel2); border: 1px solid var(--border); color: var(--muted); border-radius: 4px; font-size: 10.5px; padding: 2px 7px; cursor: pointer; }
-.shares button:hover { color: var(--text); border-color: var(--brand); }
-.unit-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
-.ubtn { background: transparent; border: none; color: var(--muted); padding: 2px 9px; cursor: pointer; font-size: 10.5px; font-weight: 700; }
-.ubtn.active { background: var(--panel3); color: var(--text); box-shadow: inset 0 -2px 0 var(--brand); }
-.orderbtn { border: none; border-radius: 6px; padding: 0 16px; height: 40px; font-weight: 700; font-size: 14px; cursor: pointer; color: #fff;
+.shares button { background: var(--field); border: 0; color: var(--muted); border-radius: 4px; font-size: 10.5px; padding: 3px 7px; cursor: pointer; }
+.shares button:hover { color: var(--text); background: var(--field-hover); }
+.unit-toggle { display: inline-flex; border-radius: 4px; overflow: hidden; background: var(--field); }
+.ubtn { background: transparent; border: none; color: var(--muted); padding: 2px 8px; cursor: pointer; font-size: 10.5px; font-weight: 600; }
+.ubtn.active { background: var(--field-hover); color: var(--text); }
+.orderbtn { border: none; border-radius: 4px; padding: 0 14px; height: 40px; font-weight: 600; font-size: 13px; cursor: pointer; color: #fff;
   display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .orderbtn.buy { background: var(--buy-bg); } .orderbtn.buy:hover { background: var(--buy-bg-hover); }
 .orderbtn.sell { background: var(--sell-bg); } .orderbtn.sell:hover { background: var(--sell-bg-hover); }
 .orderbtn span { font-variant-numeric: tabular-nums; }
+.orderbtn span:last-child { font-weight: 500; opacity: .92; }
 .orderbtn:disabled { opacity: .45; cursor: not-allowed; }
 /* Заморозка: форма закрыта плашкой, а не просто серыми кнопками — человек
    должен понять ПОЧЕМУ, не нажимая. */
-.deal__frozen { position: absolute; inset: 40px 0 0 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+.deal__frozen { position: absolute; inset: 36px 0 0 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
   background: color-mix(in srgb, var(--panel) 82%, transparent); backdrop-filter: blur(1.5px); text-align: center; padding: 10px; }
-.deal__frozen b { color: var(--down); font-size: 14px; letter-spacing: .03em; }
+.deal__frozen b { color: var(--down); font-size: 13px; font-weight: 600; letter-spacing: .03em; }
 .deal__frozen span { color: var(--text); font-size: 12px; }
 #loading { z-index: 5; }
 input.flash { animation: flashbg .4s ease; }
 @keyframes flashbg { 0% { background: var(--brand); color: var(--on-accent); } 100% { background: inherit; } }
 
 /* ============================ Бегущая строка ============================ */
-.tape { flex: 0 0 26px; height: 26px; overflow: hidden; position: relative; background: var(--panel); border-top: var(--gap) solid var(--bg); }
+.tape { flex: 0 0 24px; height: 24px; overflow: hidden; position: relative; background: var(--panel); border-top: 1px solid var(--hair); }
 .tape__track { display: inline-flex; white-space: nowrap; align-items: center; height: 100%; animation: tape 90s linear infinite; will-change: transform; }
 .tape:hover .tape__track { animation-play-state: paused; }
-.tape__it { display: inline-flex; gap: 6px; align-items: center; padding: 0 16px; font-size: 11.5px; cursor: pointer; font-variant-numeric: tabular-nums; border-right: 1px solid var(--border); }
-.tape__it b { font-weight: 600; }
+.tape__it { display: inline-flex; gap: 6px; align-items: center; padding: 0 16px; font-size: 11px; cursor: pointer; font-variant-numeric: tabular-nums; color: var(--muted); }
+.tape__it b { font-weight: 500; color: var(--text); }
 @keyframes tape { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 @media (prefers-reduced-motion: reduce) { .tape__track { animation: none; } .tape { overflow-x: auto; } }
 
 /* ================= Мелочи (переключатели, настройки, подсказка) ================= */
 .dd-toggle { padding: 6px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; color: var(--text); }
-.dd-toggle:hover { background: var(--panel3); }
+.dd-toggle:hover { background: var(--field-hover); }
 .dd-toggle.on { color: var(--brand); background: color-mix(in srgb, var(--brand) 10%, transparent); }
 .osc-list { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
 .sw { appearance: none; -webkit-appearance: none; width: 34px; height: 18px; border-radius: 10px; background: rgba(127,137,153,.4); position: relative; cursor: pointer; transition: .15s; flex: 0 0 34px; }
@@ -304,11 +369,43 @@ input.flash { animation: flashbg .4s ease; }
 .mtabs { display: none; }
 .mclose { display: none; }
 
+/* ============================ Виджеты: тот же язык ============================ */
+/* Виджеты (ADR-015) приносят свои стили и подключаются позже этого файла,
+   поэтому правки здесь — с `body` впереди (специфичность выше). Меняется
+   только вид: вес шрифта, линии, акцент. Разметку и поведение виджеты держат сами. */
+body .ob__head { font-size: 12.5px; font-weight: 600; padding: 0 12px; height: 36px; border-bottom-color: var(--hair); }
+body .ob__src, body .trades__src { font-weight: 400; font-size: 10.5px; }
+body .ob__ctl { border-bottom-color: var(--hair); padding: 4px 10px; }
+body .ob__mode.active { border-color: transparent; background: var(--field-hover); }
+body .trades__tabs { border-bottom-color: var(--hair); gap: 16px; }
+body .trades__tabs button { font-weight: 600; font-size: 12.5px; }
+body .trades__head { border-bottom-color: var(--hair); }
+body .bottom__tabs { border-bottom-color: var(--hair); gap: 18px; padding: 0 12px; }
+body .bottom__tabs > span { font-weight: 600; font-size: 12.5px; }
+body .bottom__tabs .cnt { font-weight: 500; background: var(--field-hover); }
+body .deals__head, body .deal-row { padding: 6px 12px; }
+body .deal-row { border-bottom-color: var(--hair); }
+body .deal-row:hover { background: var(--field); }
+body .deal-row .closebtn { background: transparent; border-color: var(--border); color: var(--muted); }
+body .deal-row .closebtn:hover { color: var(--text); background: var(--field-hover); }
+body .bal { background: var(--hair); }
+body .statbar { border-top-color: var(--hair); height: 28px; flex-basis: 28px; }
+body .stat { border-right-color: var(--hair); }
+body .stat__l { text-transform: none; }
+body .stat__v { font-weight: 500; }
+body .watch__search { padding: 8px; }
+body .watch__search input { background: var(--field); border-color: transparent; border-radius: 4px; }
+body .watch__head { background: transparent; border-bottom-color: var(--hair); }
+body .irow { border-bottom-color: var(--hair); }
+body .irow .sym { font-weight: 500; }
+body .irow.active { background: var(--field-hover); }
+body .drawtools { background: color-mix(in srgb, var(--panel) 92%, transparent); border-color: var(--hair); border-radius: 6px; box-shadow: none; }
+body .drawbtn.active { background: var(--field-hover); color: var(--brand); }
+
 /* ============================ Узкий десктоп ============================ */
 @media (max-width: 1360px) {
-  .metrics { gap: 4px 14px; }
+  .metrics { gap: 4px 16px; }
   .ihead { gap: 16px; } .ih-stats { gap: 16px; }
-  .deal__body { grid-template-columns: minmax(110px, 1fr) minmax(170px, 1.3fr) minmax(90px, .9fr) minmax(90px, .9fr); }
 }
 @media (max-width: 1200px) {
   .logo__name { display: none; }
@@ -321,7 +418,7 @@ input.flash { animation: flashbg .4s ease; }
 @media (max-width: 860px) {
   .top { flex-wrap: wrap; gap: 8px; padding: 6px 10px; }
   .logo__name, .feed { display: none; }
-  .kind-badge { font-size: 12px; padding: 4px 9px; }
+  .kind-badge { font-size: 11px; padding: 3px 8px; }
   .metrics { order: 10; flex: 1 0 100%; overflow-x: auto; gap: 14px; padding: 2px 0 0; scrollbar-width: none; }
   .metric__v { font-size: 12.5px; }
   .top__right { gap: 6px; }
@@ -333,18 +430,18 @@ input.flash { animation: flashbg .4s ease; }
   .ih-last { font-size: 17px; }
   .ih-stats { flex: 1 0 100%; gap: 16px; }
   .ih-source { display: none; }
-  .mtabs { display: flex; flex: 0 0 auto; background: var(--panel); border-bottom: 1px solid var(--border); }
-  .mtabs button { flex: 1; background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--muted); font-weight: 700; font-size: 13px; padding: 10px 0; }
+  .mtabs { display: flex; flex: 0 0 auto; background: var(--panel); border-bottom: 1px solid var(--hair); }
+  .mtabs button { flex: 1; background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--muted); font-weight: 600; font-size: 13px; padding: 10px 0; }
   .mtabs button.active { color: var(--text); border-bottom-color: var(--brand); }
   .grid { display: flex; flex-direction: column; }
   .rsz { display: none !important; }
-  .grid > .col-book, .grid > .center, .grid > .deal, .grid > .col-right, .grid > .bottom { display: none; }
+  .grid > .col-left, .grid > .center, .grid > .col-right, .grid > .bottom { display: none; }
   body[data-mtab="chart"] .grid > .center { display: flex; flex: 1; }
-  body[data-mtab="book"] .grid > .col-book { display: flex; flex: 1.4; }
-  body[data-mtab="book"] .grid > .col-right { display: flex; flex: 1; }
-  body[data-mtab="book"] .col-right .watch { display: none; }
+  body[data-mtab="book"] .grid > .col-left { display: flex; flex: 1; }
+  body[data-mtab="book"] .col-book { flex: 1.4; }
   body[data-mtab="book"] #trades { flex: 1; height: auto !important; }
-  body[data-mtab="order"] .grid > .deal { display: flex; flex: 1; overflow-y: auto; border-top: 0; }
+  body[data-mtab="order"] .grid > .col-right { display: flex; flex: 1; overflow-y: auto; }
+  body[data-mtab="order"] .pairs { display: none; }
   body[data-mtab="positions"] .grid > .bottom { display: flex; flex: 1; }
   .toolbar { padding: 3px 6px; gap: 4px; }
   /* Рисование пальцем по графику на телефоне не работает как надо — панель
@@ -354,17 +451,20 @@ input.flash { animation: flashbg .4s ease; }
   .statbar { overflow-x: auto; scrollbar-width: none; }
   .statbar .stat { flex: 0 0 auto; padding: 0 10px; }
   .tb-sep, #pipsBtn, #resetBtn, #fullBtn, #sltpBtn { display: none; }
-  .deal__sym { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); }
-  .deal__tabs { gap: 14px; }
-  .deal__acct { flex-direction: column; gap: 0; align-items: flex-end; font-size: 11px; }
-  .deal__body { grid-template-columns: 1fr 1fr; grid-template-areas: "price price" "size size" "sl tp" "info info" "btns btns" "msg msg"; padding: 12px 14px; }
+  .deal__sym { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--hair); }
+  .deal__tabs { gap: 14px; padding: 0 14px; height: 44px; }
+  .deal__tabs > button { height: 44px; font-size: 13.5px; }
+  .deal__body { padding: 14px; gap: 14px 10px; }
   .deal input[type=number] { height: 40px; font-size: 15px; }
-  .orderbtn { height: 58px; font-size: 15px; flex-direction: column; justify-content: center; gap: 2px; }
-  .deal__btns { grid-template-columns: 1fr 1fr; }
+  .inp--static { height: 40px; }
+  .lotrow { grid-template-columns: 40px 1fr 40px; }
+  .lotbtn { height: 40px; }
+  .side__b { height: 38px; font-size: 14px; }
+  .orderbtn { height: 52px; font-size: 15px; }
   /* Список пар — выдвижная панель на весь экран. */
   body.m-watch .grid > .col-right { display: flex; position: fixed; inset: 0; z-index: 50; background: var(--panel); padding-top: env(safe-area-inset-top); }
-  body.m-watch .col-right .watch { display: flex; }
-  body.m-watch #trades { display: none; }
+  body.m-watch .col-right > .deal { display: none; }
+  body.m-watch .pairs { display: flex; flex: 1; border-top: 0; }
   body.m-watch .mclose { display: block; align-self: flex-end; margin: 6px 10px 0; background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 6px; width: 34px; height: 30px; font-size: 14px; }
   .tape { display: none; }
 }

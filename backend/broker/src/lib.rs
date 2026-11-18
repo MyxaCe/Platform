@@ -1647,6 +1647,79 @@ impl Broker {
         }
     }
 
+    /// Поставить, сдвинуть или снять SL/TP у открытой позиции (17.11).
+    ///
+    /// `sl`/`tp` — какими уровни **станут**: `None` — уровня нет. `at` — цены,
+    /// при которых уровень не должен уже сработать: цена закрытия стороны
+    /// (bid для покупки, ask для продажи) и марк-цена, по которой идёт прогон
+    /// триггеров. Обе, потому что уровень между ними сработал бы на ближайшем
+    /// тике по одной и был бы отвергнут человеком по другой.
+    ///
+    /// Проверяется только **изменённый** уровень: оставленный как был человек
+    /// не ставит, и отказ в его сдвиге тейка из-за того, что рынок подошёл к
+    /// стопу, был бы отказом не по существу.
+    ///
+    /// `Ok(true)` — уровни сменились, в очереди `PositionLevelsChanged`;
+    /// `Ok(false)` — они уже такие, записи нет (повтор не шумит в журнал).
+    pub fn set_position_levels(
+        &mut self,
+        user: UserId,
+        id: u64,
+        sl: Option<i64>,
+        tp: Option<i64>,
+        at: &[i64],
+    ) -> Result<bool, BrokerError> {
+        let a = self
+            .accounts
+            .get_mut(&user)
+            .ok_or(BrokerError::UnknownPosition)?;
+        let p = a
+            .positions
+            .get_mut(&id)
+            .ok_or(BrokerError::UnknownPosition)?;
+        if p.sl == sl && p.tp == tp {
+            return Ok(false);
+        }
+        let new_sl = if p.sl != sl { sl } else { None };
+        let new_tp = if p.tp != tp { tp } else { None };
+        for &m in at {
+            refuse_levels_already_reached(p.side, m, new_sl, new_tp)?;
+        }
+        p.sl = sl;
+        p.tp = tp;
+        a.log(EventKind::PositionLevelsChanged { id, sl, tp });
+        Ok(true)
+    }
+
+    /// Поставить, сдвинуть или снять SL/TP у отложенного ордера (17.11).
+    ///
+    /// Уровни сверяются с **ценой ордера** — тем же правилом, что при
+    /// постановке (`place_pending`): позиция родится там. Ответы — как у
+    /// [`Self::set_position_levels`].
+    pub fn set_pending_levels(
+        &mut self,
+        user: UserId,
+        id: u64,
+        sl: Option<i64>,
+        tp: Option<i64>,
+    ) -> Result<bool, BrokerError> {
+        let a = self
+            .accounts
+            .get_mut(&user)
+            .ok_or(BrokerError::UnknownPending)?;
+        let o = a.pendings.get_mut(&id).ok_or(BrokerError::UnknownPending)?;
+        if o.sl == sl && o.tp == tp {
+            return Ok(false);
+        }
+        let new_sl = if o.sl != sl { sl } else { None };
+        let new_tp = if o.tp != tp { tp } else { None };
+        refuse_levels_already_reached(o.side, o.price, new_sl, new_tp)?;
+        o.sl = sl;
+        o.tp = tp;
+        a.log(EventKind::PendingLevelsChanged { id, sl, tp });
+        Ok(true)
+    }
+
     /// Прогнать триггеры лимитных ордеров и SL/TP по всем счетам при текущих марк-ценах.
     ///
     /// Возвращает **id счетов, состояние которых изменилось**. Обычный случай — цена
@@ -3864,5 +3937,275 @@ mod fees_tests {
         ] {
             assert!(EventKind::decode(bad).is_err(), "{bad}");
         }
+    }
+}
+
+/// Изменение SL/TP у открытой позиции и отложенного ордера (17.11).
+#[cfg(test)]
+mod levels_tests {
+    use super::journal::{self, CloseCause, EventKind, Journal, Origin};
+    use super::*;
+
+    const U: UserId = UserId(11);
+    const PX: i64 = 5_000_000;
+
+    fn setup() -> (Broker, Journal) {
+        let mut b = Broker::new(1_000_000_000, 10);
+        assert!(b.open_account(U));
+        let mut j = Journal::new(b.start_balance());
+        commit(&mut b, &mut j);
+        (b, j)
+    }
+
+    fn commit(b: &mut Broker, j: &mut Journal) -> Vec<EventKind> {
+        let kinds = b.take_events(U);
+        let sealed = j.seal(1, &Origin::Client, &kinds);
+        assert_eq!(
+            journal::reconcile(&j.preview(&sealed), &b.snapshot(U)),
+            vec![],
+            "лента сходится со слепком"
+        );
+        for e in sealed {
+            j.commit(e).unwrap();
+        }
+        kinds
+    }
+
+    fn marks(px: i64) -> HashMap<u32, i64> {
+        HashMap::from([(1u32, px)])
+    }
+
+    fn pos(b: &Broker, id: u64) -> Position {
+        b.positions(U).into_iter().find(|p| p.id == id).unwrap()
+    }
+
+    fn open(b: &mut Broker, side: PosSide, sl: Option<i64>) -> u64 {
+        b.open(U, &marks(PX), 1, side, 1000, PX, 2, 3, sl, None)
+            .unwrap()
+    }
+
+    #[test]
+    fn set_move_and_remove_levels_are_journalled_and_replayed() {
+        let (mut b, mut j) = setup();
+        let id = open(&mut b, PosSide::Long, None);
+        commit(&mut b, &mut j);
+
+        // Поставить.
+        assert_eq!(
+            b.set_position_levels(U, id, Some(4_900_000), Some(5_200_000), &[PX]),
+            Ok(true)
+        );
+        assert_eq!(
+            commit(&mut b, &mut j),
+            vec![EventKind::PositionLevelsChanged {
+                id,
+                sl: Some(4_900_000),
+                tp: Some(5_200_000)
+            }]
+        );
+        // Сдвинуть стоп, тейк оставить.
+        assert_eq!(
+            b.set_position_levels(U, id, Some(4_950_000), Some(5_200_000), &[PX]),
+            Ok(true)
+        );
+        commit(&mut b, &mut j);
+        // Снять тейк.
+        assert_eq!(
+            b.set_position_levels(U, id, Some(4_950_000), None, &[PX]),
+            Ok(true)
+        );
+        commit(&mut b, &mut j);
+        assert_eq!((pos(&b, id).sl, pos(&b, id).tp), (Some(4_950_000), None));
+
+        // Повтор — без записи.
+        assert_eq!(
+            b.set_position_levels(U, id, Some(4_950_000), None, &[PX]),
+            Ok(false)
+        );
+        assert!(commit(&mut b, &mut j).is_empty());
+
+        // Свёртка с нуля даёт то же, что живой путь.
+        let replayed = j.replay();
+        assert_eq!(replayed.positions[0].sl, Some(4_950_000));
+        assert_eq!(replayed.positions[0].tp, None);
+        assert!(journal::audit(&j, &b.snapshot(U)).ok());
+    }
+
+    #[test]
+    fn a_level_already_reached_is_refused_and_leaves_no_trace() {
+        let (mut b, mut j) = setup();
+        let long = open(&mut b, PosSide::Long, None);
+        let short = open(&mut b, PosSide::Short, None);
+        commit(&mut b, &mut j);
+        // Стоп покупки выше цены закрытия — сработал бы сразу.
+        assert_eq!(
+            b.set_position_levels(U, long, Some(PX + 1), None, &[PX]),
+            Err(BrokerError::StopLossAlreadyReached)
+        );
+        assert_eq!(
+            b.set_position_levels(U, long, None, Some(PX - 1), &[PX]),
+            Err(BrokerError::TakeProfitAlreadyReached)
+        );
+        // Продажа — зеркально.
+        assert_eq!(
+            b.set_position_levels(U, short, Some(PX - 1), None, &[PX]),
+            Err(BrokerError::StopLossAlreadyReached)
+        );
+        // Между двумя ценами (котировка выше уровня, марк ниже) — тоже отказ.
+        assert_eq!(
+            b.set_position_levels(U, long, Some(PX + 5), None, &[PX + 10, PX]),
+            Err(BrokerError::StopLossAlreadyReached)
+        );
+        assert!(commit(&mut b, &mut j).is_empty(), "отказ не пишет");
+        assert_eq!(pos(&b, long).sl, None);
+    }
+
+    #[test]
+    fn only_the_changed_level_is_checked() {
+        let (mut b, mut j) = setup();
+        let id = open(&mut b, PosSide::Long, Some(PX - 100));
+        commit(&mut b, &mut j);
+        // Рынок подошёл к стопу вплотную; стоп оставлен, двигается тейк.
+        assert_eq!(
+            b.set_position_levels(U, id, Some(PX - 100), Some(PX + 500), &[PX - 100]),
+            Ok(true)
+        );
+        commit(&mut b, &mut j);
+    }
+
+    #[test]
+    fn unknown_position_and_closed_position_are_refused() {
+        let (mut b, mut j) = setup();
+        let id = open(&mut b, PosSide::Long, Some(PX - 10));
+        commit(&mut b, &mut j);
+        // Стоп сработал раньше, чем дошла правка.
+        b.check(&marks(PX - 20), false);
+        commit(&mut b, &mut j);
+        assert_eq!(
+            b.set_position_levels(U, id, Some(PX - 1000), None, &[PX]),
+            Err(BrokerError::UnknownPosition)
+        );
+        assert_eq!(
+            b.set_position_levels(UserId(999), 1, None, None, &[PX]),
+            Err(BrokerError::UnknownPosition)
+        );
+        assert!(commit(&mut b, &mut j).is_empty());
+    }
+
+    #[test]
+    fn the_stop_engine_uses_the_new_level_on_the_next_tick() {
+        let (mut b, mut j) = setup();
+        let id = open(&mut b, PosSide::Long, Some(PX - 1000));
+        commit(&mut b, &mut j);
+        b.set_position_levels(U, id, Some(PX - 100), None, &[PX])
+            .unwrap();
+        commit(&mut b, &mut j);
+        // Старый стоп (−1000) не задет, новый (−100) — задет.
+        assert_eq!(b.check(&marks(PX - 200), false), vec![U]);
+        let kinds = commit(&mut b, &mut j);
+        assert!(
+            kinds.iter().any(|k| matches!(
+                k,
+                EventKind::PositionClosed {
+                    level: Some(l),
+                    cause: CloseCause::StopLoss,
+                    ..
+                } if *l == PX - 100
+            )),
+            "{kinds:?}"
+        );
+    }
+
+    #[test]
+    fn pending_levels_are_checked_against_the_order_price_and_ride_into_the_position() {
+        let (mut b, mut j) = setup();
+        let id = b
+            .place_pending(U, 1, PosSide::Long, 1000, PX - 1000, 2, 3, None, None)
+            .unwrap();
+        commit(&mut b, &mut j);
+        // Стоп выше цены ордера — сработал бы при исполнении.
+        assert_eq!(
+            b.set_pending_levels(U, id, Some(PX - 900), None),
+            Err(BrokerError::StopLossAlreadyReached)
+        );
+        assert_eq!(
+            b.set_pending_levels(U, id, Some(PX - 2000), Some(PX)),
+            Ok(true)
+        );
+        assert_eq!(
+            commit(&mut b, &mut j),
+            vec![EventKind::PendingLevelsChanged {
+                id,
+                sl: Some(PX - 2000),
+                tp: Some(PX)
+            }]
+        );
+        assert_eq!(
+            b.set_pending_levels(U, id, Some(PX - 2000), Some(PX)),
+            Ok(false)
+        );
+        assert_eq!(
+            b.set_pending_levels(U, 77, None, None),
+            Err(BrokerError::UnknownPending)
+        );
+        // Исполнение: позиция рождается с новыми уровнями.
+        b.check(&marks(PX - 1000), false);
+        commit(&mut b, &mut j);
+        let p = &b.positions(U)[0];
+        assert_eq!((p.sl, p.tp), (Some(PX - 2000), Some(PX)));
+        assert!(journal::audit(&j, &b.snapshot(U)).ok());
+    }
+
+    #[test]
+    fn level_records_round_trip_and_garbage_is_refused() {
+        for k in [
+            EventKind::PositionLevelsChanged {
+                id: 4,
+                sl: Some(100),
+                tp: None,
+            },
+            EventKind::PositionLevelsChanged {
+                id: 4,
+                sl: None,
+                tp: None,
+            },
+            EventKind::PendingLevelsChanged {
+                id: 9,
+                sl: None,
+                tp: Some(250),
+            },
+        ] {
+            assert_eq!(EventKind::decode(&k.encode()), Ok(k.clone()));
+        }
+        assert_eq!(
+            EventKind::PositionLevelsChanged {
+                id: 4,
+                sl: Some(100),
+                tp: None
+            }
+            .encode(),
+            "position_levels_changed id=4 sl=100 tp=-"
+        );
+        for bad in [
+            "position_levels_changed id=4 sl=0 tp=-",
+            "position_levels_changed id=4 sl=-5 tp=-",
+            "pending_levels_changed id=4 sl=x tp=-",
+            "position_levels_changed id=4 sl=1",
+        ] {
+            assert!(EventKind::decode(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// Расхождение уровней ордера между лентой и слепком видно сверке.
+    #[test]
+    fn pending_level_divergence_is_reported() {
+        let (mut b, mut j) = setup();
+        b.place_pending(U, 1, PosSide::Long, 1000, PX, 2, 3, None, None)
+            .unwrap();
+        commit(&mut b, &mut j);
+        let mut snap = b.snapshot(U);
+        snap.pendings[0].sl = Some(1);
+        let ds = journal::reconcile(&j.replay(), &snap);
+        assert!(ds.iter().any(|d| d.0.contains("SL/TP")), "{ds:?}");
     }
 }

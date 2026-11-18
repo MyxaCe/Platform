@@ -405,6 +405,35 @@ pub enum EventKind {
         trade: u64,
         waived: Cents,
     },
+    /// **У открытой позиции изменены SL/TP** (решение владельца 17.11).
+    ///
+    /// Несёт **оба уровня целиком** — каким стал каждый после операции, а не
+    /// «что тронули»: `None` значит «уровня нет» (снят или не ставился). Так
+    /// запись читается сама по себе, без знания предыдущих, и свёртка
+    /// применяет её присвоением: позиция после записи — ровно то, что в ней.
+    ///
+    /// Денег не трогает, но **меняет состояние позиции** — по этим уровням
+    /// движок стопов закрывает её, и они сверяются со слепком. Поэтому это
+    /// обычная применяемая запись, а не второй «пропускаемый» вид.
+    ///
+    /// # Выкат в два шага
+    ///
+    /// Прежний образ (до 17.11) этой записи не знает: разбор падает на
+    /// «неизвестный вид события», и счёт с ней не поднимется. Поэтому сборка,
+    /// которая её ЧИТАЕТ, выкатывается раньше той, что её ПИШЕТ: запись
+    /// включается флагом `SLTP_EDIT_ENABLED`, чтение работает всегда.
+    PositionLevelsChanged {
+        id: u64,
+        sl: Option<i64>,
+        tp: Option<i64>,
+    },
+    /// У отложенного ордера изменены SL/TP — те, что получит позиция при
+    /// исполнении. Форма и смысл — как у [`EventKind::PositionLevelsChanged`].
+    PendingLevelsChanged {
+        id: u64,
+        sl: Option<i64>,
+        tp: Option<i64>,
+    },
 }
 
 /// Почему сработавший отложенный ордер не исполнен.
@@ -452,7 +481,9 @@ impl EventKind {
             | EventKind::PendingRejected { .. }
             | EventKind::FeesSet { .. }
             | EventKind::MarkupApplied { .. }
-            | EventKind::CommissionCharged { .. } => true,
+            | EventKind::CommissionCharged { .. }
+            | EventKind::PositionLevelsChanged { .. }
+            | EventKind::PendingLevelsChanged { .. } => true,
             EventKind::HistoryExcludedFromReporting { .. } => false,
         }
     }
@@ -710,6 +741,12 @@ impl EventKind {
                     format!("commission_charged amount={amount} trade={trade} waived={waived}")
                 }
             }
+            EventKind::PositionLevelsChanged { id, sl, tp } => {
+                format!("position_levels_changed id={id} sl={} tp={}", opt(*sl), opt(*tp))
+            }
+            EventKind::PendingLevelsChanged { id, sl, tp } => {
+                format!("pending_levels_changed id={id} sl={} tp={}", opt(*sl), opt(*tp))
+            }
         }
     }
 
@@ -867,6 +904,21 @@ impl EventKind {
                     amount,
                     trade: num(&f, "trade")?,
                     waived,
+                }
+            }
+            // Уровень, если он есть, — положительная цена: ноль и минус
+            // здесь значили бы испорченную запись, а не «уровня нет» (это `-`).
+            "position_levels_changed" | "pending_levels_changed" => {
+                let id = num(&f, "id")?;
+                let sl = num_opt(&f, "sl")?;
+                let tp = num_opt(&f, "tp")?;
+                if sl.is_some_and(|v| v <= 0) || tp.is_some_and(|v| v <= 0) {
+                    return Err(BadRecord("уровень SL/TP записи не положительный"));
+                }
+                if tag == "position_levels_changed" {
+                    EventKind::PositionLevelsChanged { id, sl, tp }
+                } else {
+                    EventKind::PendingLevelsChanged { id, sl, tp }
                 }
             }
             _ => return Err(BadRecord("неизвестный вид события")),
@@ -1326,6 +1378,23 @@ impl ReplayState {
                     tp: *tp,
                 });
             }
+            // Уровни присваиваются целиком: запись несёт оба, какими они стали.
+            EventKind::PositionLevelsChanged { id, sl, tp } => {
+                let Some(p) = self.pos_mut(*id) else {
+                    self.orphans.push(*id);
+                    return;
+                };
+                p.sl = *sl;
+                p.tp = *tp;
+            }
+            EventKind::PendingLevelsChanged { id, sl, tp } => {
+                let Some(o) = self.pendings.iter_mut().find(|o| o.id == *id) else {
+                    self.orphans.push(*id);
+                    return;
+                };
+                o.sl = *sl;
+                o.tp = *tp;
+            }
             EventKind::PendingCancelled { id }
             | EventKind::PendingTriggered { id, .. }
             | EventKind::PendingRejected { id, .. } => {
@@ -1732,6 +1801,21 @@ pub fn reconcile(state: &ReplayState, snap: &AccountSnapshot) -> Vec<Divergence>
         d(format!(
             "отложенные ордера: по журналу {jo:?}, в слепке {so:?}"
         ));
+    } else {
+        // Уровни ордера сверяются с тех пор, как их можно менять (17.11):
+        // прежде они жили только в `pending_placed`, и расходиться было нечему.
+        let mut jp = state.pendings.clone();
+        let mut sp = snap.pendings.clone();
+        jp.sort_by_key(|o| o.id);
+        sp.sort_by_key(|o| o.id);
+        for (a, b) in jp.iter().zip(sp.iter()) {
+            if a.sl != b.sl || a.tp != b.tp {
+                d(format!(
+                    "ордер {}: SL/TP по журналу {:?}/{:?}, в слепке {:?}/{:?}",
+                    a.id, a.sl, a.tp, b.sl, b.tp
+                ));
+            }
+        }
     }
 
     if state.closed.len() != snap.closed.len() {
