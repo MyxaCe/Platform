@@ -1,8 +1,3 @@
-//! Реальные крипто-данные с Binance (ADR-013): REST-свечи + WS живые цены/сделки.
-//!
-//! Публичные эндпоинты Binance, без ключа. Строки-цены парсятся в целые raw-единицы по
-//! `price_decimals`/`qty_decimals` каждой пары.
-
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -16,19 +11,17 @@ use crate::AppState;
 const REST: &str = "https://api.binance.com";
 const WS: &str = "wss://stream.binance.com:9443";
 
-/// Инструмент фида (крипто-пара Binance).
 #[derive(Clone)]
 pub struct FeedInstrument {
     pub id: u32,
-    pub symbol: String,  // отображаемый, "ETH-USDT"
-    pub binance: String, // "ETHUSDT"
+    pub symbol: String,
+    pub binance: String,
     pub base: u32,
     pub quote: u32,
     pub price_decimals: u8,
     pub qty_decimals: u8,
 }
 
-/// Живая котировка (raw-единицы).
 #[derive(Clone, Copy, Default)]
 pub struct Ticker {
     pub last: i64,
@@ -36,18 +29,11 @@ pub struct Ticker {
     pub high: i64,
     pub bid: i64,
     pub ask: i64,
-    /// 24ч-минимум (raw цены). Поля шапки инструмента, а не цены исполнения:
-    /// поэтому `Option` и разбираются **отдельно** от котировки — битый объём
-    /// не должен отнимать у счёта марк-цену, а битая марк-цена и так отвергает
-    /// котировку целиком (см. `ticker_from_data`).
     pub low: Option<i64>,
-    /// 24ч-объём в базовой валюте (raw объёма, `qty_decimals`).
     pub volume: Option<i64>,
-    /// 24ч-оборот в котируемой валюте (raw цены, `price_decimals`).
     pub quote_volume: Option<i64>,
 }
 
-/// Свеча (raw-единицы).
 #[derive(Clone, Copy, Debug)]
 pub struct Kline {
     pub time: i64,
@@ -58,7 +44,6 @@ pub struct Kline {
     pub volume: i64,
 }
 
-/// Топ-30 крипто-пар: (Binance-символ, price_decimals, qty_decimals).
 const DEFS: &[(&str, u8, u8)] = &[
     ("BTCUSDT", 2, 5),
     ("ETHUSDT", 2, 4),
@@ -92,7 +77,6 @@ const DEFS: &[(&str, u8, u8)] = &[
     ("MANAUSDT", 4, 0),
 ];
 
-/// Список инструментов фида (id = индекс+1, base-актив = id, quote = 100/USDT).
 pub fn instruments() -> Vec<FeedInstrument> {
     DEFS.iter()
         .enumerate()
@@ -108,7 +92,6 @@ pub fn instruments() -> Vec<FeedInstrument> {
         .collect()
 }
 
-/// Таймфрейм (сек) → интервал Binance.
 pub fn interval(tf: u32) -> &'static str {
     match tf {
         60 => "1m",
@@ -123,12 +106,6 @@ pub fn interval(tf: u32) -> &'static str {
     }
 }
 
-/// Строка-цена/объём Binance → целые raw-единицы.
-///
-/// `None` — строку разобрать не удалось. Раньше здесь стоял `unwrap_or(0.0)`, и
-/// неразобранная цена превращалась в **цену 0**, неотличимую от котировки: отказ
-/// уезжал в тикеры, свечи и стакан под видом данных (BUG-011). Ноль — правдоподобное
-/// значение, поэтому отказ обязан выходить наружу отказом.
 fn to_raw(s: &str, dec: u8) -> Option<i64> {
     let v: f64 = s.parse().ok()?;
     if !v.is_finite() {
@@ -137,14 +114,12 @@ fn to_raw(s: &str, dec: u8) -> Option<i64> {
     Some((v * 10f64.powi(dec as i32)).round() as i64)
 }
 
-/// Стакан (bids/asks) в raw-единицах.
 #[derive(Clone, Default)]
 pub struct Depth {
     pub bids: Vec<(i64, i64)>,
     pub asks: Vec<(i64, i64)>,
 }
 
-/// Запросить стакан (order book) с Binance REST.
 pub async fn fetch_depth(binance: &str, limit: usize, pd: u8, qd: u8) -> Result<Depth, String> {
     let url = format!("{REST}/api/v3/depth?symbol={binance}&limit={limit}");
     let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
@@ -161,10 +136,6 @@ pub async fn fetch_depth(binance: &str, limit: usize, pd: u8, qd: u8) -> Result<
     Ok(depth)
 }
 
-/// Разобрать стакан из ответа Binance. Возвращает `(стакан, сколько уровней пропущено)`.
-///
-/// Уровень с неразобранными числами пропускаем, но счётчик отдаём наружу: молчаливый
-/// пропуск искажает стакан, а знать об этом надо (BUG-011).
 fn depth_from_json(v: &Value, pd: u8, qd: u8) -> (Depth, usize) {
     let mut skipped = 0usize;
     let mut parse = |side: &Value| -> Vec<(i64, i64)> {
@@ -193,7 +164,6 @@ fn depth_from_json(v: &Value, pd: u8, qd: u8) -> (Depth, usize) {
     (depth, skipped)
 }
 
-/// Изменение цены за текущую свечу таймфрейма (в процентах). Для статистики актива.
 pub async fn fetch_change(binance: &str, interval: &str) -> Result<f64, String> {
     let url = format!("{REST}/api/v3/klines?symbol={binance}&interval={interval}&limit=1");
     let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
@@ -204,10 +174,6 @@ pub async fn fetch_change(binance: &str, interval: &str) -> Result<f64, String> 
     change_from_row(rows.first().ok_or("empty")?)
 }
 
-/// Изменение цены внутри одной свечи Binance (в процентах).
-///
-/// Отказ разбора — это отказ, а не «изменение 0.00 %»: ноль процентов означает
-/// «рынок стоял», и отличить его от «мы не смогли посчитать» вызывающий обязан.
 fn change_from_row(row: &[Value]) -> Result<f64, String> {
     let num = |i: usize| -> Result<f64, String> {
         row.get(i)
@@ -223,7 +189,6 @@ fn change_from_row(row: &[Value]) -> Result<f64, String> {
     Ok((close - open) / open * 100.0)
 }
 
-/// Запросить исторические свечи с Binance REST.
 pub async fn fetch_klines(
     binance: &str,
     interval: &str,
@@ -240,10 +205,6 @@ pub async fn fetch_klines(
     klines_from_rows(&rows, pd, qd)
 }
 
-/// Разобрать свечи из ответа Binance.
-///
-/// Свеча с неразобранным полем — отказ на весь ответ. Раньше такое поле молча
-/// становилось нулём, и по графику с нулевым low принимали решение (BUG-011).
 fn klines_from_rows(rows: &[Vec<Value>], pd: u8, qd: u8) -> Result<Vec<Kline>, String> {
     let raw_at = |r: &[Value], i: usize, dec: u8| -> Result<i64, String> {
         let s = r
@@ -270,10 +231,8 @@ fn klines_from_rows(rows: &[Vec<Value>], pd: u8, qd: u8) -> Result<Vec<Kline>, S
         .collect()
 }
 
-/// Запустить WS-фид Binance: @ticker (котировки) + @aggTrade (сделки). Реконнект при обрыве.
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
-        // Индекс: Binance-символ (верхний регистр) → (id, pd, qd).
         let index: HashMap<String, (u32, u8, u8)> = state
             .feed_instruments
             .iter()
@@ -303,10 +262,6 @@ pub fn spawn(state: AppState) {
                             Ok(Message::Ping(p)) => {
                                 let _ = ws.send(Message::Pong(p)).await;
                             }
-                            // Класс ошибки здесь терялся: `Err(_) => break` уводил в
-                            // бесшумный реконнект каждые 3с, и обрыв фида выглядел как
-                            // тишина. Диагностика, съеденная рабочим циклом, — это отказ,
-                            // превращённый в задержку.
                             Ok(Message::Close(f)) => {
                                 eprintln!("[feed] соединение закрыто биржей: {f:?}");
                                 break;
@@ -328,10 +283,6 @@ pub fn spawn(state: AppState) {
     });
 }
 
-/// Разобрать конверт комбинированного потока Binance: `{"stream": ..., "data": {...}}`.
-///
-/// Обрезанное или чужое сообщение — отказ, а не пустой конверт: пустой `stream`
-/// молча не совпал бы ни с одной веткой, и потеря выглядела бы как тишина.
 fn parse_envelope(text: &str) -> Result<(String, Value), String> {
     let v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let stream = v["stream"].as_str().ok_or("нет поля stream")?.to_string();
@@ -339,11 +290,6 @@ fn parse_envelope(text: &str) -> Result<(String, Value), String> {
     Ok((stream, data))
 }
 
-/// Котировка из `@ticker`. `None` — хотя бы одно число не разобралось.
-///
-/// Пропускаем **всю** котировку, а не отдельное поле: прежний `unwrap_or("0")` клал
-/// в тикер цену 0, а тикер — источник марк-цены, по которой считаются P&L, маржа и
-/// триггеры SL/TP. Нулевой bid означал бы сделку по цене ноль (BUG-011).
 fn ticker_from_data(data: &Value, pd: u8, qd: u8) -> Option<Ticker> {
     let raw = |k: &str| data[k].as_str().and_then(|s| to_raw(s, pd));
     Some(Ticker {
@@ -358,11 +304,9 @@ fn ticker_from_data(data: &Value, pd: u8, qd: u8) -> Option<Ticker> {
     })
 }
 
-/// Сделка из `@aggTrade` → `(цена, объём, сторона агрессора)`. `None` — не разобралось.
 fn trade_from_data(data: &Value, pd: u8, qd: u8) -> Option<(i64, i64, &'static str)> {
     let price = data["p"].as_str().and_then(|s| to_raw(s, pd))?;
     let qty = data["q"].as_str().and_then(|s| to_raw(s, qd))?;
-    // m = isBuyerMaker: покупатель — мейкер, значит агрессор — продавец.
     let side = if data["m"].as_bool().unwrap_or(false) {
         "sell"
     } else {
@@ -384,8 +328,6 @@ async fn handle_msg(state: &AppState, index: &HashMap<String, (u32, u8, u8)>, te
         return;
     };
 
-    // Отметка живости ставится здесь — на **принятом и опознанном** сообщении, а не
-    // при открытии сокета: живость фида доказывают данные, а не факт подключения.
     state.mark_feed_alive();
 
     if stream.ends_with("@ticker") {
@@ -409,21 +351,10 @@ async fn handle_msg(state: &AppState, index: &HashMap<String, (u32, u8, u8)>, te
     }
 }
 
-// ============================ Тесты разбора ================================
-//
-// Проверяем поведение при **битом входе**, а не при здоровом: здоровый вход
-// доказывает связность кода, а не то, что отказ остаётся отказом (BUG-011, TRM-07).
-// Отказы Binance на живом фиде не воспроизводятся по желанию — поэтому мусор
-// подаётся чистым функциям напрямую.
-//
-// Общее требование ко всем случаям ниже: **ни один битый вход не должен превратиться
-// в число**. Допустимы только отказ (`Err`/`None`) и пропуск.
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    // ---- to_raw: источник всех остальных нулей ----------------------------
 
     #[test]
     fn to_raw_parses_valid_price() {
@@ -431,7 +362,6 @@ mod tests {
         assert_eq!(to_raw("0.00000413", 8), Some(413));
     }
 
-    /// Не число → отказ. Раньше здесь стоял `unwrap_or(0.0)` и получалась цена 0.
     #[test]
     fn to_raw_rejects_garbage_instead_of_zero() {
         for bad in ["", "abc", "1.2.3", "--5", "1,5", " "] {
@@ -443,16 +373,12 @@ mod tests {
         }
     }
 
-    /// NaN и бесконечность разбираются как f64 — и обязаны быть отвергнуты:
-    /// `NaN as i64` даёт 0, то есть снова цену 0.
     #[test]
     fn to_raw_rejects_non_finite() {
         assert_eq!(to_raw("NaN", 2), None);
         assert_eq!(to_raw("inf", 2), None);
         assert_eq!(to_raw("-inf", 2), None);
     }
-
-    // ---- Свечи: битое поле роняет ответ, а не рисует нулевой low -----------
 
     fn kline_row() -> Vec<Value> {
         json!([
@@ -482,7 +408,7 @@ mod tests {
     #[test]
     fn klines_reject_unparsable_field() {
         let mut row = kline_row();
-        row[3] = json!("не число"); // low
+        row[3] = json!("не число");
         let err = klines_from_rows(&[row], 2, 2).expect_err("битое поле обязано ронять ответ");
         assert!(
             err.contains("поле 3"),
@@ -490,7 +416,6 @@ mod tests {
         );
     }
 
-    /// Поле не того типа (число вместо строки Binance) — тоже отказ.
     #[test]
     fn klines_reject_wrong_type() {
         let mut row = kline_row();
@@ -505,22 +430,18 @@ mod tests {
         assert!(klines_from_rows(&[row], 2, 2).is_err());
     }
 
-    /// Обрезанная строка (полей меньше, чем нужно) — отказ, а не свеча с нулями.
     #[test]
     fn klines_reject_truncated_row() {
         let row: Vec<Value> = kline_row().into_iter().take(3).collect();
         assert!(klines_from_rows(&[row], 2, 2).is_err());
     }
 
-    /// Одна битая свеча роняет весь ответ: половина графика хуже отсутствующего.
     #[test]
     fn klines_one_bad_row_fails_whole_response() {
         let mut bad = kline_row();
         bad[2] = json!("x");
         assert!(klines_from_rows(&[kline_row(), bad, kline_row()], 2, 2).is_err());
     }
-
-    // ---- Стакан: битый уровень пропускается и считается --------------------
 
     #[test]
     fn depth_parses_and_counts_skipped() {
@@ -544,8 +465,6 @@ mod tests {
         assert_eq!(skipped, 0);
     }
 
-    // ---- Изменение цены: отказ вместо «0.00 %» -----------------------------
-
     #[test]
     fn change_computed_from_valid_row() {
         let row = kline_row();
@@ -553,7 +472,6 @@ mod tests {
         assert!((ch - 5.0).abs() < 1e-9, "ожидали +5%, получили {ch}");
     }
 
-    /// Ключевой случай: отказ не должен выглядеть как «рынок стоял».
     #[test]
     fn change_rejects_garbage_instead_of_zero_percent() {
         let mut row = kline_row();
@@ -577,8 +495,6 @@ mod tests {
         );
     }
 
-    // ---- Котировка: пропускается целиком, а не собирается наполовину -------
-
     fn ticker_data() -> Value {
         json!({"s": "BTCUSDT", "c": "100.00", "P": "1.5", "h": "110.00", "b": "99.99", "a": "100.01"})
     }
@@ -590,8 +506,6 @@ mod tests {
         assert!((t.change - 1.5).abs() < 1e-9);
     }
 
-    /// Поля шапки инструмента (24ч мин/объём/оборот) разбираются, и их порча
-    /// **не отнимает котировку**: марк-цена важнее подписи в шапке.
     #[test]
     fn ticker_24h_fields_parse_and_do_not_veto_quote() {
         let mut d = ticker_data();
@@ -615,8 +529,6 @@ mod tests {
         assert_eq!(t.last, 10000);
     }
 
-    /// Битое поле → котировки нет вовсе. Именно «нет», а не Ticker с нулём в этом
-    /// поле: нулевой bid — это сделка по цене ноль.
     #[test]
     fn ticker_skipped_entirely_on_any_bad_field() {
         for key in ["c", "P", "h", "b", "a"] {
@@ -643,16 +555,12 @@ mod tests {
         }
     }
 
-    /// Поле не того типа: число вместо строки — Binance так не присылает, но если
-    /// пришлёт, это не повод молча взять ноль.
     #[test]
     fn ticker_rejects_wrong_type() {
         let mut d = ticker_data();
         d["b"] = json!(99.99);
         assert!(ticker_from_data(&d, 2, 3).is_none());
     }
-
-    // ---- Сделка ------------------------------------------------------------
 
     #[test]
     fn trade_parses_valid_and_reads_side() {
@@ -669,8 +577,6 @@ mod tests {
         assert!(trade_from_data(&json!({"m": false}), 2, 3).is_none());
     }
 
-    // ---- Конверт потока ----------------------------------------------------
-
     #[test]
     fn envelope_parses_valid() {
         let (stream, data) =
@@ -680,7 +586,6 @@ mod tests {
         assert_eq!(data["s"], json!("BTCUSDT"));
     }
 
-    /// Обрезанное сообщение (WS-фрейм пришёл не целиком) — отказ с причиной.
     #[test]
     fn envelope_rejects_truncated() {
         assert!(parse_envelope(r#"{"stream":"btcusdt@ticker","data":{"s":"BTC"#).is_err());
@@ -688,8 +593,6 @@ mod tests {
         assert!(parse_envelope("не json вовсе").is_err());
     }
 
-    /// Конверт без обязательных полей — тоже отказ: пустой `stream` не совпал бы ни
-    /// с одной веткой, и сообщение потерялось бы молча.
     #[test]
     fn envelope_rejects_missing_fields() {
         assert!(parse_envelope(r#"{"data":{"s":"BTCUSDT"}}"#).is_err());

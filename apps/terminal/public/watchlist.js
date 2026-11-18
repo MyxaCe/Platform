@@ -1,33 +1,5 @@
 'use strict';
-// ============================================================================
-// watchlist.js — виджет списка инструментов (ADR-015, контракт mount(root, ctx)).
-//
-// Отвечает за: поиск, заголовок с сортировкой, строки инструментов, избранное,
-// видимость колонок. Строит весь свой DOM внутри root — страница даёт пустой
-// контейнер и не знает про внутренние элементы.
-//
-// Форматирует цены сам: точность приходит в самих данных (price_decimals),
-// поэтому внешний форматтер не нужен — на одну связь меньше.
-//
-//   const wl = Watchlist.mount(root, {
-//     fetch:      () => api.instruments(),   // источник данных (инъекция)
-//     instrument: () => selected,            // какой инструмент подсвечен
-//     onSelect:   (id) => {…},               // пользователь кликнул строку
-//     onData:     (list) => {…},             // список обновился (композитор кэширует META)
-//     interval:   1000,                      // автообновление, мс (0 — выключить)
-//     title:      '⭐ POPULAR',
-//     storagePrefix: 'watch',                // ключи localStorage: <prefix>.favs / <prefix>.cols
-//     colsKey: 'watch.cols.v2',              // (опц.) свой ключ видимости колонок
-//     columnsDefault: { last: 1, change: 1 },// (опц.) какие колонки видны по умолчанию
-//     t: (key, en) => string,                // (опц.) перевод; без него — английский
-//   });
-//   wl.refresh(); wl.columns(); wl.setColumns({ spread: 0 }); wl.destroy();
-// ============================================================================
 (function () {
-  // Стили компонента едут вместе с модулем (ADR-015): страница-хост может не иметь своей CSS.
-  // Токены темы (--panel/--border/--up/--down/--accent/...) — контракт хоста, у каждого фолбэк.
-  // Порядок правил сохранён как в исходном style.css: поздние намеренно переопределяют ранние
-  // (ширины колонок задаются трижды, последнее слово за `--watch-cols`).
   const CSS = `
 .watch { background: var(--panel,#10141d); border-right: 1px solid var(--border,#1f2735); display: flex; flex-direction: column; overflow: hidden; }
 .watch__search { padding: 8px; }
@@ -81,7 +53,6 @@
 
   const STAR = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 2l1.8 3.9 4.2.4-3.2 2.9.9 4.1L8 11.3 4.3 13.2l.9-4.1L2 6.3l4.2-.4z" stroke-linejoin="round"/></svg>';
 
-  /** Колонки: ключ → ширина трека в CSS-гриде. Порядок задаёт порядок в строке. */
   const COLS = [
     { key: 'last', label: 'PRICE', width: '1fr', i18n: 'wl.price' },
     { key: 'change', label: 'CHANGE', width: '.82fr' },
@@ -91,7 +62,6 @@
     { key: 'high', label: 'HIGH', width: '.85fr' },
   ];
 
-  /** Как достать из инструмента величину для сортировки. `-Infinity` уводит пустые вниз. */
   const SORT_METRIC = {
     last: (it) => it.last ?? -Infinity,
     change: (it) => it.change,
@@ -101,7 +71,6 @@
     high: (it) => it.high ?? -Infinity,
   };
 
-  /** Стабильный цвет бейджа по тикеру — заглушка, пока не загрузилось лого монеты. */
   function hue(s) {
     let h = 0;
     for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
@@ -117,10 +86,6 @@
     try {
       return JSON.parse(localStorage.getItem(key)) ?? fallback;
     } catch (e) {
-      // Откат к умолчанию здесь правильный — избранное и колонки не стоят
-      // сломанного виджета, — но молчать о нём нельзя: человек увидит, что
-      // настройки «сами сбросились», и не найдёт причины. Приватный режим
-      // сюда не попадает: там бросает сам доступ к localStorage, а не разбор.
       console.warn(`[watchlist] настройка ${key} испорчена, взято умолчание`, e);
       return fallback;
     }
@@ -135,13 +100,12 @@
 
     const favs = new Set(readJson(favsKey, []));
     const cols = Object.assign({ last: 0, change: 1, sell: 1, buy: 1, spread: 1, high: 1 }, cfg.columnsDefault || {}, readJson(colsKey, {}));
-    const rowEls = {};       // id → элемент строки (переиспользуем, чтобы не терять скролл)
-    const meta = {};         // id → последний известный инструмент
+    const rowEls = {};
+    const meta = {};
     let sortKey = null, sortDir = -1;
     let query = '';
     let timer = null;
 
-    // ---- DOM (строим сами) -------------------------------------------------
     root.innerHTML =
       `<div class="watch__search"><input class="wl-search" placeholder="${t('wl.search', 'Search…')}" data-i18n-ph="wl.search" /></div>` +
       (cfg.title === '' ? '' : `<div class="watch__title">${cfg.title || '⭐ POPULAR'}</div>`) +
@@ -153,23 +117,16 @@
     const headEl = root.querySelector('.watch__head');
     const rowsEl = root.querySelector('.watch__rows');
 
-    // ---- Колонки -----------------------------------------------------------
     function applyCols() {
-      // minmax(0, …) обязателен: у голого `Nfr` минимум равен min-content, поэтому длинные
-      // цены (0.00000413) распирали числовые колонки и выдавливали колонку тикера в 0px —
-      // текст вылезал поверх соседей, шапка расходилась со строками. См. bug-log BUG-009.
       const fr = (w) => `minmax(0, ${w})`;
       const tracks = ['18px', fr('1.55fr'), ...COLS.filter((c) => cols[c.key]).map((c) => fr(c.width))];
       root.style.setProperty('--watch-cols', tracks.join(' '));
       COLS.forEach((c) => root.classList.toggle('hide-' + c.key, !cols[c.key]));
     }
 
-    // ---- Порядок строк: избранное сверху, затем сортировка, затем по id ----
     function reorder() {
       Object.keys(rowEls).map(Number).sort((a, b) => {
         const fa = favs.has(a), fb = favs.has(b);
-        // Number(): признак избранного — булев, а вычитание булевых хоть и
-        // работает в JS, читается как опечатка и не проходит проверку типов.
         if (fa !== fb) return Number(fb) - Number(fa);
         if (sortKey && meta[a] && meta[b]) {
           const m = SORT_METRIC[sortKey];
@@ -188,7 +145,6 @@
       reorder();
     }
 
-    /** Фильтр поиска применяется к уже существующим строкам — без перестроения DOM. */
     function applyFilter() {
       Object.entries(rowEls).forEach(([id, el]) => {
         const sym = (meta[id]?.symbol || '').toLowerCase();
@@ -202,10 +158,6 @@
     }
 
     function renderRow(el, it) {
-      // `change` обнуляемо так же, как `bid`/`ask`/`high`: `null` означает «тикера
-      // нет, изменение неизвестно». Раньше шлюз отдавал в этом случае 0, и строка
-      // рисовала зелёное «+0.00%» — «рынок стоял» вместо «мы не знаем», — рядом с
-      // четырьмя честными прочерками. Теперь шлюз говорит null, а прочерк здесь.
       const known = it.change != null;
       const up = known && it.change >= 0;
       const [base, quote] = it.symbol.split('-');
@@ -222,7 +174,7 @@
 
     async function refresh() {
       const list = cfg.fetch ? await cfg.fetch() : null;
-      if (!list) return;               // сеть недоступна — оставляем прежние строки
+      if (!list) return;
       const current = cfg.instrument ? cfg.instrument() : null;
       let firstId = null;
       for (const it of list) {
@@ -242,16 +194,13 @@
       reorder();
       applyFilter();
       if (cfg.onData) cfg.onData(list);
-      // Первый запуск: инструмент ещё не выбран — выбираем первый из списка.
       if (current == null && firstId != null && cfg.onSelect) cfg.onSelect(firstId);
     }
 
-    /** Подсветить выбранную строку (композитор зовёт при смене инструмента). */
     function setActive(id) {
       Object.entries(rowEls).forEach(([k, el]) => el.classList.toggle('active', +k === id));
     }
 
-    // ---- События -----------------------------------------------------------
     const onRowsClick = (e) => {
       const row = e.target.closest('.irow');
       if (!row) return;
@@ -286,7 +235,6 @@
     return {
       refresh,
       setActive,
-      /** Текущая видимость колонок (копия — внутреннее состояние не отдаём наружу). */
       columns: () => ({ ...cols }),
       setColumns(next) {
         Object.assign(cols, next);

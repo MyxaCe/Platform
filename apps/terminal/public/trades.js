@@ -1,23 +1,3 @@
-/* ============================================================================
- * trades.js — сделки по текущему инструменту (ADR-015): две вкладки —
- * MARKET TRADES (живая лента с биржи) и MY TRADES (мои исполнения по этой паре).
- *
- *   const trades = Trades.mount(el, {
- *     instrument: () => currentId,
- *     decimals: (id) => ({ pd, qd }),        // сколько знаков у цены/объёма
- *     myTrades: (id) => Promise<[deal]>,     // мои сделки по инструменту
- *     fmtUsd: (cents) => '$1.00',
- *     interval: 2000, max: 60,
- *     source: 'Binance',                     // чья лента (опц.): подпись во вкладке
- *     t: (key, en) => string,                // перевод (опц.): без него — английский
- *   });
- *   trades.pushMarket({ instrument, price, qty, side });  // хост отдаёт тик из WS
- *   trades.refreshMine(); trades.show('market'); trades.destroy();
- *
- * Лента наполняется хостом (`pushMarket`), а не своим WS: сокет один на всё приложение
- * и им владеет хост. Виджет отвечает за показ, а не за транспорт — та же граница, что
- * у сигналов в positions.js.
- * ========================================================================== */
 (function () {
   const CSS = `
 .trades { display: flex; flex-direction: column; min-height: 0; background: var(--panel,#10141d); }
@@ -52,13 +32,9 @@
   function mount(root, ctx) {
     const max = ctx.max || 60;
     const fmtUsd = ctx.fmtUsd || ((/** @type {number} */ c) => `${(c / 100).toFixed(2)}`);
-    /** Перевод: хост даёт `t(ключ, английский)`; без него — английский (ADR-015). */
     const t = ctx.t || ((/** @type {string} */ _k, /** @type {string} */ en) => en);
-    /** Подпись с ключом перевода: хост обновит её при смене языка сам. */
     const tx = (/** @type {string} */ k, /** @type {string} */ en) => `<span data-i18n="${k}">${t(k, en)}</span>`;
     root.classList.add('trades');
-    // Лента рынка — ЧУЖАЯ: это сделки биржи-источника, а не наших клиентов.
-    // Источник назван во вкладке, чтобы ленту нельзя было принять за свою.
     const src = ctx.source ? `<span class="trades__src">${ctx.source}</span>` : '';
     root.innerHTML =
       `<div class="trades__tabs"><button data-t="market" class="active">${tx('tr.market', 'MARKET TRADES')}</button><button data-t="mine">${tx('tr.mine', 'MY TRADES')}</button>${src}</div>` +
@@ -76,25 +52,16 @@
       root.querySelectorAll('.trades__pane').forEach((p) => p.classList.toggle('hidden', /** @type {HTMLElement} */ (p).dataset.t !== tab));
     }
 
-    // ---- Лента рынка: тики приходят от хоста, храним последние `max` -----------
     /** @type {Array<{ price: number, qty: number, side: string, at: number }>} */
     let tape = [];
     /** @param {{ instrument: number, price: number, qty: number, side: string }} t */
     function pushMarket(t) {
       const id = ctx.instrument();
-      if (id == null || t.instrument !== id) return; // лента только по выбранной паре
+      if (id == null || t.instrument !== id) return;
       tape.unshift({ price: t.price, qty: t.qty, side: t.side, at: Date.now() });
       if (tape.length > max) tape.length = max;
       renderMarket();
     }
-    /**
-     * Разрядность объёма берётся у инструмента, как и масштаб (Р-064).
-     *
-     * Было `toFixed(3)` при делении на `10 ** qd`: масштаб свой, точность
-     * прибита гвоздём. При `qd = 5` всё между 0.0005 и 0.0015 показывалось
-     * как «0.001» — два разных объёма на торговом экране выглядели одним.
-     * Если ширина колонки жмёт, сужают отображение, а не значение.
-     */
     function renderMarket() {
       const id = ctx.instrument();
       const { pd, qd } = (ctx.decimals && ctx.decimals(id)) || { pd: 2, qd: 5 };
@@ -102,25 +69,14 @@
         `<div class="trow"><span class="tp ${t.side === 'sell' ? 'sell' : 'buy'}">${(t.price / 10 ** pd).toFixed(pd)}</span><span>${(t.qty / 10 ** qd).toFixed(qd)}</span><span class="muted">${hhmmss(t.at)}</span></div>`
       ).join('') || `<div class="trades__empty">${t('tr.waiting', 'Waiting for trades…')}</div>`;
     }
-    /** Смена инструмента: старая лента к новой паре отношения не имеет. */
     function clearTape() { tape = []; renderMarket(); }
 
-    // ---- Мои сделки по инструменту -------------------------------------------
     async function refreshMine() {
       const id = ctx.instrument(); if (id == null) return;
       if (!ctx.myTrades) return;
 
       const list = await ctx.myTrades(id);
 
-      /**
-       * `null` — прочитать не смогли. Раньше здесь стояло `|| []`, и панель
-       * писала «No trades on this instrument» — **утверждение о счёте
-       * человека**, сделанное по чтению, которого не было. Пустой список и
-       * неудавшееся чтение — разные вещи, и вторая ни при каких условиях не
-       * должна выглядеть как первая (QA-05, та же семья, что `change`).
-       *
-       * Прежние строки не стираем: они были верны на момент чтения.
-       */
       if (!Array.isArray(list)) {
         if (!rows('mine').innerHTML) {
           rows('mine').innerHTML = `<div class="trades__empty">${t('tr.unreadable', 'Не удалось прочитать сделки')}</div>`;

@@ -1,9 +1,3 @@
-//! API-тесты шлюза через `oneshot` (без реальной сети).
-//!
-//! Терминал автономный: без логина, один счёт по умолчанию. Рыночные цены в тестах
-//! пусты (фид Binance не поднимается), поэтому проверяется то, что не зависит от живых
-//! котировок: здоровье, дефолтный счёт, размещение/откат отложенных ордеров, валидация.
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
@@ -15,7 +9,6 @@ fn app() -> Router {
     gateway::router(gateway::build_state())
 }
 
-/// Отправить запрос и вернуть (статус, тело-JSON | Null).
 async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
     let b = Request::builder().method(method).uri(uri);
     let req = match body {
@@ -42,17 +35,6 @@ async fn health_ok() {
     assert_eq!(status, StatusCode::OK);
 }
 
-/// До первой операции счёта НЕТ, и ручка говорит это словами.
-///
-/// Тест назывался `account_defaults_to_100k` и утверждал, что автономный
-/// терминал стартует с демо-счётом на $100k. С переходом на ленивое
-/// заведение (TRM-46) это перестало быть правдой — но тест продолжал
-/// проходить: ручка подставляла стартовую настройку площадки вместо
-/// остатка, и подстановка изображала счёт, которого нет (TRM-58).
-///
-/// **На ней держались три проверки.** Пока они были зелёными, расхождение
-/// между «счёт заводится первой сделкой» и «счёт есть всегда» никого не
-/// беспокоило: обе стороны подтверждались.
 #[tokio::test]
 async fn account_is_absent_until_the_first_operation() {
     let (status, acc) = send(&app(), "GET", "/account", None).await;
@@ -65,7 +47,6 @@ async fn account_is_absent_until_the_first_operation() {
 
 #[tokio::test]
 async fn open_deal_without_price_is_503() {
-    // Рыночной цены ещё нет (фид не поднят) — открыть сделку нельзя.
     let body = json!({ "instrument": 1, "side": "buy", "qty": 1 });
     let (status, _) = send(&app(), "POST", "/deals", Some(body)).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -97,9 +78,6 @@ async fn pending_place_and_list() {
     assert_eq!(list.as_array().unwrap().len(), 1);
 }
 
-// ---- Персистентность (ADR-016) --------------------------------------------
-
-/// Хранилище, которое всегда падает на записи — проверяем дисциплину отката.
 struct FailingStore;
 
 #[async_trait::async_trait]
@@ -122,9 +100,6 @@ impl gateway::persistence::Persistence for FailingStore {
         Err(gateway::persistence::StoreError("disk on fire".into()))
     }
 
-    // Очередь шины у этого двойника тоже отказывает: хранилище «горит» целиком,
-    // а не выборочно. Пустые заглушки здесь соврали бы — и соврали бы ровно в ту
-    // сторону, в которую нам удобно.
     async fn claim_outbox(
         &self,
         _limit: i64,
@@ -155,8 +130,6 @@ impl gateway::persistence::Persistence for FailingStore {
     }
 }
 
-/// Если запись в хранилище не прошла — клиент получает 503, а состояние счёта
-/// откатывается: ордера, которого нет на диске, не должно быть и в памяти.
 #[tokio::test]
 async fn storage_failure_rolls_back_and_returns_503() {
     let st = gateway::build_state_with(std::sync::Arc::new(FailingStore));

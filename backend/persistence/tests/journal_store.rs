@@ -1,19 +1,3 @@
-//! Журнал в хранилище (TRM-13): он обязан работать и проверяться в **обоих** режимах.
-//!
-//! Без БД режим проверяется здесь и на каждом прогоне. С БД — живым прогоном против
-//! настоящего PostgreSQL: тест помечен `#[ignore]`, потому что живой базы в обычном
-//! прогоне нет, и он **виден в выводе как пропущенный**, а не притворяется зелёным.
-//! Запуск: `TEST_DATABASE_URL=postgres://... cargo test -p persistence --
-//! --ignored --test-threads=1`.
-//!
-//! **`--test-threads=1` обязателен, и база должна быть ЧИСТОЙ.** Живые тесты
-//! делят одну схему: параллельно они мешают друг другу и падают на записи, а
-//! не на том, что проверяют. А обжитая база прячет ошибки порядка DDL —
-//! `ALTER` до `CREATE` на ней проходит, потому что таблица уже есть. Так и
-//! уехал в master перенос колонки `positions.leverage` (TRM-53): на контуре
-//! init молчал, на пустой базе валился целиком. Поднимайте одноразовый
-//! PostgreSQL под прогон, а не подключайтесь к живущему.
-
 use broker::journal::{EventKind, Journal, Operator, Origin};
 use broker::{AccountSnapshot, PosSide};
 use domain::account::UserId;
@@ -47,8 +31,6 @@ fn trade_events(j: &Journal) -> Vec<broker::journal::AccountEvent> {
             },
         ],
     );
-    // Продолжаем ленту: ручная проводка обязана ездить в хранилище целиком — кто,
-    // почему, по какому инциденту.
     let mut j2 = j.clone();
     for e in all.clone() {
         j2.commit(e).unwrap();
@@ -56,8 +38,6 @@ fn trade_events(j: &Journal) -> Vec<broker::journal::AccountEvent> {
     all.extend(j2.seal(
         1_700_000_050_000,
         &op,
-        // Заморозка торговли (demo-money) едет в той же ленте и обязана
-        // подниматься из хранилища: другого места у неё нет.
         &[
             EventKind::Deposited { amount: 250_000 },
             EventKind::TradingFreezeSet { frozen: true },
@@ -73,8 +53,6 @@ fn snapshot() -> AccountSnapshot {
         ..Default::default()
     }
 }
-
-// ============================ Режим без БД ==================================
 
 #[tokio::test]
 async fn memory_store_round_trips_the_journal() {
@@ -95,7 +73,6 @@ async fn memory_store_round_trips_the_journal() {
     assert_eq!(user, U);
     assert_eq!(lane, events, "поднялось ровно то, что положили");
 
-    // И цепочка сходится после подъёма — иначе хранилище что-то потеряло по дороге.
     let rebuilt = Journal::load(10_000_000, lane).expect("цепочка обязана сойтись");
     assert_eq!(rebuilt.replay().balance, 10_250_000);
     assert!(
@@ -115,8 +92,6 @@ async fn memory_store_round_trips_the_journal() {
     );
 }
 
-/// Поверх записанного не пишут. Номер, который уже занят, — отказ, а не замена:
-/// журнал, в котором можно переписать запись, журналом не является.
 #[tokio::test]
 async fn memory_store_refuses_to_overwrite_or_skip() {
     let store = MemoryStore::new();
@@ -130,7 +105,6 @@ async fn memory_store_refuses_to_overwrite_or_skip() {
     let again = store.save_account(U, &snapshot(), &events, &[]).await;
     assert!(again.is_err(), "повтор номера обязан быть отказом");
 
-    // И пропуск номера тоже: дыра в ленте — потерянная история.
     let gap = Journal::load(10_000_000, events.clone()).unwrap();
     let mut next = gap.seal(
         1_700_000_060_000,
@@ -140,7 +114,7 @@ async fn memory_store_refuses_to_overwrite_or_skip() {
             EventKind::Withdrawn { amount: 2 },
         ],
     );
-    next.remove(0); // первую «потеряли» — вторая обязана не пройти
+    next.remove(0);
     assert!(
         store
             .save_account(U, &snapshot(), &next, &[])
@@ -150,11 +124,6 @@ async fn memory_store_refuses_to_overwrite_or_skip() {
     );
 }
 
-// ============================ Режим с живой БД ==============================
-
-/// Живой прогон против PostgreSQL. Проверяется то, что без базы проверить нечем:
-/// запись/подъём настоящим SQL и **неизменяемость на уровне БД** — журнал не может
-/// изменить даже тот, кто в него пишет.
 #[tokio::test]
 #[ignore = "нужна живая БД: TEST_DATABASE_URL=postgres://... cargo test -p persistence -- --ignored"]
 async fn postgres_journal_is_append_only_at_the_database_level() {
@@ -165,7 +134,6 @@ async fn postgres_journal_is_append_only_at_the_database_level() {
         .expect("подключение");
     store.init().await.expect("DDL");
 
-    // Чистим свой след: тест обязан быть повторяемым.
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(&url)
@@ -207,8 +175,6 @@ async fn postgres_journal_is_append_only_at_the_database_level() {
     assert_eq!(lane, events, "из БД поднялось ровно то, что записали");
     Journal::load(10_000_000, lane).expect("цепочка обязана сойтись после круга через БД");
 
-    // Неизменяемость — не на честном слове приложения: правка и удаление запрещены
-    // самой базой.
     let upd = sqlx::query("UPDATE account_events SET kind = 'deposited amount=999999999' WHERE user_id = $1 AND seq = 1")
         .bind(U.0 as i64)
         .execute(&pool)
@@ -220,7 +186,6 @@ async fn postgres_journal_is_append_only_at_the_database_level() {
         .await;
     assert!(del.is_err(), "БД обязана запретить удаление записи журнала");
 
-    // Повтор номера тоже отказ — на уникальном ключе, а не на вежливости кода.
     assert!(
         store
             .save_account(U, &snapshot(), &events, &[])
@@ -229,7 +194,6 @@ async fn postgres_journal_is_append_only_at_the_database_level() {
         "повтор номера обязан падать"
     );
 
-    // И после всех попыток лента цела.
     let after = store
         .load_all()
         .await
@@ -245,19 +209,6 @@ async fn postgres_journal_is_append_only_at_the_database_level() {
     );
 }
 
-/// **Запись СТАРОГО вида, лежащая в базе, поднимается новым кодом** (TRM-44).
-///
-/// Это закрывающий критерий миграции в исполнимом виде: «сверка существующих
-/// счетов после выкатки проходит». Проверить его можно только так — положив в
-/// базу строку в том виде, в каком её писал прежний код, и подняв сегодняшним.
-///
-/// Обычные проверки этого не ловят **по построению**: они пишут через
-/// `save_account`, то есть всегда текущим видом, и расхождения между «что
-/// записано» и «что пересобирается» там не возникает. Локально база пустая, и
-/// первый счёт заводится уже новым кодом — поэтому дефект невидим до миграции.
-///
-/// Отпечаток — литерал, посчитанный сторонней реализацией FNV-1a, а не нашим
-/// `digest`: иначе проверка сравнивала бы подпись с собой.
 #[tokio::test]
 #[ignore = "нужна живая БД: TEST_DATABASE_URL"]
 async fn a_row_written_in_the_old_shape_still_loads() {
@@ -278,8 +229,6 @@ async fn a_row_written_in_the_old_shape_still_loads() {
         .await
         .expect("пул");
 
-    // Чистим прошлый прогон. Лента неизменяема триггером — снимаем его на время,
-    // как это делает соседний тест: убираем СВОЙ мусор, а не чужую историю.
     sqlx::query("ALTER TABLE account_events DISABLE TRIGGER account_events_no_update")
         .execute(&pool)
         .await
@@ -299,7 +248,6 @@ async fn a_row_written_in_the_old_shape_still_loads() {
         .await
         .unwrap();
 
-    // Пишем строку МИМО save_account — ровно так, как её положил бы прежний код.
     sqlx::query("INSERT INTO accounts (user_id, balance, next_id, model) VALUES ($1, 0, 0, 0)")
         .bind(legacy.0 as i64)
         .execute(&pool)
@@ -319,11 +267,6 @@ async fn a_row_written_in_the_old_shape_still_loads() {
 
     let loaded = store.load_all().await.expect("подъём");
 
-    // ЗАКРЫВАЮЩИЙ КРИТЕРИЙ МИГРАЦИИ (TRM-44): строка счёта, заведённая БЕЗ
-    // столбцов профиля, поднимается и получает профиль счетов, существовавших
-    // до правки, — демо, розничный, доллар, регистрация. Столбцы добавлены
-    // `ALTER … IF NOT EXISTS` с умолчаниями, и умолчания описывают историю, а
-    // не удобство: другого рода счетов в терминале не было.
     let snap = loaded
         .accounts
         .iter()
@@ -357,16 +300,6 @@ async fn a_row_written_in_the_old_shape_still_loads() {
     );
 }
 
-/// **Непонятное значение в профиле счёта — отказ чтения, а не умолчание**
-/// (TRM-44).
-///
-/// Род счёта решает, настоящие ли это деньги. Прочитать непонятное как «демо»
-/// значило бы угадывать, чьими деньгами торгуют: счёт с испорченным или более
-/// новым значением поднялся бы как бумажный и пустил бы к торговле без
-/// проверки личности.
-///
-/// Проверяется только живой базой: подсунуть такое значение можно лишь в саму
-/// таблицу — код его не напишет.
 #[tokio::test]
 #[ignore = "нужна живая БД: TEST_DATABASE_URL"]
 async fn an_unreadable_account_kind_is_refused() {
@@ -413,17 +346,6 @@ async fn an_unreadable_account_kind_is_refused() {
         .unwrap();
 }
 
-/// **Сменить валюту счёта нельзя — отказывает ХРАНИЛИЩЕ** (TRM-55, требование
-/// владельца).
-///
-/// Отсутствие профиля в `DO UPDATE` защищает только от нашего кода; прямой
-/// `UPDATE` по таблице его обходит. Запрет стоит там, где данные, — как у
-/// журнала, закрытого от правок тем же способом.
-///
-/// Почему это не «не рекомендуется»: смена валюты у живого счёта означает, что
-/// прошлые суммы посчитаны в одной наименьшей единице, а читаются в другой.
-/// Деньги меняются в `10^n` раз, и ни одна проверка этого не заметит — число
-/// осталось прежним.
 #[tokio::test]
 #[ignore = "нужна живая БД: TEST_DATABASE_URL"]
 async fn the_storage_refuses_to_change_the_currency() {
@@ -445,9 +367,6 @@ async fn the_storage_refuses_to_change_the_currency() {
         .execute(&pool)
         .await
         .unwrap();
-    // Владельца задаём СРАЗУ: пустой столбец — это недостроенная строка, и его
-    // заполнение разрешено намеренно (иначе сама миграция стала бы нарушением).
-    // Чтобы проверять запрет на СМЕНУ, начинать надо с заполненного.
     sqlx::query(
         "INSERT INTO accounts (user_id, balance, next_id, model, owner_user_id) VALUES ($1, 0, 0, 0, $1)",
     )
@@ -481,9 +400,6 @@ async fn the_storage_refuses_to_change_the_currency() {
         );
     }
 
-    // А достройка пустого владельца — РАЗРЕШЕНА, и это не поблажка: столбца
-    // раньше не существовало, и `UPDATE … WHERE owner_user_id IS NULL` в самой
-    // схеме — это она и есть. Запрети её — и миграция станет нарушением.
     let fresh = UserId(4445);
     sqlx::query("DELETE FROM accounts WHERE user_id = $1")
         .bind(fresh.0 as i64)
@@ -508,7 +424,6 @@ async fn the_storage_refuses_to_change_the_currency() {
         .await
         .unwrap();
 
-    // А деньги меняться обязаны: запрет на профиль не должен запереть счёт.
     sqlx::query("UPDATE accounts SET balance = 123 WHERE user_id = $1")
         .bind(acc.0 as i64)
         .execute(&pool)
@@ -522,13 +437,6 @@ async fn the_storage_refuses_to_change_the_currency() {
         .unwrap();
 }
 
-/// Плечо позиции переживает хранилище (TRM-53 шаг 2).
-///
-/// **После шага 2 это вопрос карантина, а не аккуратности.** Маржу сверяет
-/// `check_snapshot` по плечу, записанному В ПОЗИЦИИ. Если колонка не доедет
-/// обратно, позиция, открытая при плече 100, поднимется с плечом 1, маржа под
-/// ней окажется «в сто раз меньше пересчитанной» — и счёт уйдёт в карантин при
-/// первом же перезапуске. Без базы это не проверить: отображение живёт в SQL.
 #[tokio::test]
 #[ignore = "нужна живая БД: TEST_DATABASE_URL=postgres://... cargo test -p persistence -- --ignored"]
 async fn postgres_round_trips_the_position_leverage() {
@@ -539,8 +447,6 @@ async fn postgres_round_trips_the_position_leverage() {
         .expect("подключение");
     store.init().await.expect("DDL");
 
-    // Свой пользователь и уборка ДО утверждений: падение соседнего прогона не
-    // должно отравлять этот, а этот — соседний.
     const V: UserId = UserId(78);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
@@ -563,7 +469,6 @@ async fn postgres_round_trips_the_position_leverage() {
         entry: 239_883,
         pd: 2,
         qd: 4,
-        // 23 988 нотионала при плече 100 — маржа 239.
         margin: 239,
         sl: None,
         tp: None,
@@ -606,13 +511,6 @@ async fn postgres_round_trips_the_position_leverage() {
     );
 }
 
-/// Плечо СЧЁТА (Р-446) переживает хранилище: столбец `accounts.leverage` и
-/// запись `leverage_set` в ленте поднимаются обратно и сходятся друг с другом.
-///
-/// Без базы не проверить: отображение живёт в SQL. Не доедь столбец обратно —
-/// сверка на старте увидит «плечо по журналу 50, в слепке None», и счёт уйдёт
-/// в карантин при первом же перезапуске. `None` обязан остаться `None`, а не
-/// стать единицей: «не назначали» — это плечо площадки.
 #[tokio::test]
 #[ignore = "нужна живая БД: TEST_DATABASE_URL=postgres://... cargo test -p persistence -- --ignored"]
 async fn postgres_round_trips_the_account_leverage() {
@@ -696,7 +594,6 @@ async fn postgres_round_trips_the_account_leverage() {
         .save_account(W, &snap, &events, &[])
         .await
         .expect("запись в БД");
-    // Счёт без назначенного плеча — NULL в столбце.
     let plain = AccountSnapshot {
         balance: 10_000_000,
         ..Default::default()
@@ -737,13 +634,6 @@ async fn postgres_round_trips_the_account_leverage() {
     );
 }
 
-/// Тариф СЧЁТА, снимок тарифа в позиции и доход площадки со сделки (10.11)
-/// переживают хранилище: столбцы поднимаются обратно и сходятся с лентой
-/// (`fees_set`, `markup_applied`, `commission_charged`).
-///
-/// Без базы не проверить: отображение живёт в SQL. Не доедь хоть один столбец
-/// — сверка на старте увидит расхождение тарифа или дохода, и счёт уйдёт в
-/// карантин при первом же перезапуске.
 #[tokio::test]
 #[ignore = "нужна живая БД: TEST_DATABASE_URL=postgres://... cargo test -p persistence -- --ignored"]
 async fn postgres_round_trips_the_account_fees() {
@@ -782,7 +672,6 @@ async fn postgres_round_trips_the_account_fees() {
         .await
         .unwrap();
 
-    // Живой путь брокера: тариф, две позиции, одна закрыта.
     let mut b = broker::Broker::new(1_000_000_000, 20);
     assert!(b.open_account(W));
     let mut j = Journal::new(b.start_balance());

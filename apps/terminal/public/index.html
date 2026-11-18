@@ -4,76 +4,48 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Terminal</title>
-  <!-- Дизайн-токены платформы (theming-pack v1) — подключаются ПЕРВЫМИ: style.css
-       строит семантические цвета терминала поверх них (ADR-023, фаза Т1). -->
   <link rel="stylesheet" href="/tokens.v1.css" />
   <link rel="stylesheet" href="/style.css" />
   <script src="/vendor/lightweight-charts.js"></script>
 </head>
 <body data-mtab="chart">
-  <!-- ===================== Шапка: бренд, род счёта, счёт ===================== -->
   <header class="top">
-    <!-- «LIVE» — утверждение о состоянии, поэтому оно не статичное: подпись не должна
-     утверждать больше, чем состояние знает. Слово меняется вместе с индикатором. -->
     <div class="logo"><span class="logo__mark">E</span><span id="brandName" class="logo__name">Exchange</span><span id="feedLabel" class="feed">…</span></div>
-    <!-- Род счёта (demo-money): демо и реальный — разные счета с разными
-         деньгами, и человек обязан видеть, на каком он торгует, ВСЕГДА.
-         Переключает счёт кабинет: повторный вход с другим account_kind. -->
     <div id="kindBadge" class="kind-badge" hidden></div>
     <div id="frozenBadge" class="frozen-badge" hidden></div>
-    <!-- Стартовые значения — прочерк, а не $0: до первого успешного ответа счёта
-         у нас нет никаких цифр, и ноль выглядел бы настоящим балансом (BUG-011). -->
     <div class="metrics">
       <div class="metric"><span class="metric__l" data-i18n="acct.balance">Balance</span><span id="mBalance" class="metric__v">&mdash;</span></div>
-      <!-- CREDIT: источника данных нет вовсе — в API кредита не существует. Узел
-           остаётся в разметке (на него опираются проверки), но не показывается:
-           столбик с вечным прочерком на витрине читается как поломка. -->
       <div class="metric" hidden><span class="metric__l" data-i18n="acct.credit">Credit</span><span id="mCredit" class="metric__v" title="no data source">&mdash;</span></div>
       <div class="metric"><span class="metric__l" data-i18n="acct.equity">Equity</span><span id="mEquity" class="metric__v">&mdash;</span></div>
       <div class="metric"><span class="metric__l" data-i18n="acct.pnl">Open P&amp;L</span><span id="mPnl" class="metric__v">&mdash;</span></div>
       <div class="metric"><span class="metric__l" data-i18n="acct.margin">Margin</span><span id="mMargin" class="metric__v">&mdash;</span></div>
       <div class="metric"><span class="metric__l" data-i18n="acct.free">Free margin</span><span id="mFree" class="metric__v">&mdash;</span></div>
-      <!-- Уровень маржи: equity / занятая маржа. Красится по порогам площадки
-           (маржин-колл / стоп-аут), которые отдаёт /account. -->
       <div class="metric"><span class="metric__l" data-i18n="acct.level">Margin level</span><span id="mLevel" class="metric__v" data-i18n-title="acct.level.tip">&mdash;</span></div>
-      <!-- Плечо СЧЁТА для новых позиций (Р-446): назначает сайт (портфель /
-           override клиента), без назначения — плечо площадки. Открытые позиции
-           держат своё плечо снимком. -->
       <div class="metric"><span class="metric__l" data-i18n="acct.leverage">Leverage</span><span id="mLev" class="metric__v" data-i18n-title="acct.leverage.tip">&mdash;</span></div>
     </div>
-    <!-- Модель ведения позиций (ADR-025). Она меняет смысл встречной сделки, поэтому
-         показывается всегда, а не прячется в настройки. -->
     <div id="modelBadge" class="chip" hidden></div>
     <div class="top__right">
       <div class="lang" role="group" data-i18n-title="top.lang">
         <button type="button" data-lang="ru">RU</button><button type="button" data-lang="en">EN</button>
       </div>
       <button class="iconbtn-top" id="themeToggle" data-i18n-tip="top.theme" data-i18n-title="top.theme">◐</button>
-      <!-- «В кабинет» и «Выйти» — только когда терминал открыт верхним уровнем:
-           во фрейме кабинет и так вокруг. Адрес — из белого списка конфига. -->
       <a id="toCabinet" class="btn-top" hidden data-i18n-title="top.cabinet.tip"><span data-i18n="top.cabinet">Cabinet</span></a>
       <button id="logoutBtn" class="btn-top btn-top--ghost" hidden data-i18n="top.logout">Log out</button>
       <span id="status" class="status status--off">●</span>
     </div>
   </header>
 
-  <!-- ===================== Баннеры состояния (только когда есть) ============ -->
   <div id="banners" class="banners">
     <div id="frozenBanner" class="banner banner--danger" hidden></div>
     <div id="mcBanner" class="banner banner--danger" hidden></div>
     <div id="ssoBanner" class="banner banner--warn" hidden><span id="ssoBannerText"></span><button id="ssoBannerBtn" class="banner__btn" hidden></button></div>
     <div class="chips">
-      <!-- Явная причина, по которой цифр нет. Пусто и скрыто, пока счёт отвечает. -->
       <div id="acctWarn" class="acct-warn" hidden></div>
-      <!-- Рыночные данные (свечи/стакан/статистика) не пришли — говорим об этом. -->
       <div id="dataWarn" class="acct-warn" hidden></div>
-      <!-- Состояние живёт только в памяти (NoopStore). Пометка ПОСТОЯННАЯ и без крестика:
-           закрытая пометка — та же тишина, только с согласия, о котором завтра не помнят. -->
       <div id="volatileWarn" class="volatile-warn" hidden></div>
     </div>
   </div>
 
-  <!-- ===================== Шапка инструмента ===================== -->
   <section class="ihead" id="ihead">
     <button id="ihPair" class="ih-pair" type="button" data-i18n-title="ih.pairs">
       <span id="ihCoin" class="ih-coin"></span>
@@ -92,7 +64,6 @@
     <span class="ih-source chip" data-i18n="ih.source" data-i18n-title="ih.source.tip">Prices: Binance</span>
   </section>
 
-  <!-- ===================== Мобильные вкладки ===================== -->
   <nav class="mtabs" id="mtabs">
     <button data-m="chart" class="active" data-i18n="m.chart">Chart</button>
     <button data-m="book" data-i18n="m.book">Book</button>
@@ -101,9 +72,6 @@
   </nav>
 
   <main class="grid" id="grid">
-    <!-- Слева — рынок-источник: глубина (orderbook.js) и под ней лента сделок
-         (trades.js). Всё, что про рынок, — в одной колонке; всё, что про
-         заявку человека, — справа. -->
     <div class="col-left">
       <div id="book" class="col-book"></div>
       <div class="rsz rsz-h" data-rsz="trades"></div>
@@ -231,20 +199,13 @@
 
     <div class="rsz rsz-v rsz-right" data-rsz="right"></div>
 
-    <!-- Справа во всю высоту — заявка человека и список пар. -->
     <aside class="col-right">
-    <!-- ===================== Форма ордера ===================== -->
-    <!-- Справа во всю высоту, одной колонкой — как на телефоне. Сторона
-         выбирается переключателем: уровни SL/TP у покупки и продажи
-         зеркальные, и подставить их можно, только зная сторону. -->
     <section class="deal" id="deal" data-mode="market" data-side="buy">
       <div class="deal__tabs">
         <button id="tabLimit" data-i18n="f.limit">Limit</button>
         <button id="tabDeal" class="active" data-i18n="f.market">Market</button>
         <button id="tabStop" class="deal__tab--off" disabled data-i18n-title="f.stop.tip"><span data-i18n="f.stop">Stop</span> <small data-i18n="f.soon">soon</small></button>
       </div>
-      <!-- Имя инструмента и изменение — для мобильной вкладки «Ордер», где шапки
-           инструмента над формой нет. На десктопе скрыты: шапка выше. -->
       <div class="deal__sym">
         <div><div id="dealSym" class="deal__symname">—</div><div id="dealSub" class="muted small">—</div></div>
         <div id="dealChange" class="deal__change">—</div>
@@ -274,15 +235,10 @@
           <div id="sizeEq" class="muted small"></div>
           <div id="marginEq" class="muted small"></div>
           <div id="pipsInfo" class="muted small hidden"></div>
-          <!-- Комиссия сделки по тарифу счёта (10.11) — до подтверждения. Цена на
-               кнопке — цена исполнения с наценкой тарифа; отдельной строки
-               «наценка» нет, как на любом spread-счёте. Нет комиссии — строки нет. -->
           <div id="feeInfo" class="muted small hidden"></div>
         </div>
         <div class="fld fld--sl"><label class="lbl" for="sl" data-i18n="f.sl">Stop Loss</label><input id="sl" type="number" step="0.01" placeholder="—" inputmode="decimal" /></div>
         <div class="fld fld--tp"><label class="lbl" for="tp" data-i18n="f.tp">Take Profit</label><input id="tp" type="number" step="0.01" placeholder="—" inputmode="decimal" /></div>
-        <!-- Минимальное расстояние SL/TP площадки (`/account` → min_stop_bps).
-             Уровни подставлены на нём; ближе не даст ни форма, ни шлюз. -->
         <div class="stops-hint">
           <span id="stopsHint" class="muted small" data-i18n-title="f.stops.min.tip"></span>
           <button id="stopsReset" type="button" class="linkbtn" data-i18n="f.stops.reset" data-i18n-title="f.stops.reset.tip" hidden>Reset</button>
@@ -299,8 +255,6 @@
       </div>
       <div id="dealFrozen" class="deal__frozen" hidden><b data-i18n="frozen.form">Trading blocked by operator</b><span data-i18n="frozen.form.sub">Closing positions is still available</span></div>
     </section>
-      <!-- Под заявкой — список пар. На телефоне он открывается кнопкой пары в
-           шапке инструмента на весь экран. -->
       <div id="pairs" class="pairs">
         <button id="watchClose" class="mclose" type="button" aria-label="close">✕</button>
         <aside class="watch"></aside>
@@ -308,11 +262,9 @@
     </aside>
 
     <div class="rsz rsz-h rsz-bottom" data-rsz="bottom"></div>
-    <!-- Во всю ширину: позиции, ордера, история, баланс (positions.js) -->
     <div class="bottom" id="bottom"></div>
   </main>
 
-  <!-- Бегущая строка тикеров: цены и изменение по всем парам сайта. -->
   <footer class="tape" id="tape"><div class="tape__track" id="tapeTrack"></div></footer>
 
   <div id="tip" class="tip hidden"></div>

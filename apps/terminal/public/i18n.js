@@ -1,29 +1,10 @@
 'use strict';
-// ============================================================================
-// i18n.js — локализация терминала RU/EN без внешних библиотек (ADR-015).
-//
-// Как устроено:
-//   • словарь — плоская таблица `ключ → [en, ru]`, одна на весь терминал: её
-//     видно целиком, и недостающий перевод находится тестом, а не человеком;
-//   • статичная разметка помечается `data-i18n="ключ"` (текст),
-//     `data-i18n-title`, `data-i18n-tip`, `data-i18n-ph` (placeholder) —
-//     `apply(root)` проходит по ним при старте и при смене языка;
-//   • динамический текст берёт `t(ключ, vars)` в момент отрисовки — виджеты
-//     перерисовываются опросом, поэтому новый язык доезжает до них сам;
-//   • виджеты (ADR-015) про этот модуль не знают: хост даёт им `ctx.t`.
-//
-// Язык по умолчанию — язык кабинета, если он передан (`?lang=` или `#lang=`
-// во входной ссылке), иначе сохранённый выбор человека, иначе RU. Кабинет
-// главнее сохранённого: терминал открыт из кабинета, и язык у них обязан
-// совпадать — расхождение выглядело бы как два разных продукта.
-// ============================================================================
 (function () {
   const LANGS = ['ru', 'en'];
   const KEY = 'terminal:lang';
 
-  /** @type {Record<string, [string, string]>} ключ → [en, ru] */
+  /** @type {Record<string, [string, string]>} */
   const D = {
-    // ---- Шапка и счёт ----
     'acct.balance': ['Balance', 'Баланс'],
     'acct.credit': ['Credit', 'Кредит'],
     'acct.equity': ['Equity', 'Средства'],
@@ -72,14 +53,12 @@
     'feed.ok': ['market data live', 'рыночные данные идут'],
     'feed.silent': ['socket open, no market data for {age}', 'сокет открыт, рыночных данных нет {age}'],
     'feed.session': ['the whole session', 'всю сессию'],
-    // ---- Сессия верхнего уровня ----
     'sso.expiring': ['Your session ends in {min} min.', 'Сессия закончится через {min} мин.'],
     'sso.extend': ['Extend', 'Продлить'],
     'sso.expired': ['Session ended — trading is unavailable.', 'Сессия закончилась — торговля недоступна.'],
     'sso.login': ['Sign in via cabinet', 'Войти через кабинет'],
     'sso.none': ['You are not signed in — trading is unavailable.', 'Вы не вошли — торговля недоступна.'],
     'sso.failed': ['Sign-in link is invalid or expired.', 'Ссылка входа недействительна или устарела.'],
-    // ---- Шапка инструмента ----
     'ih.change': ['24h change', 'Изм. 24ч'],
     'ih.high': ['24h high', 'Макс. 24ч'],
     'ih.low': ['24h low', 'Мин. 24ч'],
@@ -88,12 +67,10 @@
     'ih.source': ['Prices: Binance', 'Цены: Binance'],
     'ih.source.tip': ['Quotes, chart, depth and market trades come from Binance (spot) through our gateway. Your orders are executed by the broker at these prices (CFD) and do not reach the Binance order book.', 'Котировки, график, глубина и сделки рынка — с Binance (спот) через наш шлюз. Ваши ордера исполняет брокер по этим ценам (CFD); в стакан Binance они не попадают.'],
     'ih.pairs': ['Pairs', 'Пары'],
-    // ---- Мобильные вкладки ----
     'm.chart': ['Chart', 'График'],
     'm.book': ['Book', 'Стакан'],
     'm.order': ['Order', 'Ордер'],
     'm.positions': ['Positions', 'Позиции'],
-    // ---- График ----
     'tb.chartType': ['Chart type', 'Тип графика'],
     'tb.indicators': ['Indicators', 'Индикаторы'],
     'tb.priceType': ['Price type', 'Тип цены'],
@@ -128,7 +105,6 @@
     'set.step': ['Step', 'Шаг'],
     'set.default': ['Default', 'По умолчанию'],
     'set.cols': ['Watchlist columns', 'Колонки списка'],
-    // ---- Форма ордера ----
     'f.limit': ['Limit', 'Лимит'],
     'f.market': ['Market', 'Рынок'],
     'f.stop': ['Stop', 'Стоп'],
@@ -162,7 +138,6 @@
     'f.sl.bad': ['Stop Loss is closer than the minimum — nearest allowed {px}', 'Stop Loss ближе минимума — ближайший допустимый {px}'],
     'f.tp.bad': ['Take Profit is closer than the minimum — nearest allowed {px}', 'Take Profit ближе минимума — ближайший допустимый {px}'],
     'f.nearest': ['Nearest allowed level: {px}', 'Ближайший допустимый уровень: {px}'],
-    // ---- Изменение SL/TP открытой позиции и ордера (levels.js, 17.11) ----
     'lv.title': ['Edit SL/TP', 'Изменить SL/TP'],
     'lv.edit.sl': ['Change Stop Loss', 'Изменить Stop Loss'],
     'lv.edit.tp': ['Change Take Profit', 'Изменить Take Profit'],
@@ -183,7 +158,6 @@
     'fee.text': ['Commission ≈ {v} USD', 'Комиссия ≈ {v} USD'],
     'fee.unknown': ['Commission ≈ — USD', 'Комиссия ≈ — USD'],
     'fee.tip': ['Commission {p}% of the trade notional, charged on opening and again on closing.', 'Комиссия {p}% от стоимости сделки — при открытии и ещё раз при закрытии.'],
-    // ---- Нижняя панель ----
     'p.positions': ['Positions', 'Позиции'],
     'p.orders': ['Orders', 'Ордера'],
     'p.history': ['History', 'История'],
@@ -226,7 +200,6 @@
     'b.active': ['active', 'доступна'],
     'b.blocked': ['blocked by operator', 'заблокирована оператором'],
     'b.noData': ['No account data yet', 'Данных счёта пока нет'],
-    // ---- Стакан и сделки ----
     'ob.title': ['Market depth', 'Глубина рынка'],
     'ob.source': ['source: Binance', 'источник: Binance'],
     'ob.source.tip': ['Order book of the price source (Binance spot), not ours: the broker executes your orders at these prices, they do not enter this book.', 'Стакан рынка-источника цен (Binance, спот), а не наш: брокер исполняет ваши ордера по этим ценам, в этот стакан они не попадают.'],
@@ -268,15 +241,12 @@
     'wl.spread': ['Spread', 'Спред'],
     'wl.high': ['High', 'Макс.'],
     'wl.price': ['Price', 'Цена'],
-    // ---- Выход ----
     'out.title': ['You have signed out of the terminal', 'Вы вышли из терминала'],
     'out.text': ['The terminal session is closed. Your cabinet session is not affected.', 'Сессия терминала закрыта. Сессия кабинета не затронута.'],
     'out.cabinet': ['Back to cabinet', 'Вернуться в кабинет'],
     'out.again': ['Open terminal again', 'Открыть терминал снова'],
   };
 
-  // Отказы границы (rejection.js) — переводы по коду. Английский остаётся в
-  // rejection.js: он и есть исходный текст, здесь только русский.
   /** @type {Record<string, string>} */
   const REJECT_RU = {
     instrument_not_allowed: 'Этот инструмент недоступен на этом сайте',
@@ -297,14 +267,16 @@
     invalid_level: 'Введите цену больше нуля или оставьте поле пустым, чтобы снять уровень.',
   };
 
-  /** @param {any} v @returns {'ru'|'en'|null} */
+  /**
+   * @param {any} v
+   * @returns {'ru'|'en'|null}
+   */
   function norm(v) {
     const s = String(v || '').toLowerCase().slice(0, 2);
     return s === 'ru' || s === 'en' ? s : null;
   }
 
   /**
-   * Какой язык взять при старте. Чистая функция — ради тестов.
    * @param {{ query?: string, hash?: string, saved?: string|null, config?: string }} src
    * @returns {'ru'|'en'}
    */
@@ -315,7 +287,7 @@
   }
 
   let saved = null;
-  try { saved = localStorage.getItem(KEY); } catch { /* приватный режим */ }
+  try { saved = localStorage.getItem(KEY); } catch {  }
   let lang = detect({
     query: typeof location !== 'undefined' ? location.search : '',
     hash: typeof location !== 'undefined' ? location.hash : '',
@@ -335,13 +307,12 @@
     return s;
   }
 
-  /** Есть ли ключ — для виджетов, у которых свой английский по умолчанию. */
   function has(key) { return Object.prototype.hasOwnProperty.call(D, key); }
 
   /**
-   * Перевод для виджета: `(ключ, английский) → строка`. Ключа нет в словаре —
-   * виджет остаётся при своём английском, а не печатает ключ.
-   * @param {string} key @param {string} en @param {Record<string, string|number>} [vars]
+   * @param {string} key
+   * @param {string} en
+   * @param {Record<string, string|number>} [vars]
    */
   function widgetT(key, en, vars) {
     if (has(key)) return t(key, vars);
@@ -365,14 +336,14 @@
     const l = norm(next);
     if (!l || l === lang) return;
     lang = l;
-    try { localStorage.setItem(KEY, l); } catch { /* */ }
+    try { localStorage.setItem(KEY, l); } catch {  }
     apply();
     listeners.forEach((f) => { try { f(lang); } catch (e) { console.error('[i18n] слушатель смены языка упал', e); } });
   }
 
   /**
-   * Текст отказа границы на языке интерфейса.
-   * @param {number} status @param {string} [code]
+   * @param {number} status
+   * @param {string} [code]
    */
   function rejection(status, code) {
     if (lang === 'ru') {
@@ -383,8 +354,6 @@
     return window.Rejection ? window.Rejection.text(status, code) : `Rejected (${status})`;
   }
 
-  /** Локаль для чисел и дат. Цены — всегда с точкой и без пробелов-разделителей
-   *  в полях ввода; здесь только подписи. */
   function locale() { return lang === 'ru' ? 'ru-RU' : 'en-US'; }
 
   window.I18n = {

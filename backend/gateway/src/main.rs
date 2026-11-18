@@ -1,10 +1,5 @@
-//! Бинарь шлюза: состояние + реальный крипто-фид Binance + монитор брокера + слушает :8080.
-
 #[tokio::main]
 async fn main() {
-    // Хранилище выбирается переменной окружения (ADR-016). Без неё — MemoryStore:
-    // всё в памяти процесса, чтобы локальный запуск и тесты не требовали БД. Путь
-    // записи при этом настоящий, включая журнал счёта (ADR-027).
     let mut state = match std::env::var("DATABASE_URL") {
         Ok(url) if !url.is_empty() => {
             let store = gateway::persistence::PgStore::connect(&url)
@@ -18,18 +13,13 @@ async fn main() {
             gateway::build_state()
         }
     };
-    // Поднять состояние и журналы счетов до приёма запросов (ADR-016, ADR-027).
-    // Без БД — пусто. Ошибка здесь фатальна: работать на неизвестном состоянии
-    // счетов и непрочитанной их истории нельзя (красные линии №3 и №5).
     if let Err(e) = gateway::restore_state(&state).await {
         panic!("[gateway] не удалось поднять состояние: {e}");
     }
-    // Релей шины (TRM-40). После `restore_state`: таблица очереди заводится там же,
-    // где остальная схема, и отправлять до её создания нечего и некуда.
     gateway::announce_account_mode(&state);
     gateway::spawn_bus_relay(&mut state);
-    gateway::feed::spawn(state.clone()); // реальные данные с Binance (ADR-013)
-    gateway::spawn_monitor(state.clone()); // триггеры лимитных ордеров и SL/TP (ADR-014)
+    gateway::feed::spawn(state.clone());
+    gateway::spawn_monitor(state.clone());
 
     let app = gateway::router(state);
     let addr = "0.0.0.0:8080";

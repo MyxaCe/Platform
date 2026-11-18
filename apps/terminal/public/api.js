@@ -1,58 +1,14 @@
 'use strict';
-// ============================================================================
-// api.js — клиент REST-API терминала. Модуль-библиотека по ADR-015:
-// ноль DOM, ноль чужих глобалов; всё внешнее приходит через ctx.
-//
-// Зачем отдельный модуль: заголовок авторизации и разбор ответа были продублированы
-// в восьми местах app.js, а токен читался прямо из элемента страницы. Настоящий auth
-// (P0 в backlog) поменяет заголовки, добавит обновление сессии и обработку 401 —
-// с этим модулем правка будет в одном месте, а не в каждом виджете.
-//
-// Контракт:
-//   const api = Api.create();  // терминал автономный, авторизации нет
-//
-// Соглашение по ошибкам (повторяет прежнее поведение app.js):
-//   • чтение   → данные при успехе, null при сетевой ошибке или не-2xx.
-//     null означает «данных нет», и вызывающий оставляет на экране прежние —
-//     это важнее пустого списка: при обрыве связи UI не должен показывать
-//     «нет позиций», когда позиции есть.
-//   • мутация  → { ok, status, data } — вызывающий сам решает, что показать.
-// ============================================================================
 (function () {
-  /** Создать клиента. Терминал автономный (пивот 2026-07-25): логина нет, все запросы
-   *  идут на тот же origin к одному демо-счёту по умолчанию. */
   function create() {
-    /** Заголовок сессии терминала (ADR-023, Т2): bearer в памяти, если вошли. Для
-     *  публичных данных безвреден, для торговых ручек обязателен. */
     function authHeaders() {
       const t = window.Sso && window.Sso.token && window.Sso.token();
       return t ? { Authorization: 'Bearer ' + t } : {};
     }
 
     /**
-     * GET с разбором JSON и **названной причиной отказа** (КОНТРАКТЫ §4г).
-     *
-     * Возвращает `{ data, reason }`; `reason === null` — успех.
-     *
-     * Имена — ось канала, общая для всех потребителей платформы:
-     * `network` (наша сеть не донесла), `http-error` (сосед ответил отказом),
-     * `malformed` (ответил не тем). `not-configured` называет вызывающий: он
-     * знает, задан ли адрес, а сюда без адреса не приходят.
-     *
-     * Почему `network` и `http-error` разведены: первое чинит наша сторона,
-     * второе — сосед. Схлопнутые, они отправляют чинить наугад.
-     *
-     * Прежний `read` возвращал `null` на все три случая сразу — и это был не
-     * косметический дефект: виджеты, умеющие различать причины, получали от
-     * него одно `null` и показывали «ответ не тот» при оборванной сети.
-     * Различие, построенное выше по течению, здесь и терялось.
-     */
-    /**
      * @param {string} url
      * @returns {Promise<{ data: any, reason: string | null, status: number }>}
-     *   `data` намеренно `any`: это разобранный JSON соседа, и притворяться,
-     *   что его форма известна здесь, значило бы проверять выдумку. Форму
-     *   знает вызывающий — он и обязан её описать у себя.
      */
     async function readDetailed(url) {
       let r;
@@ -72,7 +28,6 @@
     }
 
     /**
-     * Короткая форма для вызывающих, которым причина не нужна.
      * @param {string} url
      * @returns {Promise<any>}
      */
@@ -81,19 +36,12 @@
     }
 
     /**
-     * POST/DELETE с телом. Возвращает { ok, status, data }; data может быть null.
-     *
      * @param {string} url
      * @param {string} method
-     * @param {any} [body] тело запроса; без него заголовок типа не ставится
+     * @param {any} [body]
      * @returns {Promise<{ ok: boolean, status: number, data: any }>}
      */
     async function mutate(url, method, body) {
-      // Заголовки собираются ДО создания `opts`, а не дописываются в него
-      // после. Прежний вид — `opts.headers['Content-Type'] = ...` — строгую
-      // проверку не проходит, и не по придирке: `authHeaders()` возвращает то
-      // объект с полем, то пустой, и дописывание в такой союз типов
-      // неразрешимо. Здесь форма объявлена один раз и дальше не меняется.
       /** @type {Record<string, string>} */
       const headers = { ...authHeaders() };
       /** @type {RequestInit} */
@@ -108,34 +56,21 @@
         try {
           data = await r.json();
         } catch {
-          /* пустое тело (204 No Content) — норма */
         }
         return { ok: r.ok, status: r.status, data };
       } catch {
-        return { ok: false, status: 0, data: null }; // сеть недоступна
+        return { ok: false, status: 0, data: null };
       }
     }
 
-    // В embedded-режиме (задан origin кабинета, ADR-023) без сессии торговые ручки
-    // отдают 401 — не долбим их и не шумим в консоли, пока не пришёл handoff-токен.
-    // В standalone (origin кабинета не задан) — гоняем как есть (сервер на счёте по умолчанию).
     function tradingBlocked() {
       const embedded = ((window.TERMINAL_CONFIG || {}).cabinetOrigins || []).some(Boolean);
       return embedded && !(window.Sso && window.Sso.token());
     }
 
-    // Почему торговых данных нет. Отдельно от самих данных, потому что `null` не
-    // отличает «сессии нет» от «сеть моргнула», а показывать эти два случая надо
-    // по-разному: первый — устойчивый отказ, второй — повод оставить прежние цифры
-    // (BUG-011: отказ не должен выглядеть правдоподобным значением).
-    //   'unknown'     — успешного чтения ещё не было;
-    //   'ok'          — данные пришли;
-    //   'no-session'  — 401/403 или сессия не выдана: торговля недоступна;
-    //   'unreachable' — сеть или не-2xx: связи нет, прежние данные ещё могут быть верны.
     let status = 'unknown';
 
     /**
-     * Чтение торговой ручки: возвращает данные либо null, попутно ставя `status`.
      * @param {string} url
      * @returns {Promise<any>}
      */
@@ -180,36 +115,35 @@
     }
 
     return {
-      // ---- Состояние торгового доступа ------------------------------------
-      /** 'unknown' | 'ok' | 'no-session' | 'unreachable' — см. `status` выше. */
       tradingStatus: () => status,
 
-      // ---- Публичные данные (без авторизации) ----------------------------
-      /** Состояние сервиса, в т.ч. режим хранилища: { storage, durable, sso }. */
       health: () => read('/health'),
-      /**
-       * Список инструментов. `site` — фильтр витрины по allow-list сайта (ADR-023 Т3).
-       * @param {string} [site]
-       */
+      /** @param {string} [site] */
       instruments: (site) => read('/instruments' + (site ? `?site=${encodeURIComponent(site)}` : '')),
-      /** @param {number} id @param {number} tf @param {number} limit */
+      /**
+       * @param {number} id
+       * @param {number} tf
+       * @param {number} limit
+       */
       candles: (id, tf, limit) => read(`/candles/${id}?tf=${tf}&limit=${limit}`),
-      /** @param {number} id @param {number} [limit] */
+      /**
+       * @param {number} id
+       * @param {number} [limit]
+       */
       depth: (id, limit) => read(`/depth/${id}${limit ? `?limit=${limit}` : ''}`),
       /** @param {number} id */
       stats: (id) => read(`/stats/${id}`),
 
-      // Те же ручки с названной причиной отказа — для виджетов, которые
-      // показывают метку устаревания и обязаны сказать, что именно сломалось.
-      /** @param {number} id @param {number} [limit] */
+      /**
+       * @param {number} id
+       * @param {number} [limit]
+       */
       depthDetailed: (id, limit) => readDetailed(`/depth/${id}${limit ? `?limit=${limit}` : ''}`),
       /** @param {number} id */
       statsDetailed: (id) => readDetailed(`/stats/${id}`),
 
-      // ---- Счёт пользователя (требует сессию) ----------------------------
       account: () => authedRead('/account'),
 
-      // ---- Позиции (требуют сессию) ---------------------------------------
       deals: () => authedRead('/deals'),
       /** @param {any} body */
       openDeal: (body) => authedMutate('/deals', 'POST', body),
@@ -217,19 +151,21 @@
       closeDeal: (id) => authedMutate(`/deals/${id}/close`, 'POST'),
       closedDeals: () => authedRead('/deals/closed'),
 
-      // ---- Отложенные (лимитные) ордера (требуют сессию) ------------------
       pending: () => authedRead('/pending'),
       /** @param {any} body */
       placePending: (body) => authedMutate('/pending', 'POST', body),
       /** @param {number} id */
       cancelPending: (id) => authedMutate(`/pending/${id}`, 'DELETE'),
 
-      // ---- Изменение SL/TP (17.11; запись — под флагом шлюза `sltp_edit`) ---
-      // Тело `{ sl?, tp? }`: число — поставить/сдвинуть, `null` — снять, поля
-      // нет — оставить как есть.
-      /** @param {number} id @param {{ sl?: number|null, tp?: number|null }} body */
+      /**
+       * @param {number} id
+       * @param {{ sl?: number|null, tp?: number|null }} body
+       */
       editDealLevels: (id, body) => authedMutate(`/deals/${id}/levels`, 'PUT', body),
-      /** @param {number} id @param {{ sl?: number|null, tp?: number|null }} body */
+      /**
+       * @param {number} id
+       * @param {{ sl?: number|null, tp?: number|null }} body
+       */
       editPendingLevels: (id, body) => authedMutate(`/pending/${id}/levels`, 'PUT', body),
     };
   }

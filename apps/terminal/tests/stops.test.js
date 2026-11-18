@@ -1,15 +1,9 @@
 'use strict';
-// ============================================================================
-// Минимальное расстояние SL/TP в тикете. Числа — те же, что в тестах шлюза
-// (`stops::unit`, `stops_closer_than_the_minimum_are_refused_by_the_gateway`):
-// одна арифметика на две стороны границы.
-// ============================================================================
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { loadModule } = require('./helpers/load-module');
 
 const Stops = loadModule('stops.js', 'Stops');
-/** Объект из песочницы vm — с чужим прототипом; сравниваем по содержимому. */
 const plain = (/** @type {any} */ o) => JSON.parse(JSON.stringify(o));
 
 test('расстояние: вверх, ноль — ограничения нет', () => {
@@ -20,7 +14,7 @@ test('расстояние: вверх, ноль — ограничения не
 });
 
 test('проверка зеркальна для покупки и продажи — как на шлюзе', () => {
-  const px = 4_800_000; // 1 % = 48 000
+  const px = 4_800_000;
   assert.deepEqual(plain(Stops.check('buy', px, 4_760_000, null, 100)), { code: 'stop_loss_too_close', limit: 4_752_000, distance: 48_000 });
   assert.equal(Stops.check('buy', px, null, 4_840_000, 100).code, 'take_profit_too_close');
   assert.equal(Stops.check('sell', px, 4_840_000, null, 100).limit, 4_848_000);

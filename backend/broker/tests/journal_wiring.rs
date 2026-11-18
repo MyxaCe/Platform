@@ -1,23 +1,9 @@
-//! Связка «операция → запись в журнале → восстановленное состояние» (TRM-13).
-//!
-//! Юнит-тесты журнала проверяют журнал, юнит-тесты брокера — брокер. Ни те, ни другие
-//! не ловят самый вероятный дефект: **операция есть, а записи о ней нет**. Код,
-//! который написан и не вызывается, модульными тестами не ловится в принципе — это мы
-//! уже видели на мутации пустого инварианта (TRM-06).
-//!
-//! Поэтому здесь каждая операция прогоняется через настоящий брокер, её события
-//! складываются в настоящий журнал, журнал сворачивается обратно — и результат
-//! сверяется со слепком счёта. Любая несписанная операция немедленно расходится.
-
 use broker::journal::{audit, CloseCause, EventKind, Journal, JournalStatus, Origin};
 use broker::{Broker, PosSide, PositionModel};
 use domain::account::UserId;
 
 use std::collections::HashMap;
 
-/// Пустой справочник цен: без цен нереализованный результат равен нулю, то есть
-/// `equity == balance`, и проверки продолжают проверять ровно то, что проверяли
-/// до появления единого определения свободной маржи (TRM-41).
 fn no_marks() -> std::collections::HashMap<u32, i64> {
     std::collections::HashMap::new()
 }
@@ -42,8 +28,6 @@ impl Rig {
         }
     }
 
-    /// Снять события последней операции и записать их в журнал — ровно то, что делает
-    /// шлюз. Источник приходит снаружи: ядро о нём не знает.
     fn record(&mut self, origin: Origin) {
         self.at += 1;
         let kinds = self.b.take_events(U);
@@ -52,8 +36,6 @@ impl Rig {
         }
     }
 
-    /// Журнал обязан сходиться со слепком после каждого шага. Проверяем **пересчётом
-    /// с нуля**, а не поддерживаемым состоянием: иначе сравнивали бы свёртку с собой.
     fn must_reconcile(&self, step: &str) {
         let snap = self.b.snapshot(U);
         let status = audit(&self.j, &snap);
@@ -65,9 +47,6 @@ impl Rig {
         );
     }
 
-    /// Завести счёт **отдельной записью** — ровно то, что теперь делает шлюз
-    /// перед любой операцией (TRM-46). До этой правки счёт заводился внутри
-    /// первой операции, и её отказ уносил запись о заведении с собой.
     fn open_account(&mut self) {
         self.b.open_account(U);
         self.record(Origin::System);
@@ -77,8 +56,6 @@ impl Rig {
         self.j.events().iter().map(|e| e.kind()).collect()
     }
 }
-
-// ---- Хеджирование: открытие и закрытие -------------------------------------
 
 #[test]
 fn opening_and_closing_are_recorded_and_replay_to_the_same_account() {
@@ -104,7 +81,6 @@ fn opening_and_closing_are_recorded_and_replay_to_the_same_account() {
     r.record(Origin::Client);
     r.must_reconcile("после закрытия");
 
-    // Первая запись — заведение счёта: стартовый баланс обязан иметь происхождение.
     assert!(matches!(r.kinds()[0], EventKind::AccountOpened { balance, .. } if *balance == START));
     assert!(matches!(r.kinds()[1], EventKind::PositionOpened { .. }));
     assert!(
@@ -118,8 +94,6 @@ fn opening_and_closing_are_recorded_and_replay_to_the_same_account() {
         "закрытие по команде обязано отличаться от срабатывания стопа"
     );
 }
-
-// ---- Неттинг: доливка, частичное сворачивание, переворот --------------------
 
 #[test]
 fn netting_add_partial_and_flip_are_each_recorded() {
@@ -202,7 +176,6 @@ fn netting_add_partial_and_flip_are_each_recorded() {
     .unwrap();
     r.record(Origin::Client);
     r.must_reconcile("после переворота");
-    // Переворот — это две записи: свёрнутая позиция и открытая в новую сторону.
     let tail = r.kinds();
     let n = tail.len();
     assert!(matches!(
@@ -212,7 +185,6 @@ fn netting_add_partial_and_flip_are_each_recorded() {
             ..
         }
     ));
-    // Остаток = встречный объём минус свёрнутый: 500 − 250.
     assert!(matches!(
         tail[n - 1],
         EventKind::PositionOpened {
@@ -222,8 +194,6 @@ fn netting_add_partial_and_flip_are_each_recorded() {
         }
     ));
 }
-
-// ---- Срабатывание стопа и тейка --------------------------------------------
 
 #[test]
 fn stop_loss_is_recorded_with_its_cause_and_the_balance_replays() {
@@ -245,15 +215,10 @@ fn stop_loss_is_recorded_with_its_cause_and_the_balance_replays() {
 
     let marks: HashMap<u32, i64> = HashMap::from([(1, 48_500)]);
     assert_eq!(r.b.check(&marks, false), vec![U], "стоп обязан сработать");
-    // Источник — движок: человека в этот момент нет, и в записи этого не должно быть.
     r.record(Origin::System);
     r.must_reconcile("после срабатывания стопа");
 
     let last = r.j.events().last().unwrap();
-    // Рынок на 48 500 при стопе 49 000 — это проскальзывание, и исполняется
-    // оно по рынку (Р-178). Раньше здесь стояло `exit: 49_000`: тест
-    // утверждал, что мы закрыли по уровню, то есть что разницу доплатил
-    // брокер. Это и была та неограниченная гарантия, о которой никто не знал.
     assert!(
         matches!(
             last.kind(),
@@ -303,8 +268,6 @@ fn take_profit_is_recorded_separately_from_stop_loss() {
     ));
 }
 
-// ---- Отложенные ордера ------------------------------------------------------
-
 #[test]
 fn pending_lifecycle_is_recorded_place_cancel_and_fill() {
     let mut r = Rig::new();
@@ -337,8 +300,6 @@ fn pending_lifecycle_is_recorded_place_cancel_and_fill() {
     );
 }
 
-// ---- Деньги -----------------------------------------------------------------
-
 #[test]
 fn deposit_and_withdrawal_replay_into_the_same_balance() {
     let mut r = Rig::new();
@@ -351,9 +312,6 @@ fn deposit_and_withdrawal_replay_into_the_same_balance() {
     assert_eq!(r.j.replay().balance, START + 300_000);
 }
 
-/// Ручная проводка центра управления (Р-049) — та же операция с другим источником.
-/// Остаток **выводится** из неё, а не правится: это и есть форма, под которую
-/// делается ADM-03.
 #[test]
 fn manual_posting_goes_through_the_same_path_and_is_distinguishable() {
     let mut r = Rig::new();
@@ -383,10 +341,6 @@ fn manual_posting_goes_through_the_same_path_and_is_distinguishable() {
     );
 }
 
-// ---- Отрицательный контроль -------------------------------------------------
-
-/// Несписанная операция обязана обнаруживаться. Это и есть смысл сверки: без неё
-/// «забыли записать» выглядит как нормальная работа.
 #[test]
 fn an_operation_that_was_not_recorded_is_detected() {
     let mut r = Rig::new();
@@ -406,7 +360,6 @@ fn an_operation_that_was_not_recorded_is_detected() {
     r.record(Origin::Client);
     r.must_reconcile("контроль: пока всё сходится");
 
-    // Операция происходит, а записать её «забыли»: события выброшены.
     r.b.deposit(U, 999_999);
     let _dropped = r.b.take_events(U);
 
@@ -421,15 +374,9 @@ fn an_operation_that_was_not_recorded_is_detected() {
     );
 }
 
-/// Очередь событий сливается и при отказе: несостоявшаяся операция не должна уехать
-/// в журнал прицепом к следующей.
 #[test]
 fn events_of_a_failed_operation_do_not_leak_into_the_next_one() {
     let mut r = Rig::new();
-    // Счёт заводится СВОЕЙ записью и до операции (TRM-46). Прежде этот тест
-    // заводил его отказавшим открытием и тут же выбрасывал запись о заведении
-    // вместе с событиями отказа — то есть сам воспроизводил дефект, из-за
-    // которого первые деньги оставались без происхождения.
     r.open_account();
     assert!(
         r.b.open(
@@ -479,8 +426,6 @@ fn events_of_a_failed_operation_do_not_leak_into_the_next_one() {
     assert_eq!(r.b.pending_events(U), 0, "очередь обязана быть пустой");
 }
 
-/// Длинная смешанная последовательность: каждый шаг сверяется, и в конце состояние
-/// восстанавливается из ленты целиком.
 #[test]
 fn a_long_mixed_sequence_replays_to_the_same_account() {
     let mut r = Rig::new();
@@ -536,19 +481,9 @@ fn a_long_mixed_sequence_replays_to_the_same_account() {
     );
 }
 
-// ---- Деньги без происхождения (TRM-47) -------------------------------------
-
-/// Потерянная запись о заведении счёта **видна сверке**, хотя деньги сходятся.
-///
-/// Это и есть причина, по которой дефект прожил незамеченным: свёртка начинается
-/// со стартового баланса, поэтому журнал без записи о заведении даёт ТОТ ЖЕ
-/// остаток, что и журнал с ней. Проверка, сравнивавшая суммы, сравнивала
-/// совпадающие числа и честно отвечала «сходится».
 #[test]
 fn money_without_provenance_is_not_called_reconciled() {
     let mut r = Rig::new();
-    // Заводим счёт и ВЫБРАСЫВАЕМ запись о заведении — ровно то, что делала
-    // прежняя ленивая схема при отказе первой операции.
     r.b.open_account(U);
     let dropped = r.b.take_events(U);
     assert!(
@@ -556,7 +491,6 @@ fn money_without_provenance_is_not_called_reconciled() {
         "выбрасываем именно запись о заведении: {dropped:?}"
     );
 
-    // Дальше счёт живёт обычной жизнью, и деньги считаются верно.
     r.b.open(
         U,
         &no_marks(),
@@ -588,10 +522,6 @@ fn money_without_provenance_is_not_called_reconciled() {
     assert!(!status.ok(), "«деньги без происхождения» — не «в порядке»");
 }
 
-/// Неполная история и неверные деньги — РАЗНЫЕ диагнозы, и второй старше.
-///
-/// Иначе счёт с испорченным остатком отчитывался бы как «нет происхождения», и
-/// разбираться пошли бы не туда.
 #[test]
 fn wrong_money_outranks_missing_provenance() {
     let mut r = Rig::new();
@@ -613,7 +543,7 @@ fn wrong_money_outranks_missing_provenance() {
     r.record(Origin::Client);
 
     let mut snap = r.b.snapshot(U);
-    snap.balance += 1; // деньги разъехались
+    snap.balance += 1;
     let status = audit(&r.j, &snap);
     assert_eq!(
         status.tag(),
@@ -622,8 +552,6 @@ fn wrong_money_outranks_missing_provenance() {
     );
 }
 
-/// Счёт, заведённый по правилам, остаётся «в порядке»: проверка не красит всех
-/// подряд. Без этого случая предыдущие два ничего не доказывают.
 #[test]
 fn a_properly_opened_account_still_reconciles() {
     let mut r = Rig::new();

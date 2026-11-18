@@ -1,20 +1,10 @@
 'use strict';
-// ============================================================================
-// Изменение SL/TP открытой позиции и ордера (17.11) — в настоящем браузере.
-//
-// Шлюз — заглушка (см. helpers/browser.js): здесь доказывается ФРОНТ — что
-// кнопки появляются только под флагом шлюза, что окно подставляет минимум и
-// подсвечивает слишком близкий уровень, что уходит ровно изменённое поле, что
-// линии графика перерисованы, и что на телефоне всё это помещается в экран.
-// Границу (отказы шлюза) проверяют тесты `levels::wiring` в Rust.
-// ============================================================================
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { openTerminal } = require('../helpers/browser');
 
 const settle = (/** @type {any} */ page, /** @type {number} */ ms) => page.evaluate((d) => new Promise((r) => setTimeout(r, d)), ms || 600);
 
-/** Заглушка с состоянием: PUT меняет уровни, следующий GET их отдаёт. */
 function stubWorld(/** @type {{ edit?: boolean, reject?: any }} */ opt) {
   const deals = [
     { id: 7, instrument: 1, symbol: 'BTC-USDT', side: 'buy', qty: 1500, entry: 6480000, mark: 6500000, pnl: 30000, sl: 6420000, tp: null, price_decimals: 2, qty_decimals: 5 },
@@ -48,7 +38,6 @@ function stubWorld(/** @type {{ edit?: boolean, reject?: any }} */ opt) {
   return { routes, puts, deals, pending };
 }
 
-/** Открыть терминал с сессией; на телефоне — новой вкладкой с нужным экраном. */
 async function open(/** @type {any} */ t, /** @type {any} */ world, /** @type {any} */ phone) {
   const term = await openTerminal({ query: '?site=apex-ru#handoff=h-lvl&account=demo&lang=ru', routes: world.routes });
   t.after(term.cleanup);
@@ -92,10 +81,8 @@ test('флаг включён: окно подставляет минимум, �
     focus: document.activeElement && document.activeElement.id,
   }));
   assert.deepEqual([opened.sl, opened.tp, opened.focus], ['64200.00', '', 'lvlSl']);
-  // Покупку закрывают по bid 65 000.00; 0.5 % = 325.00.
   assert.match(opened.ref, /bid.*65,000\.00.*0\.50%.*325\.00/);
 
-  // Ближе минимума: подсветка, сохранить нельзя, назван ближайший уровень.
   const sl = await page.$('#lvlSl');
   await sl.click({ clickCount: 3 });
   await sl.type('64900');
@@ -109,7 +96,6 @@ test('флаг включён: окно подставляет минимум, �
   assert.ok(bad.save, 'сохранить нельзя');
   assert.match(bad.msg, /64,675\.00/, `ближайший допустимый: «${bad.msg}»`);
 
-  // «Мин.» — уровень на минимуме с запасом на движение рынка (как тикет).
   await page.click('.lvl-f [data-act="min"][data-k="sl"]');
   await settle(page, 150);
   const minVal = await page.evaluate(() => /** @type {HTMLInputElement} */ (document.getElementById('lvlSl')).value);
@@ -121,7 +107,6 @@ test('флаг включён: окно подставляет минимум, �
   const after = await page.evaluate(() => ({
     open: !!document.querySelector('.lvl-back'),
     cell: document.querySelector('.deal-row .lvlbtn[data-id="7"][data-f="sl"]').textContent.trim(),
-    // Линии графика — из того же ответа /deals (currentDeals → redrawPriceLines).
     // eslint-disable-next-line no-undef
     lines: /** @type {any[]} */ (priceLines).map((l) => l.options()).filter((o) => o.title === 'SL').map((o) => o.price),
   }));

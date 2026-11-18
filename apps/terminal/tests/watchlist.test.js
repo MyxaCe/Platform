@@ -1,39 +1,16 @@
 'use strict';
-// ============================================================================
-// Тесты виджета watchlist (TRM-05, контракт ADR-015 `mount(root, ctx)`).
-//
-// Почему именно эти проверки: ошибка в виджете не падает, а рисует неправильное.
-// Три давних дефекта UI (BUG-008…010) нашлись только при рефакторинге и жили до
-// него месяцами. Поэтому здесь закрепляется не «виджет смонтировался», а
-// поведение, которое ломается молча:
-//   • отказ источника не должен выглядеть пустым списком (BUG-011);
-//   • отсутствующая котировка рисуется прочерком, а не нулём (КОНТРАКТЫ §5г);
-//   • строки переиспользуются, а не пересоздаются — иначе теряется скролл;
-//   • destroy действительно снимает слушатели и таймер.
-// ============================================================================
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { loadWidget, rowIds, click } = require('./helpers/load-widget');
 
-/** Инструменты: цена и растёт и падает, есть неполная котировка — ломать есть чем. */
 function fixture() {
   return [
     { id: 1, symbol: 'BTC-USDT', price_decimals: 2, change: 1.5, bid: 8576000, ask: 8576100, high: 8600000 },
     { id: 2, symbol: 'ETH-USDT', price_decimals: 2, change: -2.25, bid: 270400, ask: 270450, high: 272000 },
-    // Инструмент без тикера: шлюз отдаёт null во ВСЕХ пяти полях котировки.
-    // Раньше `change` было единственным из пяти, что врало нулём.
     { id: 3, symbol: 'BNB-USDT', price_decimals: 2, change: null, bid: null, ask: null, high: null },
   ];
 }
 
-/**
- * Смонтировать виджет и дождаться первого refresh (mount зовёт его без await).
- *
- * `t.after` обязателен: если assert упал, `cleanup()` в конце теста не выполнится,
- * а невыключенный таймер виджета держит event loop — прогон **виснет вместо того,
- * чтобы покраснеть**. Молчаливое зависание хуже красного теста: его списывают на
- * «что-то долго». Поймано мутацией «destroy не снимает таймер».
- */
 async function mounted(t, overrides = {}) {
   const env = loadWidget(['watchlist.js']);
   t.after(() => env.cleanup());
@@ -67,8 +44,6 @@ test('первый инструмент выбирается автоматич�
   assert.deepEqual(env.calls.select, [1], 'повторный refresh не должен переизбирать инструмент');
 });
 
-// ---- Отказ источника не выглядит данными (BUG-011) -------------------------
-
 test('источник вернул null — прежние строки остаются, а не исчезают', async (t) => {
   const env = await mounted(t);
   env.setData(null);
@@ -83,8 +58,6 @@ test('отсутствующая котировка рисуется проче�
   assert.equal(row.querySelector('.c-sell').textContent, '—');
   assert.equal(row.querySelector('.c-buy').textContent, '—');
   assert.equal(row.querySelector('.c-high').textContent, '—');
-  // Пятое поле той же строки. Оно врало дольше четырёх остальных: шлюз отдавал
-  // 0 вместо «неизвестно», и строка рисовала зелёное «+0.00%» — «рынок стоял».
   assert.equal(row.querySelector('.c-change').textContent, '—');
   const chg = row.querySelector('.c-change').classList;
   assert.ok(!chg.contains('up') && !chg.contains('down'), 'без направления не красим ни вверх, ни вниз');
@@ -98,23 +71,15 @@ test('цена форматируется по price_decimals самого ин�
   assert.equal(row.querySelector('.c-sell').textContent, '85,760.00');
 });
 
-// ---- Переиспользование строк -----------------------------------------------
-
 test('обновление переиспользует элементы строк, а не пересоздаёт их', async (t) => {
   const env = await mounted(t);
   const before = [...env.root.querySelectorAll('.irow')];
   await env.wl.refresh();
   const after = [...env.root.querySelectorAll('.irow')];
-  // Число строк проверяется первым и не зря: при пересоздании старый элемент из
-  // DOM не удаляется, `querySelector` по-прежнему находит его, и проверка одной
-  // лишь идентичности оставалась бы зелёной. Мутация «пересоздавать строки»
-  // ловится именно ростом их количества.
   assert.equal(after.length, 3, 'строк должно остаться столько же, сколько инструментов');
   after.forEach((el, i) => assert.equal(el, before[i],
     'пересоздание строк теряет позицию скролла на каждом тике — дефект, который не падает'));
 });
-
-// ---- Избранное --------------------------------------------------------------
 
 test('избранное поднимается наверх и переживает перемонтирование', async (t) => {
   const env = await mounted(t);
@@ -136,8 +101,6 @@ test('клик по звезде не выбирает инструмент', as
   assert.equal(env.calls.select.length, before, 'звезда — это избранное, а не выбор инструмента');
 });
 
-// ---- Сортировка -------------------------------------------------------------
-
 test('сортировка по колонке и разворот при повторном клике', async (t) => {
   const env = await mounted(t);
   const head = env.root.querySelector('.sortable[data-sort="change"]');
@@ -147,18 +110,11 @@ test('сортировка по колонке и разворот при пов
   assert.deepEqual(rowIds(env.root), [2, 3, 1], 'повторный клик разворачивает порядок');
 });
 
-// ⚠️ Мутация `it.bid ?? -Infinity` → `it.bid ?? 0` этот тест **не красит**, и это
-// не дыра: цены неотрицательны, поэтому ноль и минус бесконечность дают один и тот
-// же порядок. Выбор `-Infinity` защищает от величин, которые могут быть
-// отрицательными, а у `bid`/`ask`/`high` таких не бывает по построению. Записано,
-// чтобы следующий не «дозакрывал» непокрытую мутацию ради полноты.
 test('инструменты без котировки уходят вниз, а не наверх', async (t) => {
   const env = await mounted(t);
   click(env.window, env.root.querySelector('.sortable[data-sort="sell"]'));
   assert.equal(rowIds(env.root).at(-1), 3, 'пустой bid не должен читаться как самая низкая настоящая цена');
 });
-
-// ---- Поиск ------------------------------------------------------------------
 
 test('поиск прячет строки, но не удаляет их', async (t) => {
   const env = await mounted(t);
@@ -169,8 +125,6 @@ test('поиск прячет строки, но не удаляет их', asyn
   assert.deepEqual(visible.map((el) => Number(/** @type {HTMLElement} */ (el).dataset.id)), [2]);
   assert.equal(env.root.querySelectorAll('.irow').length, 3, 'фильтр не должен перестраивать DOM');
 });
-
-// ---- Колонки ----------------------------------------------------------------
 
 test('скрытая колонка запоминается и возвращается при перемонтировании', async (t) => {
   const env = await mounted(t);
@@ -192,15 +146,13 @@ test('columns() отдаёт копию: правка результата не 
   assert.equal(env.wl.columns().high, 1, 'внутреннее состояние наружу не отдаётся');
 });
 
-// ---- destroy ----------------------------------------------------------------
-
 test('destroy очищает контейнер и снимает слушатели', async (t) => {
   const env = await mounted(t);
   const rows = env.root.querySelector('.watch__rows');
   env.wl.destroy();
   assert.equal(env.root.innerHTML, '');
   const before = env.calls.select.length;
-  click(env.window, rows); // элемент уже отсоединён, слушателя быть не должно
+  click(env.window, rows);
   assert.equal(env.calls.select.length, before);
 });
 

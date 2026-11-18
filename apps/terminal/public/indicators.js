@@ -1,17 +1,8 @@
-/* ============================================================================
- * indicators.js — чистая математика технических индикаторов (ADR-015).
- * Переиспользуемый модуль: ноль DOM, ноль глобалов страницы. Только функции над
- * массивами свечей/значений. Экспорт — window.Indicators. Подключать ДО app.js.
- * Пригодно для UI, бэктеста, тестов — где угодно.
- * ========================================================================== */
 (function () {
 const HL2 = (c) => (c.high + c.low) / 2;
 const HLC3 = (c) => (c.high + c.low + c.close) / 3;
 function sma(v, p) { const o = []; let s = 0; for (let i = 0; i < v.length; i++) { s += v[i]; if (i >= p) s -= v[i - p]; o.push(i >= p - 1 ? s / p : null); } return o; }
 function ema(v, p) { const o = []; const k = 2 / (p + 1);
-  // Инициализация нулём ничего не меняет: на i === 0 аккумулятору присваивают
-  // v[0], и до этого его никто не читает. Нужна проверяющему, который порядка
-  // присваиваний не видит.
   let e = 0; for (let i = 0; i < v.length; i++) { e = i === 0 ? v[0] : v[i] * k + e * (1 - k); o.push(i >= p - 1 ? e : null); } return o; }
 function wma(v, p) { const o = new Array(v.length).fill(null); const d = p * (p + 1) / 2; for (let i = p - 1; i < v.length; i++) { let s = 0; for (let j = 0; j < p; j++) s += v[i - j] * (p - j); o[i] = s / d; } return o; }
 function smma(v, p) { const o = new Array(v.length).fill(null); let a = 0; for (let i = 0; i < v.length; i++) { if (i < p) { if (i === p - 1) { let s = 0; for (let j = 0; j < p; j++) s += v[j]; a = s / p; o[i] = a; } } else { a = (a * (p - 1) + v[i]) / p; o[i] = a; } } return o; }
@@ -27,61 +18,27 @@ function momentum(v, p) { const o = new Array(v.length).fill(null); for (let i =
 function roc(v, p) { const o = new Array(v.length).fill(null); for (let i = p; i < v.length; i++) o[i] = v[i - p] ? 100 * (v[i] - v[i - p]) / v[i - p] : 0; return o; }
 function williams(cs, p) { const o = new Array(cs.length).fill(null); for (let i = p - 1; i < cs.length; i++) { const h = highest(cs, p, i), l = lowest(cs, p, i); o[i] = h === l ? -50 : -100 * (h - cs[i].close) / (h - l); } return o; }
 function ao(cs) { const m = cs.map(HL2); const f = sma(m, 5), s = sma(m, 34); return m.map((_, i) => (f[i] != null && s[i] != null ? f[i] - s[i] : null)); }
-/* ---------------------------------------------------------------------------
- * Сглаживание рядов с ПРОПУСКАМИ в начале (TRM-23).
- *
- * Производные индикаторы (AC, Force Index, сигнальная MACD) считаются поверх
- * другого индикатора, а у того первые значения не определены. Раньше пропуск
- * подменялся нулём — `.map((x) => x ?? 0)`, — и сглаживание получало ряд, в
- * котором до настоящих данных стоит частокол выдуманных нулей.
- *
- * Чем это плохо: результат считался частично из выдуманных данных **и
- * показывался** как результат. Маска возвращала `null` только там, где он был
- * у исходного ряда, поэтому первые настоящие значения — самые свежие для
- * глаза — оказывались смещены к нулю. Сигнальная линия MACD сходилась к
- * правильной за десятки баров, а человек читал её как сигнал с первого.
- *
- * Правило простое и взято из определения, а не из кода: **сглаживание
- * начинается с первого определённого значения ряда.** Ни одного числа до него
- * не существует, и выдумывать их нельзя — ни нулём, ни чем-либо ещё.
- * ------------------------------------------------------------------------- */
 
-/** Индекс первого определённого значения или -1, если ряд пуст целиком. */
 function firstDefined(v) {
   for (let i = 0; i < v.length; i++) if (v[i] != null) return i;
   return -1;
 }
 
-/**
- * EMA ряда с пропусками в начале.
- *
- * Затравка — первое определённое значение (так же, как `ema` берёт `v[0]`).
- * Первое выданное значение стоит на `p - 1` шагов позже затравки: столько же,
- * сколько у `ema` от начала ряда. Пропуски ПОСЛЕ начала не допускаются — у
- * наших производных рядов их не бывает, а молча их заглаживать значило бы
- * вернуть ту же выдумку другим способом.
- */
 function emaFrom(v, p) {
   const o = new Array(v.length).fill(null);
   const start = firstDefined(v);
   if (start < 0) return o;
 
   const k = 2 / (p + 1);
-  // Затравка задаётся РОВНО В ОДНОМ месте. В первой редакции она стояла и
-  // здесь, и в теле цикла (`i === start ? v[start] : …`), и внешняя оказалась
-  // мёртвой: мутация «затравить нулём» не красила ни одного теста, потому что
-  // тело её тут же перезаписывало. Два места для одного решения — это способ
-  // спрятать от проверки то из них, которое ошибётся.
   let e = v[start];
   for (let i = start; i < v.length; i++) {
-    if (v[i] == null) return o; // дыра в середине — дальше считать нечего
+    if (v[i] == null) return o;
     if (i > start) e = v[i] * k + e * (1 - k);
     if (i >= start + p - 1) o[i] = e;
   }
   return o;
 }
 
-/** SMA ряда с пропусками в начале. Первое значение — на `p - 1` шагов позже. */
 function smaFrom(v, p) {
   const o = new Array(v.length).fill(null);
   const start = firstDefined(v);
@@ -97,7 +54,6 @@ function smaFrom(v, p) {
   return o;
 }
 
-/** AC = AO − SMA(AO, 5). SMA считается по определённым значениям AO. */
 function acOsc(cs) { const a = ao(cs); const s = smaFrom(a, 5); return a.map((x, i) => (x != null && s[i] != null ? x - s[i] : null)); }
 function obv(cs) { const o = new Array(cs.length).fill(null); let v = 0; o[0] = 0; for (let i = 1; i < cs.length; i++) { v += Math.sign(cs[i].close - cs[i - 1].close) * cs[i].volume; o[i] = v; } return o; }
 function adLine(cs) { const o = new Array(cs.length).fill(null); let v = 0; for (let i = 0; i < cs.length; i++) { const r = cs[i].high - cs[i].low; v += r ? ((cs[i].close - cs[i].low) - (cs[i].high - cs[i].close)) / r * cs[i].volume : 0; o[i] = v; } return o; }

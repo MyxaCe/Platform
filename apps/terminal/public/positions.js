@@ -1,27 +1,3 @@
-/* ============================================================================
- * positions.js — нижняя панель терминала (ADR-015): вкладки OPEN DEALS /
- * LIMIT ORDERS / CLOSED DEALS / SIGNALS со своим DOM, стилями и опросом.
- *
- *   const panel = Positions.mount(el, {
- *     api,                       // { deals, closedDeals, pending, closeDeal, cancelPending }
- *     fmtUsd: (cents) => '$1.00',
- *     pips: () => false,         // показывать ли пипсы в P&L (тумблер хоста)
- *     onDeals: (list) => {},     // хост получает позиции (рисует SL/TP-линии на графике)
- *     onChange: () => {},        // после закрытия сделки / отмены ордера — обновить метрики
- *     levels: {                  // изменение SL/TP (опц., 17.11): ячейки SL/TP становятся кнопками
- *       enabled: () => true,     //   можно ли сейчас (флаг шлюза `/account.sltp_edit`, счёт не заморожен)
- *       edit: (kind, row, field) => {}, // 'deal'|'pending', строка списка, 'sl'|'tp' — окно открывает хост
- *     },
- *     signals: () => [{ symbol, name, tf, dir }],  // сигналы считает хост (из свечей)
- *     balance: () => [[label, value, cls?]] | null, // вкладка «Баланс» (опц.): сводку счёта даёт хост
- *     t: (key, en) => string,    // перевод (опц.): без него — английский
- *     interval: 1500,
- *   });
- *   panel.refresh(); panel.refreshSignals(); panel.show('pending'); panel.destroy();
- *
- * Почему сигналы приходят снаружи: они считаются из свечей графика, которыми владеет
- * хост. Виджет отвечает за их показ, но не за расчёт.
- * ========================================================================== */
 (function () {
   const CSS = `
 .bottom__tabs { padding: 0 14px; height: 36px; flex: 0 0 36px; display: flex; align-items: stretch; gap: 20px; border-bottom: 1px solid var(--border,#1f2735); overflow-x: auto; scrollbar-width: none; }
@@ -87,9 +63,6 @@
     document.head.appendChild(s);
   }
 
-  // Заголовки — пары [ключ перевода, английский]. Порядок колонок у позиций
-  // начинается так же, как раньше (инструмент…P&L), SL/TP — после P&L: на эти
-  // позиции колонок опираются проверки и привычка глаза.
   const TABS = [
     { key: 'deals', title: ['p.positions', 'Positions'], count: true, cols: '1.1fr .7fr .9fr 1fr 1fr 1fr .9fr .9fr .8fr',
       head: [['p.instr', 'Instrument'], ['p.side', 'Side'], ['p.qty', 'Size'], ['p.entry', 'Entry'], ['p.mark', 'Current'], ['p.pnl', 'P&L'], ['f.sl', 'SL'], ['f.tp', 'TP'], null] },
@@ -107,22 +80,16 @@
   function mount(root, ctx) {
     const fmtUsd = ctx.fmtUsd || defUsd;
     const pips = ctx.pips || (() => false);
-    /** Перевод: хост даёт `t(ключ, английский)`; без него — английский (ADR-015). */
     const t = ctx.t || ((_k, en) => en);
     const L = (pair) => (pair ? t(pair[0], pair[1]) : '');
-    // Пустой список и отсутствие доступа выглядят одинаково — «строк нет», — но значат
-    // противоположное. Без сессии пишем причину, а не «No open positions» (BUG-011).
     const noSession = () => t('p.noSession', 'No cabinet session — trading unavailable');
 
-    // Заголовки помечены data-i18n: хост переводит их при смене языка, не
-    // перестраивая виджет (строки и так перерисовываются опросом).
     const headHtml = (cols) => `<div class="deals__head">${cols.map((c, i) => (c ? `<span${i >= 2 ? ' class="ta-r"' : ''} data-i18n="${c[0]}">${L(c)}</span>` : '<span></span>')).join('')}</div>`;
     root.innerHTML =
       `<div class="bottom__tabs">${TABS.map((tb, i) => `<span data-pane="${tb.key}"${i === 0 ? ' class="active"' : ''}><span data-i18n="${tb.title[0]}">${L(tb.title)}</span>${tb.count ? `<span class="cnt" data-cnt="${tb.key}" hidden></span>` : ''}</span>`).join('')}</div>` +
       TABS.map((tb, i) => `<div class="pane${i === 0 ? '' : ' hidden'}" data-pane="${tb.key}"${tb.cols ? ` style="--cols: ${tb.cols}"` : ''}>` +
         (tb.balance ? '<div class="bal" data-rows="balance"></div>' : `${headHtml(tb.head)}<div class="rows" data-rows="${tb.key}"></div>`) +
         (tb.key === 'signals' ? `<div class="signals-note" data-i18n="p.signalsNote">${t('p.signalsNote', 'Our simple indicator-based signals (RSI, MA cross). Not investment advice.')}</div>` : '') + '</div>').join('');
-    /** Число строк во вкладке: «Позиции 3» видно, не открывая вкладку. */
     const setCount = (key, n) => {
       const el = root.querySelector(`[data-cnt="${key}"]`);
       if (!el) return;
@@ -141,12 +108,9 @@
       if (key === 'balance') refreshBalance();
     }
 
-    // Строки последнего опроса — окну изменения SL/TP нужна вся строка, а не id.
     const rowsById = { deal: new Map(), pending: new Map() };
-    /** Можно ли сейчас менять SL/TP: решает хост (флаг шлюза, заморозка). */
     const editable = () => !!(ctx.levels && ctx.levels.enabled());
     const PEN = '<span class="pen" aria-hidden="true"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></span>';
-    /** Ячейка уровня: кнопка, если менять можно, иначе текст — как было. */
     const lvlCell = (/** @type {string} */ kind, /** @type {any} */ d, /** @type {'sl'|'tp'} */ k, /** @type {(raw: any) => string} */ f) => {
       const cls = `lvl${d[k] != null ? ' ' + k : ''} c-${k}`;
       const label = ` data-l="${k === 'sl' ? t('f.sl', 'Stop Loss') : t('f.tp', 'Take Profit')}"`;
@@ -154,9 +118,7 @@
       const tip = k === 'sl' ? t('lv.edit.sl', 'Change Stop Loss') : t('lv.edit.tp', 'Change Take Profit');
       return `<button type="button" class="${cls} lvlbtn" data-kind="${kind}" data-id="${d.id}" data-f="${k}" title="${tip}" aria-label="${tip}"${label}>${f(d[k])}${PEN}</button>`;
     };
-    /** Подпись ячейки для карточки на телефоне (`data-l`). */
     const lab = (/** @type {string} */ key, /** @type {string} */ en) => ` data-l="${t(key, en)}"`;
-    /** Клик по ячейке уровня — окно изменения у хоста. */
     const onLevel = (/** @type {Event} */ e) => {
       const b = /** @type {HTMLElement|null} */ (/** @type {Element} */ (e.target).closest('.lvlbtn'));
       if (!b || !ctx.levels) return false;
@@ -166,7 +128,6 @@
       return true;
     };
 
-    // Кнопки внутри строк вешаются делегированием: строки перерисовываются каждый тик.
     rowsEl('deals').addEventListener('click', async (e) => {
       if (onLevel(e)) return;
       const b = e.target.closest('.closebtn'); if (!b) return;
@@ -182,12 +143,7 @@
 
     const lotOf = (d) => (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals);
     const pxOf = (d) => (raw) => (raw == null ? '—' : (raw / 10 ** d.price_decimals).toFixed(d.price_decimals));
-    // Комиссия сделки (10.11): вся — открытия и закрытия. Поля нет (старый
-    // шлюз) или ноль (тарифа не было) — пусто, а не «$0.00»: нулевая строка
-    // читалась бы как «комиссию посчитали и она ноль» у сделки без тарифа.
     const commissionOf = (d) => (Number.isFinite(d.commission) && d.commission > 0 ? fmtUsd(d.commission) : '');
-    // Устойчивый отказ (сессии нет) — пишем причину. Сетевой блип не трогает строки:
-    // прежние позиции ещё верны, а «нет позиций» при живых позициях — опаснее.
     const denied = () => (ctx.api.tradingStatus ? ctx.api.tradingStatus() === 'no-session' : false);
 
     async function refreshDeals() {
@@ -226,11 +182,6 @@
         `<div class="deal-row"><span>${s.symbol}</span><span>${s.name}</span><span>${s.tf}</span><span class="dir ${s.dir === 'BUY' ? 'buy' : 'sell'} ta-r">${s.dir}</span></div>`
       ).join('') || empty(t('p.noSignals', 'No signals on this TF'));
     }
-    /**
-     * Вкладка «Баланс»: сводку счёта собирает хост — у него ответ `/account`
-     * и пороги площадки. Данных нет — это говорится словами, а не пустой
-     * сеткой (BUG-011).
-     */
     function refreshBalance() {
       const el = rowsEl('balance');
       if (!el || !ctx.balance) return;

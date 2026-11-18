@@ -1,34 +1,4 @@
 'use strict';
-// ============================================================================
-// Браузерный харнесс терминала (TRM-18).
-//
-// ЗАЧЕМ. Три проверки упирались в одно и то же отсутствующее средство, и
-// поодиночке к ним решено не возвращаться:
-//   1) `drawings` — рисует на <canvas>, а jsdom без нативного пакета `canvas`
-//      возвращает `null` на getContext('2d');
-//   2) postMessage-половина контракта SSO — живёт между iframe и родителем;
-//   3) видимость метки устаревания — это CSS и раскладка, которых у jsdom нет.
-// Плюс четвёртое, которого не было ни в одном списке: **открывается ли
-// приложение вообще**. Зелёный набор модульных тестов этого не доказывает — у
-// соседей один клиентский импорт уронил всю админку при 1282 зелёных тестах.
-//
-// ЧЕМ. `puppeteer-core` + **уже установленный в системе** Chrome или Edge:
-// ни одного скачивания браузера на 300 МБ. Тяжёлый харнесс перестают гонять, и
-// тогда он не защищает ни от чего. Зависимости — только для разработки
-// (Р-020, «Разрешаем только для разработки»), в поставку не входят: образ
-// собирается из `public/` как есть.
-//
-// ГРАНИЦА, И ОНА ВАЖНЕЕ ВОЗМОЖНОСТЕЙ.
-// Здесь поднимается **заглушка шлюза**, а не шлюз. Всё, что этот харнесс
-// доказывает, — про ФРОНТ: что страница открывается, что виджеты рисуют то, что
-// им дали, что сообщения между iframe и родителем ходят. Он не доказывает
-// **ничего** про gateway, про Binance и про фид. Скриншот локального интерфейса
-// с котировками свидетельством работы фида не является — это записано в
-// правилах, и заглушка здесь именно тот случай, ради которого записано.
-//
-// Отдельно: половина SSO, которую закрывает харнесс, — **наша**. Родитель тут
-// поддельный, и согласие настоящего кабинета с контрактом отсюда не следует.
-// ============================================================================
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
@@ -41,22 +11,11 @@ const CHARTS = path.join(
   APP_DIR, 'node_modules', 'lightweight-charts', 'dist', 'lightweight-charts.standalone.production.js',
 );
 
-/**
- * Где взять браузер.
- *
- * Отсутствие браузера — **не повод пропустить проверку молча**. Непройденное
- * обязано быть отличимо от пройденного, поэтому здесь бросается исключение с
- * внятным текстом, а не возвращается `null`.
- */
 const CANDIDATES = [
-  // Windows — рабочие машины команды.
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
-  // Linux — CI и контейнеры. Имён несколько, потому что пакет называется
-  // по-разному в разных дистрибутивах, и промах по имени выглядел бы как
-  // «браузера нет» там, где он есть.
   '/usr/bin/google-chrome',
   '/usr/bin/google-chrome-stable',
   '/usr/bin/chromium',
@@ -91,22 +50,11 @@ const MIME = {
   '.svg': 'image/svg+xml',
 };
 
-/** Пустой значок: иконки монет вендорятся в образ, здесь их нет и не нужно. */
 const BLANK_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>';
 
-/**
- * Заглушка шлюза. Отдаёт правдоподобную форму ответов — ровно чтобы фронт
- * построился, — и НИЧЕГО не утверждает о настоящем шлюзе.
- *
- * `routes` позволяет тесту подменить или сломать отдельную ручку: отказ,
- * который умеет воспроизводить только природа, проверенным не считается, а
- * здесь мы его воспроизводим сами.
- */
 const DEPTH = {
   price_decimals: 2,
   qty_decimals: 5,
-  // Цены НЕ кратны шагу группировки: иначе корзины совпали бы с уровнями и
-  // проверка группировки была бы зелёной при любой формуле.
   bids: [[6500050, 200000], [6500020, 100000], [6499970, 300000]],
   asks: [[6500130, 150000], [6500160, 250000], [6500210, 50000]],
 };
@@ -120,8 +68,6 @@ function stubApi(routes, sessionTtl) {
     let p = 65000;
     for (let i = 0; i < 300; i += 1) {
       const open = p;
-      // Ряд, который ЕСТЬ ЧЕМ сломать: цена и растёт и падает, объёмы разные,
-      // есть разрывы. Вырожденный ряд дал бы зелёное на любой формуле.
       p += Math.sin(i / 7) * 120 + (i % 11 === 0 ? -260 : 70);
       out.push({
         time: t,
@@ -138,9 +84,6 @@ function stubApi(routes, sessionTtl) {
 
   const base = {
     '/health': () => ({ storage: 'memory', durable: false, sso: false }),
-    // Форма — ровно та, что отдаёт шлюз, включая обнуляемые поля котировки.
-    // Второй инструмент БЕЗ тикера: все пять полей null. Заглушка, отдающая
-    // только здоровые данные, не проверила бы ни одной ветки отказа.
     '/instruments': () => [
       {
         id: 1, symbol: 'BTC-USDT', base: 'BTC', quote: 'USDT',
@@ -160,19 +103,10 @@ function stubApi(routes, sessionTtl) {
     '/stats/1': () => STATS,
     '/stats/2': () => STATS,
     '/account': () => ({
-      // `opened: true` — заглушка описывает ЗАВЕДЁННЫЙ счёт. Без этого поля
-      // экран считал бы счёт заведённым по умолчанию, то есть проверял бы не
-      // тот случай (TRM-58).
       opened: true,
       balance: 1000000, equity: 1001234, used_margin: 20000, free_margin: 981234,
       open_pnl: 1234, model: 'netting',
     }),
-    /**
-     * Обмен handoff-токена на сессию терминала. Заглушка НЕ проверяет подпись
-     * и ничего не утверждает про настоящий шлюз: здесь проверяется половина
-     * контракта, живущая в браузере, — обмен сообщениями между iframe и
-     * родителем. Валидацию токена закрывает бэкендовый прогон (TRM-04).
-     */
     '/v1/session': (_u, _r, body) => {
       const got = JSON.parse(body || '{}');
       return { token: `session-for-${got.token}`, expires_in: sessionTtl };
@@ -185,23 +119,12 @@ function stubApi(routes, sessionTtl) {
   return Object.assign(base, routes || {});
 }
 
-/**
- * Поднимает статику терминала и заглушку шлюза на случайном порту.
- *
- * `config.js` рендерится здесь так же, как его рендерит entrypoint образа из
- * шаблона: иначе харнесс проверял бы страницу, которой в поставке нет.
- */
 function startServer(opts) {
   const api = stubApi(opts.routes, opts.sessionTtl || 900);
   const cfg = opts.config || {};
 
-  /** Что сервер видел: тест спрашивает про заголовки и тела, а не угадывает. */
   const seen = [];
 
-  /**
-   * Свой origin известен только после `listen`, а `config.js` обязан назвать
-   * его буквально: разрешённый origin кабинета — проверка безопасности.
-   */
   const state = { origin: null };
 
   const server = http.createServer(async (req, res) => {
@@ -233,10 +156,6 @@ function startServer(opts) {
         'window.TERMINAL_CONFIG = ' +
         JSON.stringify({
           brandUrl: (cfg.brandUrl || '').replace('{origin}', state.origin),
-          // По умолчанию разрешён собственный origin сервера. Проверка про
-          // чужой origin открывает родителя по `localhost`, а здесь стоит
-          // `127.0.0.1`: один сервер, разные origin'ы. Подставить сюда «любой»
-          // значило бы отключить проверку ради удобства прогона.
           cabinetOrigins: (cfg.cabinetOrigins || ['{origin}'])
             .map((o) => o.replace('{origin}', state.origin)),
         }) + ';\n',
@@ -250,8 +169,6 @@ function startServer(opts) {
       return;
     }
 
-    // Фавикон: иначе страница даёт 404 в консоль, и проверка «ни одной ошибки»
-    // краснела бы не по делу — а после двух-трёх таких её перестанут открывать.
     if (pathname === '/favicon.ico') {
       res.writeHead(200, { 'Content-Type': MIME['.svg'] });
       res.end(BLANK_SVG);
@@ -281,21 +198,12 @@ function startServer(opts) {
     res.end(fs.readFileSync(file));
   });
 
-  /**
-   * Лента `/stream` — настоящий сокет, а не подделка его состояния.
-   *
-   * Нужна не ради «зелёной точки»: через неё подаётся **битое** сообщение, и
-   * проверяется, что терминал оставляет след, а не глотает его молча (TRM-16).
-   * Этот путь модульными тестами не закрывался вовсе — `app.js` в jsdom не
-   * поднимается.
-   */
   const wss = new WebSocketServer({ server, path: '/stream' });
   const sockets = new Set();
   wss.on('connection', (sock) => {
     sockets.add(sock);
     sock.on('close', () => sockets.delete(sock));
   });
-  /** Отправить всем клиентам ровно то, что дали: строку — как есть. */
   const push = (payload) => {
     const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
     for (const s of sockets) s.send(text);
@@ -312,17 +220,6 @@ function startServer(opts) {
   });
 }
 
-/**
- * Поднять терминал в настоящем браузере.
- *
- * Возвращает `{ page, origin, errors, cleanup }`. `errors` — всё, что страница
- * сказала в консоль уровнем `error`, плюс необработанные исключения: молчание
- * страницы проверяется так же, как её разметка.
- *
- * Уборка висит на `t.after`, а не в конце тела теста: тест, который падает,
- * иначе оставил бы процесс браузера жить, и прогон завис бы вместо того, чтобы
- * покраснеть.
- */
 async function openTerminal(opts) {
   const options = opts || {};
   const { server, port, push, clients, closeWs, seen } = await startServer(options);
@@ -342,7 +239,7 @@ async function openTerminal(opts) {
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
 
   const cleanup = async () => {
-    try { await browser.close(); } catch { /* уже закрыт */ }
+    try { await browser.close(); } catch {  }
     await closeWs();
     await new Promise((r) => server.close(r));
   };

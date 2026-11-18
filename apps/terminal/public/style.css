@@ -1,28 +1,3 @@
-/* Мост к дизайн-токенам платформы (theming-pack v1, ADR-023 фаза Т1).
-   tokens.v1.css задаёт платформенные каналы (--bg-base, --accent, --positive…)
-   в RGB-каналах и обе темы через data-theme. Здесь мы переводим их в семантические
-   цвета терминала — терминал и виджеты (ADR-015) остаются на своих именах.
-   Единственная коллизия имён — акцент: у платформы --accent это КАНАЛЫ, у нас
-   --accent был готовым цветом → переименован в --brand, чтобы не конфликтовать.
-
-   Редизайн 10.11 (раскладка профессионального терминала): бренд — только акцент
-   (вкладки, фокус, выделение). Покупка/продажа — свои цвета, не брендовые, и
-   подобраны под WCAG AA:
-     • текст цен --up/--down на тёмных панелях — ≥ 5.9:1;
-     • кнопки — тёмные заливки --buy-bg/--sell-bg с белым текстом — ≥ 5.2:1
-       (белый на светлом зелёном платформы был бы 2.4:1);
-     • светлая тема: --positive платформы на белом даёт 4.0:1 — мало, поэтому
-       --up/--down там затемнены здесь, а не в tokens.v1.css (это чужой контракт).
-
-   Редизайн десктопа 11.11 (TRM-редизайн, см. _brain/TRM-редизайн/README.md).
-   Принципы, по которым правится всё ниже:
-     • одна поверхность панелей и волосяные линии между ними (1px) вместо
-       тёмных полос по 4px и трёх оттенков фона;
-     • цвет несёт смысл, а не украшает: зелёный/красный — только покупка,
-       продажа и знак результата; бренд — активная вкладка и фокус;
-     • вес шрифта: 400 подписи, 500 значения, 600 заголовки панелей — без 700/800
-       и без капса, кроме коротких меток состояния;
-     • сетка отступов 4/8/12/16, высота строки управления 32px, шапки панелей 36px. */
 :root {
   --bg: rgb(var(--bg-base));
   --panel: rgb(var(--bg-elevated));
@@ -40,16 +15,11 @@
   --sell-bg-hover: #d63e4b;
   --warn: #f5a524;
   --danger-bg: #5c1219;
-  /* Линия между панелями: щель сетки, через которую виден фон страницы. */
   --gap: 1px;
-  /* Поле ввода и подложка кнопок — на тон светлее панели. */
   --field: rgb(255 255 255 / 0.035);
   --field-hover: rgb(255 255 255 / 0.06);
   --hair: rgb(255 255 255 / 0.06);
-  /* Читаемый текст поверх акцента. Тёмный по умолчанию (акцент светлый);
-     загрузчик бренда переставит на светлый, если бренд-цвет тёмный (по яркости). */
   --on-accent: #08090c;
-  /* --border приходит из tokens.v1.css (полупрозрачный, свой на каждую тему). */
 }
 [data-theme='light'] {
   --up: #0b7a52;
@@ -66,7 +36,6 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); c
   font-family: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; font-size: 12px; }
 body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
 
-/* Скроллбары */
 * { scrollbar-width: thin; scrollbar-color: rgba(127,137,153,.3) transparent; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -81,14 +50,12 @@ button { font-family: inherit; }
 .up { color: var(--up); } .down { color: var(--down); }
 .num { font-variant-numeric: tabular-nums; }
 
-/* ============================ Шапка ============================ */
 .top { flex: 0 0 auto; display: flex; align-items: center; gap: 16px; min-height: 44px; padding: 0 12px;
   background: var(--panel); border-bottom: 1px solid var(--hair); }
 .logo { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; white-space: nowrap; }
 .logo__mark { display: inline-flex; width: 24px; height: 24px; border-radius: 6px; background: var(--brand);
   color: var(--on-accent); align-items: center; justify-content: center; font-weight: 700; flex: 0 0 24px; font-size: 13px; }
 .logo__mark img { width: 100%; height: 100%; object-fit: contain; border-radius: 6px; }
-/* Состояние фида — короткая метка, без рамки: цвет слова и есть сигнал. */
 .feed { font-size: 10px; font-weight: 600; letter-spacing: .5px; color: var(--muted); padding: 0 2px; }
 .feed.up { color: var(--up); }
 .metrics { display: flex; flex: 1; justify-content: flex-start; gap: 4px 24px; padding: 0 4px; min-width: 0; overflow: hidden; }
@@ -96,8 +63,6 @@ button { font-family: inherit; }
 .metric__l { color: var(--muted); font-size: 10.5px; }
 .metric__v { font-weight: 500; font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .metric__v.lvl-warn { color: var(--warn); } .metric__v.lvl-bad { color: var(--down); }
-/* Род счёта (demo-money). Заметно и на проекторе, но тоном, а не заливкой:
-   цвет не перекрашивается вместе с брендом. Контраст текста на подложке ≥ 7:1. */
 .kind-badge { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 600; letter-spacing: .06em;
   color: #a9c1ff; background: rgba(29, 78, 216, .18); border: 1px solid rgba(96, 135, 245, .45); border-radius: 4px; padding: 3px 8px; }
 .kind-badge--real { color: #fcd27b; background: rgba(245, 158, 11, .14); border-color: rgba(245, 158, 11, .55); }
@@ -124,7 +89,6 @@ button { font-family: inherit; }
 .status { font-size: 10px; color: var(--down); }
 .status--on { color: var(--up); }
 
-/* ============================ Баннеры ============================ */
 .banners { flex: 0 0 auto; display: flex; flex-direction: column; }
 .banner { display: flex; align-items: center; gap: 12px; padding: 7px 14px; font-size: 12.5px; font-weight: 500; }
 .banner--danger { background: var(--danger-bg); color: var(--text); border-bottom: 1px solid var(--down); box-shadow: inset 3px 0 0 var(--down); }
@@ -132,19 +96,14 @@ button { font-family: inherit; }
 .banner__btn { margin-left: auto; cursor: pointer; background: var(--brand); color: var(--on-accent); border: 0; border-radius: 4px; padding: 5px 12px; font-weight: 600; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px; }
 .chips:has(> :not([hidden])) { padding: 4px 12px; border-bottom: 1px solid var(--hair); background: var(--panel); }
-/* Метки состояния — предложением, а не капсом: словарь держит их заглавными
-   (их читают и проверки), здесь только показ. */
 .acct-warn, .volatile-warn { text-transform: lowercase; }
 .acct-warn::first-letter, .volatile-warn::first-letter { text-transform: uppercase; }
-/* Причина, по которой в метриках прочерки: сессии нет или счёт недоступен (BUG-011). */
 .acct-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 500; color: var(--down);
   background: color-mix(in srgb, var(--down) 10%, transparent); border-radius: 4px; padding: 2px 8px; }
-/* Постоянная пометка о нестойком состоянии: режим работы, а не отказ (BUG-011). */
 .volatile-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 400;
   color: var(--muted); padding: 2px 0 2px 12px;
   background: radial-gradient(circle at 3px 50%, var(--warn) 2.5px, transparent 3px) no-repeat; }
 
-/* ============================ Шапка инструмента ============================ */
 .ihead { flex: 0 0 auto; display: flex; align-items: center; gap: 24px; min-height: 48px; padding: 4px 12px;
   background: var(--panel); border-bottom: 1px solid var(--hair); }
 .ih-pair { display: flex; align-items: center; gap: 8px; background: transparent; border: 0; color: var(--text); cursor: pointer;
@@ -163,12 +122,6 @@ button { font-family: inherit; }
 .ih-v { font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .ih-source { margin-left: auto; cursor: help; border: 0; padding: 0; font-weight: 400; letter-spacing: 0; }
 
-/* ============================ Сетка ============================ */
-/* Слева — рынок (глубина и под ней лента сделок), в центре — график, справа
-   во всю высоту — заявка человека; под рынком и графиком — позиции/ордера/
-   история/баланс. Пары — выпадающим списком из шапки инструмента. Ширины
-   колонок и высота низа — переменные, их двигают ресайзеры; сами ресайзеры —
-   волосяные линии между панелями. */
 .grid { flex: 1; min-height: 0; display: grid; gap: 0; background: var(--bg);
   grid-template-columns: var(--lw, 280px) var(--gap) minmax(0, 1fr) var(--gap) var(--rw, 312px);
   grid-template-rows: minmax(0, 1fr) var(--gap) var(--bh, 196px);
@@ -184,7 +137,6 @@ button { font-family: inherit; }
 #trades > .trades { flex: 1; }
 .bottom { grid-area: bottom; background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
 .rsz-left { grid-area: rl; } .rsz-right { grid-area: rr; } .rsz-bottom { grid-area: rb; }
-/* Линия толщиной в пиксель, но хватать её — за полосу 7px: тонкую цель не поймать. */
 .rsz { position: relative; z-index: 4; }
 .rsz-v { cursor: col-resize; background: var(--bg); transition: background .12s; }
 .rsz-v::after { content: ''; position: absolute; top: 0; bottom: 0; left: -3px; right: -3px; }
@@ -192,15 +144,9 @@ button { font-family: inherit; }
 .rsz-h::after { content: ''; position: absolute; left: 0; right: 0; top: -3px; bottom: -3px; }
 .rsz-v:hover, .rsz-v.drag, .rsz-h:hover, .rsz-h.drag { background: var(--brand); }
 
-/* ============================ Список пар ============================ */
-/* Под заявкой, до низа колонки. Заявка не сжимается: при низком окне колонка
-   прокручивается, а не режет кнопку. */
 .pairs { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 220px; border-top: 1px solid var(--hair); }
 .pairs .watch { flex: 1; min-height: 0; border-right: 0; }
 
-/* ============================ График ============================ */
-/* Тулбар переносит группы кнопок и РАСТЁТ ВНИЗ (BUG-010): жёсткая высота
-   выталкивала кнопки поверх панели метрик. */
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; align-content: center; gap: 4px; min-height: 36px; padding: 2px 8px; border-bottom: 1px solid var(--hair); background: var(--panel); overflow: visible; }
 .tfs { display: flex; flex-wrap: nowrap; flex: 0 0 auto; gap: 1px; }
 .tfs button { flex: 0 0 auto; background: transparent; border: none; color: var(--muted); padding: 5px 8px; cursor: pointer; border-radius: 4px; font-weight: 500; font-size: 12px; }
@@ -234,8 +180,6 @@ button { font-family: inherit; }
 #setMenu label { justify-content: space-between; }
 .chartwrap { flex: 1; position: relative; min-height: 0; }
 .chart { position: absolute; inset: 0; }
-/* График на весь экран: настоящий (Fullscreen API) и запасной — слой поверх
-   окна, когда API закрыт (терминал во фрейме кабинета без allow="fullscreen"). */
 .center:fullscreen { background: var(--panel); width: 100%; height: 100%; }
 .center.is-max { position: fixed; inset: 0; z-index: 70; }
 .legend { position: absolute; top: 8px; left: 50px; z-index: 3; pointer-events: none;
@@ -250,9 +194,6 @@ button { font-family: inherit; }
 .watermark { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   font-size: 46px; font-weight: 700; color: rgba(127,137,153,.05); z-index: 1; pointer-events: none; }
 
-/* ============================ Форма ордера ============================ */
-/* Одна колонка и на десктопе, и на телефоне: сторона → цена → объём → SL/TP →
-   кнопка. Сторона выбирается переключателем; видна кнопка только выбранной. */
 .deal { position: relative; background: var(--panel); display: flex; flex-direction: column; min-height: 0; flex: 0 0 auto; }
 .deal__tabs { display: flex; align-items: center; gap: 16px; padding: 0 12px; height: 36px; border-bottom: 1px solid var(--hair); flex: 0 0 auto; }
 .deal__tabs > button { background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--muted);
@@ -299,13 +240,11 @@ button { font-family: inherit; }
 .inp { position: relative; display: flex; align-items: center; }
 .inp__u { position: absolute; right: 10px; color: var(--muted); font-size: 11px; pointer-events: none; }
 .inp--static { height: 32px; border-radius: 4px; color: var(--muted); display: flex; align-items: center; padding: 0 10px; background: var(--field); }
-/* Режим формы: в «Рынке» поле цены заменено надписью «По рынку», в «Лимите» — наоборот. */
 .deal[data-mode="market"] .inp--limit { display: none; }
 .deal[data-mode="limit"] .inp--static { display: none; }
 .deal input[type=number] { width: 100%; height: 32px; background: var(--field); border: 1px solid transparent; color: var(--text);
   border-radius: 4px; padding: 0 10px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .deal input[type=number]:hover { background: var(--field-hover); }
-/* Уровень ближе минимума площадки: поле красное ещё до отправки. */
 .deal input[type=number].bad { border-color: var(--down) !important; color: var(--down); }
 .deal .inp input { padding-right: 46px; }
 .lotrow { display: grid; grid-template-columns: 32px 1fr 32px; gap: 4px; }
@@ -325,8 +264,6 @@ button { font-family: inherit; }
 .orderbtn span { font-variant-numeric: tabular-nums; }
 .orderbtn span:last-child { font-weight: 500; opacity: .92; }
 .orderbtn:disabled { opacity: .45; cursor: not-allowed; }
-/* Заморозка: форма закрыта плашкой, а не просто серыми кнопками — человек
-   должен понять ПОЧЕМУ, не нажимая. */
 .deal__frozen { position: absolute; inset: 36px 0 0 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
   background: color-mix(in srgb, var(--panel) 82%, transparent); backdrop-filter: blur(1.5px); text-align: center; padding: 10px; }
 .deal__frozen b { color: var(--down); font-size: 13px; font-weight: 600; letter-spacing: .03em; }
@@ -335,7 +272,6 @@ button { font-family: inherit; }
 input.flash { animation: flashbg .4s ease; }
 @keyframes flashbg { 0% { background: var(--brand); color: var(--on-accent); } 100% { background: inherit; } }
 
-/* ============================ Бегущая строка ============================ */
 .tape { flex: 0 0 24px; height: 24px; overflow: hidden; position: relative; background: var(--panel); border-top: 1px solid var(--hair); }
 .tape__track { display: inline-flex; white-space: nowrap; align-items: center; height: 100%; animation: tape 90s linear infinite; will-change: transform; }
 .tape:hover .tape__track { animation-play-state: paused; }
@@ -344,7 +280,6 @@ input.flash { animation: flashbg .4s ease; }
 @keyframes tape { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 @media (prefers-reduced-motion: reduce) { .tape__track { animation: none; } .tape { overflow-x: auto; } }
 
-/* ================= Мелочи (переключатели, настройки, подсказка) ================= */
 .dd-toggle { padding: 6px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; color: var(--text); }
 .dd-toggle:hover { background: var(--field-hover); }
 .dd-toggle.on { color: var(--brand); background: color-mix(in srgb, var(--brand) 10%, transparent); }
@@ -369,10 +304,6 @@ input.flash { animation: flashbg .4s ease; }
 .mtabs { display: none; }
 .mclose { display: none; }
 
-/* ============================ Виджеты: тот же язык ============================ */
-/* Виджеты (ADR-015) приносят свои стили и подключаются позже этого файла,
-   поэтому правки здесь — с `body` впереди (специфичность выше). Меняется
-   только вид: вес шрифта, линии, акцент. Разметку и поведение виджеты держат сами. */
 body .ob__head { font-size: 12.5px; font-weight: 600; padding: 0 12px; height: 36px; border-bottom-color: var(--hair); }
 body .ob__src, body .trades__src { font-weight: 400; font-size: 10.5px; }
 body .ob__ctl { border-bottom-color: var(--hair); padding: 4px 10px; }
@@ -402,7 +333,6 @@ body .irow.active { background: var(--field-hover); }
 body .drawtools { background: color-mix(in srgb, var(--panel) 92%, transparent); border-color: var(--hair); border-radius: 6px; box-shadow: none; }
 body .drawbtn.active { background: var(--field-hover); color: var(--brand); }
 
-/* ============================ Узкий десктоп ============================ */
 @media (max-width: 1360px) {
   .metrics { gap: 4px 16px; }
   .ihead { gap: 16px; } .ih-stats { gap: 16px; }
@@ -412,9 +342,6 @@ body .drawbtn.active { background: var(--field-hover); color: var(--brand); }
   #modelBadge { display: none !important; }
 }
 
-/* ============================ Телефон ============================ */
-/* Одна панель на экран, переключают вкладки «График / Стакан / Ордер / Позиции».
-   Список пар — поверх всего по кнопке пары в шапке инструмента. */
 @media (max-width: 860px) {
   .top { flex-wrap: wrap; gap: 8px; padding: 6px 10px; }
   .logo__name, .feed { display: none; }
@@ -444,8 +371,6 @@ body .drawbtn.active { background: var(--field-hover); color: var(--brand); }
   body[data-mtab="order"] .pairs { display: none; }
   body[data-mtab="positions"] .grid > .bottom { display: flex; flex: 1; }
   .toolbar { padding: 3px 6px; gap: 4px; }
-  /* Рисование пальцем по графику на телефоне не работает как надо — панель
-     инструментов отдала бы графику треть ширины. Остаётся на десктопе. */
   .drawtools { display: none !important; }
   .legend { left: 10px; }
   .statbar { overflow-x: auto; scrollbar-width: none; }
@@ -461,7 +386,6 @@ body .drawbtn.active { background: var(--field-hover); color: var(--brand); }
   .lotbtn { height: 40px; }
   .side__b { height: 38px; font-size: 14px; }
   .orderbtn { height: 52px; font-size: 15px; }
-  /* Список пар — выдвижная панель на весь экран. */
   body.m-watch .grid > .col-right { display: flex; position: fixed; inset: 0; z-index: 50; background: var(--panel); padding-top: env(safe-area-inset-top); }
   body.m-watch .col-right > .deal { display: none; }
   body.m-watch .pairs { display: flex; flex: 1; border-top: 0; }

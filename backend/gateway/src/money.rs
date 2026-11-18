@@ -1,47 +1,3 @@
-//! # money — внутренние денежные ручки (пополнение и вывод от имени сайта)
-//!
-//! Деньги на счёт терминала приходят и уходят **по решению сайта**: сайт видит
-//! крипто-депозит в тестовой сети или одобряет заявку на вывод и говорит об этом
-//! терминалу сервер-сервер. Терминал остаётся владельцем денежного числа:
-//! проводка идёт обычным путём мутации (журнал, инварианты, сверка, исходящая
-//! очередь — одной транзакцией), отдельного пути у денег нет.
-//!
-//! ## Граница
-//!
-//! * `POST /internal/sites/{tenant}/users/{sub}/real/deposit`
-//! * `POST /internal/sites/{tenant}/users/{sub}/real/withdraw`
-//! * `POST /internal/sites/{tenant}/users/{sub}/{demo|real}/trading-freeze`
-//! * `POST /internal/sites/{tenant}/users/{sub}/{demo|real}/leverage`
-//! * `POST /internal/sites/{tenant}/users/{sub}/{demo|real}/fees`
-//! * `GET  /internal/sites/{tenant}/users/{sub}/accounts`
-//!
-//! Человек адресуется той же парой, что и в SSO и на шине: сайт (`tenant`) и
-//! пользователь сайта (`sub`); счёт — ещё и родом. У человека до двух счетов:
-//! демо (бумажные деньги, стартовая сумма площадки) и реальный (открывается
-//! нулём, деньги — только через эти ручки). Деньги ходят **только** на
-//! реальный: у демо-счёта пополнения и вывода нет. Реальный счёт заводится
-//! первым пополнением. Внутренний номер счёта наружу не уходит — вместо него
-//! `account_id` (UUIDv5 от ключа счёта).
-//!
-//! ## Авторизация — fail-closed
-//!
-//! Заголовок `X-Internal-Token` с общим секретом из `INTERNAL_MONEY_TOKEN`,
-//! сравнение за постоянное время. Секрет не задан — ручек **нет**: `404`, как
-//! у несуществующего пути. Незаданный секрет не может означать «пускать всех».
-//!
-//! Наружу ручки не публикуются: nginx терминала проксирует на шлюз только явный
-//! список префиксов, а `/internal` закрывает отдельно.
-//!
-//! ## Идемпотентность
-//!
-//! `external_ref` (хэш транзакции депозита, id заявки на вывод) записывается в
-//! журнал как ссылка ручной проводки (`incident = "ext:<ref>"`) — то есть
-//! хранится там же и той же транзакцией, что сами деньги, и переживает рестарт
-//! без отдельной таблицы. Повтор с тем же ref и теми же параметрами — `200` с
-//! `replayed: true` и номером ПЕРВОЙ записи, без второй проводки. Тот же ref с
-//! другими параметрами (сумма, операция, счёт) — `409`: это уже не повтор, а
-//! конфликт, и угадывать, какой из двух запросов правильный, мы не вправе.
-
 use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
@@ -61,18 +17,12 @@ use super::{
     trading_frozen, with_account, with_account_gated, AppState, Gate,
 };
 
-/// Заголовок с общим секретом.
 pub const TOKEN_HEADER: &str = "x-internal-token";
-/// Префикс ссылки в журнале: отличает внешний ref от номера инцидента ручной
-/// проводки центра управления (ADM-03), которая пишется в то же поле.
 const REF_PREFIX: &str = "ext:";
 const MAX_REF_LEN: usize = 200;
-/// Короче — предупреждаем в логе старта (не отказываем: стенд демо).
 const MIN_TOKEN_LEN: usize = 32;
-/// Валюта счёта. Единственная в терминале — см. `bus::CURRENCY`.
 const CURRENCY: &str = "USD";
 
-/// Секрет из окружения. Пустой или из пробелов — то же, что не задан.
 pub(crate) fn token_from_env(raw: Option<&str>) -> Option<Arc<str>> {
     match raw.map(str::trim).filter(|s| !s.is_empty()) {
         None => {
@@ -95,8 +45,6 @@ pub(crate) fn token_from_env(raw: Option<&str>) -> Option<Arc<str>> {
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
-        // Деньги — ТОЛЬКО на реальном счёте: у демо-счёта пополнения и вывода
-        // нет по определению (бумажные деньги).
         .route(
             "/internal/sites/:tenant/users/:sub/real/deposit",
             post(deposit),
@@ -105,17 +53,14 @@ pub(crate) fn routes() -> Router<AppState> {
             "/internal/sites/:tenant/users/:sub/real/withdraw",
             post(withdraw),
         )
-        // Заморозка — на любом из двух счетов: `{kind}` = demo | real.
         .route(
             "/internal/sites/:tenant/users/:sub/:kind/trading-freeze",
             post(trading_freeze),
         )
-        // Плечо счёта для новых позиций (Р-446) — тоже на любом из двух.
         .route(
             "/internal/sites/:tenant/users/:sub/:kind/leverage",
             post(set_leverage),
         )
-        // Тариф счёта (наценка и комиссия, 10.11) — на любом из двух.
         .route(
             "/internal/sites/:tenant/users/:sub/:kind/fees",
             post(set_fees),
@@ -123,9 +68,6 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/internal/sites/:tenant/users/:sub/accounts", get(accounts))
 }
 
-/// Сравнение за постоянное время: длительность не зависит от того, в каком
-/// байте строки расходятся. Длина в сравнение входит, но цикл идёт по большей
-/// из двух — ранний выход по длине подсказывал бы её.
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     let n = a.len().max(b.len());
     let mut diff = (a.len() ^ b.len()) as u64;
@@ -147,7 +89,6 @@ fn fail(code: StatusCode, error: &str, detail: Option<String>) -> Response {
 
 pub(crate) fn authorize(st: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
     let Some(expected) = st.internal_money_token.as_deref() else {
-        // Ручки выключены — отвечаем как несуществующий путь, без тела.
         return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
     };
     let Some(got) = headers.get(TOKEN_HEADER) else {
@@ -169,15 +110,11 @@ pub(crate) fn authorize(st: &AppState, headers: &HeaderMap) -> Result<(), Box<Re
 
 #[derive(Deserialize)]
 struct MoneyReq {
-    /// Сумма в минимальных единицах валюты (центы), целое > 0.
     amount_minor: i64,
     currency: String,
-    /// Ключ идемпотентности: хэш крипто-транзакции, id заявки на вывод.
     external_ref: String,
-    /// Кто инициировал: сервис или оператор сайта. Ложится в `who` журнала.
     #[serde(alias = "operator")]
     initiator: String,
-    /// Основание. Ложится в `reason` журнала.
     reason: String,
 }
 
@@ -196,7 +133,6 @@ impl Op {
     }
 }
 
-/// Проверенный запрос: всё, что нужно для проводки.
 struct Valid {
     amount: Cents,
     external_ref: String,
@@ -243,10 +179,6 @@ fn validate(req: MoneyReq) -> Result<Valid, Box<Response>> {
     })
 }
 
-/// Проводка с этим ref, если она уже есть: `(счёт, операция, сумма, seq)`.
-///
-/// Перебор журналов в памяти: на демо-объёмах это дешевле и надёжнее отдельного
-/// индекса, который пришлось бы держать в согласии с журналом.
 async fn find_ref(st: &AppState, external_ref: &str) -> Option<(UserId, Op, Cents, u64)> {
     let incident = format!("{REF_PREFIX}{external_ref}");
     let js = st.journals.lock().await;
@@ -298,8 +230,6 @@ async fn run(
     headers: HeaderMap,
     body: Result<Json<MoneyReq>, JsonRejection>,
 ) -> Response {
-    // Авторизация — первой, до разбора тела: без секрета не отвечаем ничего,
-    // что выдавало бы форму контракта.
     if let Err(r) = authorize(&st, &headers) {
         return *r;
     }
@@ -322,8 +252,6 @@ async fn run(
         return fail(StatusCode::BAD_REQUEST, "bad_account", None);
     }
 
-    // Реальный счёт заводится по требованию — первым пополнением (идемпотентно:
-    // маппинг найти-или-создать). Вывод счёта не заводит: выводить неоткуда.
     let found = match op {
         Op::Deposit => st
             .store
@@ -349,8 +277,6 @@ async fn run(
         }
     };
 
-    // Одна денежная операция за раз: «нет ли уже ref → провести → записать»
-    // обязано быть неделимым, иначе два одновременных повтора зачислят дважды.
     let _money = st.money_lock.lock().await;
 
     if let Some((u, prev_op, amount, seq)) = find_ref(&st, &v.external_ref).await {
@@ -381,14 +307,11 @@ async fn run(
             .await
             .map_err(IntoResponse::into_response),
         Op::Withdraw => {
-            // Вывод со счёта, которого ещё нет, — отказ, а не заведение счёта
-            // ради отказа: `with_account` завёл бы его стартовой суммой.
             if !st.broker.lock().await.has_account(user) {
                 return fail(StatusCode::NOT_FOUND, "account_not_opened", None);
             }
             let m = marks(&st).await;
             let mut free_seen: Option<Cents> = None;
-            // Замороженный счёт не выводит: проверка под локом счёта, внутри.
             let r = with_account_gated(&st, user, origin, Gate::NotFrozen, |b| {
                 b.withdraw(user, amount, &m).map_err(|e| match e {
                     broker::BrokerError::InsufficientFunds => {
@@ -421,8 +344,6 @@ async fn run(
 
     let seq = match find_ref(&st, &v.external_ref).await {
         Some((_, _, _, seq)) => seq,
-        // Проводка записана в хранилище, но журнал в памяти её не принял
-        // (счёт ушёл в карантин): номера нет, и выдумывать его нельзя.
         None => {
             return fail(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -464,8 +385,6 @@ async fn ok(
         "external_ref": v.external_ref,
         "amount_minor": v.amount,
         "currency": CURRENCY,
-        // Текущий остаток счёта. У повтора — тоже текущий, а не на момент
-        // первой проводки: между ними могли быть сделки.
         "balance_minor": b.balance(user),
         "free_margin_minor": b.free_margin(user, &m),
         "seq": seq,
@@ -474,24 +393,16 @@ async fn ok(
     (StatusCode::OK, Json(body)).into_response()
 }
 
-// ============================ Заморозка торговли ============================
-
 #[derive(Deserialize)]
 struct FreezeReq {
     frozen: bool,
     reason: String,
     #[serde(alias = "initiator")]
     operator: String,
-    /// Необязательная ссылка на дело на стороне сайта (AML-кейс, тикет).
     #[serde(default)]
     external_ref: Option<String>,
 }
 
-/// `POST /internal/sites/{tenant}/users/{sub}/{kind}/trading-freeze`.
-///
-/// Заморозка — запись журнала `TradingFreezeSet` с оператором и основанием:
-/// персистентна (лента переживает рестарт) и видна в журнале счёта. Повтор
-/// того же состояния новой записи не пишет (`changed: false`).
 async fn trading_freeze(
     State(st): State<AppState>,
     Path((tenant, sub, kind)): Path<(String, String, String)>,
@@ -556,9 +467,6 @@ async fn trading_freeze(
     }
     let lock = account_lock(&st, user).await;
     let _guard = lock.lock().await;
-    // Заморозить можно и счёт, который ещё не заводился: он заводится тем же
-    // путём, что первой операцией, — иначе заморозка до первого входа
-    // потерялась бы.
     if let Err(e) = ensure_account_opened(&st, user).await {
         return e.into_response();
     }
@@ -633,27 +541,16 @@ async fn trading_freeze(
         .into_response()
 }
 
-// ============================ Плечо счёта ===================================
-
 #[derive(Deserialize)]
 struct LeverageReq {
-    /// Знаменатель 1:N, целое `1..=1000`. Итог портфеля / override клиента,
-    /// посчитанный сайтом (Р-446).
     leverage: i64,
     reason: String,
     #[serde(alias = "initiator")]
     operator: String,
-    /// Необязательная ссылка на дело на стороне сайта (заявка, запись журнала).
     #[serde(default)]
     external_ref: Option<String>,
 }
 
-/// Назначить счёту плечо одной записью журнала `LeverageSet` (через обычный
-/// путь мутации: инварианты, сверка, слепок и лента одной транзакцией).
-///
-/// Отдаёт `(плечо до, сменилось ли)`. Плечо «до» — **действующее**: если
-/// счёту плечо не назначали, это плечо площадки. Счёт, которого ещё нет в
-/// памяти, заводится тем же путём, что первой операцией (TRM-46).
 pub(crate) async fn apply_leverage(
     st: &AppState,
     user: UserId,
@@ -669,14 +566,6 @@ pub(crate) async fn apply_leverage(
     .await
 }
 
-/// `POST /internal/sites/{tenant}/users/{sub}/{kind}/leverage`.
-///
-/// Плечо **для новых позиций** счёта. Открытые позиции держат своё плечо
-/// снимком. Повтор того же значения записи не пишет (`changed: false`).
-///
-/// Счёт, у которого нет даже маппинга личности (человек ни разу не входил в
-/// терминал этим родом счёта), — `404 account_not_opened`: заводить счёт ради
-/// плеча незачем, своё плечо он получит claim-ом `leverage` при первом входе.
 async fn set_leverage(
     State(st): State<AppState>,
     Path((tenant, sub, kind)): Path<(String, String, String)>,
@@ -777,27 +666,17 @@ async fn set_leverage(
         .into_response()
 }
 
-// ============================ Тариф счёта ===================================
-
 #[derive(Deserialize)]
 struct FeesReq {
-    /// Наценка на спред, целые базисные пункты `0..=MAX_FEE_BPS` (Standard).
     markup_bps: i64,
-    /// Комиссия от нотионала сделки, целые bps `0..=MAX_FEE_BPS` (Pro / ENC Prime).
     commission_bps: i64,
     reason: String,
     #[serde(alias = "initiator")]
     operator: String,
-    /// Необязательная ссылка на дело на стороне сайта (заявка, запись журнала).
     #[serde(default)]
     external_ref: Option<String>,
 }
 
-/// Назначить счёту тариф одной записью журнала `FeesSet` (обычный путь
-/// мутации: инварианты, сверка, слепок и лента одной транзакцией).
-///
-/// Отдаёт `(тариф до, сменился ли)`. Счёт, которого ещё нет в памяти,
-/// заводится тем же путём, что первой операцией (TRM-46).
 pub(crate) async fn apply_fees(
     st: &AppState,
     user: UserId,
@@ -813,15 +692,6 @@ pub(crate) async fn apply_fees(
     .await
 }
 
-/// `POST /internal/sites/{tenant}/users/{sub}/{kind}/fees`.
-///
-/// Тариф **для новых позиций** счёта (решение владельца 10.11): наценка на
-/// спред и комиссия за сделку. Открытые позиции закрываются по своему снимку.
-/// Повтор того же тарифа записи не пишет (`changed: false`) — маршрут
-/// идемпотентен по значению.
-///
-/// Счёт без маппинга личности — `404 account_not_opened`: тариф он получит
-/// claim-ами `markup_bps`/`commission_bps` при первом входе.
 async fn set_fees(
     State(st): State<AppState>,
     Path((tenant, sub, kind)): Path<(String, String, String)>,
@@ -934,13 +804,6 @@ async fn set_fees(
         .into_response()
 }
 
-// ============================ Список счетов =================================
-
-/// `GET /internal/sites/{tenant}/users/{sub}/accounts` — счета человека.
-///
-/// Только чтение: ничего не заводит. Счёт, которого нет, в списке отсутствует;
-/// счёт, у которого есть маппинг, но ещё нет ни одной записи (`opened: false`),
-/// — с `null` вместо денег, как в `/account` (денег у него нет, а не ноль).
 async fn accounts(
     State(st): State<AppState>,
     Path((tenant, sub)): Path<(String, String)>,
@@ -978,11 +841,8 @@ async fn accounts(
             "used_margin_minor": opened.then(|| b.used_margin(user)),
             "open_positions": b.positions(user).len(),
             "trading_frozen": frozen,
-            // Плечо, с которым откроется СЛЕДУЮЩАЯ позиция: своё плечо счёта
-            // или, если не назначали, плечо площадки.
             "leverage": b.account_leverage(user),
             "leverage_assigned": b.assigned_leverage(user).is_some(),
-            // Тариф для НОВЫХ позиций (10.11): нули — без тарифа.
             "markup_bps": b.account_fees(user).markup_bps,
             "commission_bps": b.account_fees(user).commission_bps,
         }));
@@ -1008,12 +868,6 @@ mod tests {
     const TENANT: &str = "apex-ru";
     const SUB: &str = "user-42";
 
-    /// Хранилище с настоящим маппингом личностей: `MemoryStore` его не ведёт,
-    /// а денежные ручки адресуют счёт именно парой `(tenant, sub)`.
-    ///
-    /// Номера раздаются с 1 — первый же человек получает `DEFAULT_USER`, и
-    /// позиции на его счёт открываются обычной ручкой `/deals` (SSO в тестах
-    /// выключен, и она работает с `DEFAULT_USER`).
     struct Linked {
         inner: persistence::MemoryStore,
         ids: StdMutex<Vec<(String, String, AccountKind)>>,
@@ -1118,8 +972,6 @@ mod tests {
     fn state_with(store: Arc<dyn Persistence>, token: Option<&str>) -> AppState {
         let mut st = build_state_with(store);
         st.internal_money_token = token.map(Arc::from);
-        // Стенд демо: торговля на реальном счёте открыта, события реальных
-        // счетов публикуются. Выключенные ворота проверяются отдельно.
         st.real_trading_enabled = true;
         st.bus_real_events = true;
         st
@@ -1202,13 +1054,10 @@ mod tests {
             .collect()
     }
 
-    // ---- Авторизация -------------------------------------------------------
-
     #[tokio::test]
     async fn without_the_env_secret_the_routes_do_not_exist() {
         let app = router(state(None));
         for op in ["deposit", "withdraw"] {
-            // Даже с «каким-то» токеном: секрета нет — ручек нет.
             let (s, _) = call(&app, &uri(op), Some(TOKEN), body(100, "tx-1")).await;
             assert_eq!(s, StatusCode::NOT_FOUND, "{op}");
             let (s, _) = call(&app, &uri(op), None, body(100, "tx-1")).await;
@@ -1228,12 +1077,10 @@ mod tests {
         assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
         assert_eq!(v["error"], "invalid_internal_token");
 
-        // Совпадающий префикс — не совпадение.
         let prefix = &TOKEN[..TOKEN.len() - 1];
         let (s, _) = call(&app, &uri("deposit"), Some(prefix), body(100, "tx-1")).await;
         assert_eq!(s, StatusCode::FORBIDDEN);
 
-        // Ни один отказ не провёл денег.
         assert!(!st.broker.lock().await.has_account(DEFAULT_USER));
 
         let (s, v) = call(&app, &uri("deposit"), Some(TOKEN), body(100, "tx-1")).await;
@@ -1259,8 +1106,6 @@ mod tests {
         );
     }
 
-    // ---- Пополнение и идемпотентность --------------------------------------
-
     #[tokio::test]
     async fn a_deposit_credits_once_per_external_ref() {
         let st = state(Some(TOKEN));
@@ -1268,13 +1113,12 @@ mod tests {
 
         let (s, first) = call(&app, &uri("deposit"), Some(TOKEN), body(25_000, "0xabc")).await;
         assert_eq!(s, StatusCode::OK, "{first}");
-        let start = 0; // реальный счёт открывается нулём
+        let start = 0;
         assert_eq!(first["balance_minor"], serde_json::json!(start + 25_000));
         assert_eq!(first["replayed"], false);
         let seq = first["seq"].as_u64().expect("seq");
         assert!(seq >= 2, "до пополнения в журнале заведение счёта: {first}");
 
-        // Повтор — тот же ответ по сути, второй проводки нет.
         let (s, again) = call(&app, &uri("deposit"), Some(TOKEN), body(25_000, "0xabc")).await;
         assert_eq!(s, StatusCode::OK, "{again}");
         assert_eq!(again["replayed"], true);
@@ -1286,14 +1130,11 @@ mod tests {
             "повтор не зачислил второй раз"
         );
 
-        // Тот же ref с другой суммой — конфликт, не повтор.
         let (s, v) = call(&app, &uri("deposit"), Some(TOKEN), body(99, "0xabc")).await;
         assert_eq!(s, StatusCode::CONFLICT, "{v}");
         assert_eq!(v["error"], "external_ref_conflict");
-        // И как вывод — тоже конфликт.
         let (s, _) = call(&app, &uri("withdraw"), Some(TOKEN), body(25_000, "0xabc")).await;
         assert_eq!(s, StatusCode::CONFLICT);
-        // И на чужой счёт.
         let (s, _) = call(
             &app,
             &format!("/internal/sites/{TENANT}/users/someone-else/real/deposit"),
@@ -1303,14 +1144,11 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::CONFLICT);
 
-        // Другой ref — новая проводка.
         let (s, v) = call(&app, &uri("deposit"), Some(TOKEN), body(1, "0xdef")).await;
         assert_eq!(s, StatusCode::OK, "{v}");
         assert_eq!(v["balance_minor"], serde_json::json!(start + 25_001));
     }
 
-    /// Идемпотентность держится на журнале, а не на памяти процесса: после
-    /// рестарта повтор того же крипто-депозита не зачисляется.
     #[tokio::test]
     async fn idempotency_survives_a_restart() {
         let store = linked();
@@ -1381,7 +1219,6 @@ mod tests {
             assert_eq!(s, StatusCode::BAD_REQUEST, "{b} → {v}");
             assert_eq!(v["error"], want, "{b} → {v}");
         }
-        // `operator` — допустимое имя поля вместо `initiator`.
         let (s, v) = call(
             &app,
             &uri("deposit"),
@@ -1391,8 +1228,6 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::OK, "{v}");
     }
-
-    // ---- Вывод -------------------------------------------------------------
 
     #[tokio::test]
     async fn a_withdrawal_from_an_account_that_does_not_exist_is_refused() {
@@ -1410,15 +1245,13 @@ mod tests {
     #[tokio::test]
     async fn a_withdrawal_beyond_free_margin_is_refused_with_the_numbers() {
         let st = state(Some(TOKEN));
-        price(&st, 1, 5_000_000).await; // BTC $50 000.00, pd=2 qd=5
+        price(&st, 1, 5_000_000).await;
         let app = router(st.clone());
 
-        // Заводим счёт пополнением — тем же путём, каким его заведёт сайт.
         let (s, _) = call(&app, &uri("deposit"), Some(TOKEN), body(10_000_000, "seed")).await;
         assert_eq!(s, StatusCode::OK);
         let balance = st.broker.lock().await.balance(DEFAULT_USER).unwrap();
 
-        // Позиция на половину остатка (плечо 1: маржа = нотионал).
         let qty = (balance / 2) * 100_000 / 5_000_000;
         let open = Request::builder()
             .method("POST")
@@ -1460,7 +1293,6 @@ mod tests {
             "отказ не тронул остаток"
         );
 
-        // Отказанный ref не «сгорел»: тот же ref с допустимой суммой проходит.
         let ok_amount = i64::try_from(free).unwrap();
         let (s, v) = call(
             &app,
@@ -1473,8 +1305,6 @@ mod tests {
         assert_eq!(v["balance_minor"], serde_json::json!(balance - free));
         assert_eq!(v["replayed"], false);
     }
-
-    // ---- Шина --------------------------------------------------------------
 
     #[tokio::test]
     async fn deposit_and_withdrawal_reach_the_bus() {
@@ -1501,28 +1331,17 @@ mod tests {
         assert_eq!(last["data"]["reason"], "withdrawal", "{last}");
         assert_eq!(last["data"]["balanceCents"], wd["balance_minor"]);
 
-        // Повтор события не порождает.
         let before = balance_changes(&queued(&st).await).len();
         let (s, _) = call(&app, &uri("deposit"), Some(TOKEN), body(10_000, "tx-bus")).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(balance_changes(&queued(&st).await).len(), before);
     }
 
-    // ---- Плечо: колл и стоп-аут вживую ------------------------------------
-
-    /// Сценарий демо целиком: деньги пришли пополнением, позиция при плече 20
-    /// почти на весь остаток, рынок против на 1 % — предупреждение, ещё на 2 %
-    /// — принудительное закрытие. Числа выведены руками из входных данных.
-    ///
-    /// При полном использовании остатка под маржу и плече 20 движение против
-    /// на `x %` съедает `20·x %` залога: колл (100 %) — почти сразу, стоп-аут
-    /// (50 %) — на ~2,5 %. Здесь маржа 95 % остатка: на −1 % уровень 85 %,
-    /// на −3 % — 45 %.
     #[tokio::test]
     async fn leverage_20_margin_call_then_stop_out() {
         let st = state(Some(TOKEN));
         let app = router(st.clone());
-        const PX: i64 = 5_000_000; // BTC $50 000.00, pd=2 qd=5
+        const PX: i64 = 5_000_000;
         price(&st, 1, PX).await;
 
         let (s, v) = call(
@@ -1535,7 +1354,6 @@ mod tests {
         assert_eq!(s, StatusCode::OK, "{v}");
         let balance = st.broker.lock().await.balance(DEFAULT_USER).unwrap();
 
-        // Нотионал = 19 остатков: при плече 20 маржа — 95 % остатка.
         let qty = i64::try_from(balance * 19 * 100_000 / i128::from(PX)).unwrap();
         let deal = |q: i64| {
             Request::builder()
@@ -1549,13 +1367,11 @@ mod tests {
                 .unwrap()
         };
 
-        // При плече 1 такую позицию не пускают — плечо действительно решает.
         assert_eq!(
             app.clone().oneshot(deal(qty)).await.unwrap().status(),
             StatusCode::PAYMENT_REQUIRED
         );
 
-        // Плечо 20 и пороги, как на стенде. Счёт переносим как есть.
         {
             let mut b = st.broker.lock().await;
             let snap = b.snapshot(DEFAULT_USER);
@@ -1583,7 +1399,6 @@ mod tests {
             assert!(b.margin_level_pct(DEFAULT_USER, &m).unwrap() > 100);
         }
 
-        // −1 %: уровень ~85 % — предупреждение, позиция жива.
         price(&st, 1, PX / 100 * 99).await;
         monitor_tick(&st).await;
         {
@@ -1604,7 +1419,6 @@ mod tests {
             .collect();
         assert_eq!(calls.len(), 1, "одно предупреждение: {all:?}");
 
-        // −3 %: уровень ~45 % < 50 — принудительное закрытие.
         price(&st, 1, PX / 100 * 97).await;
         monitor_tick(&st).await;
         let b = st.broker.lock().await;
@@ -1628,10 +1442,6 @@ mod tests {
         );
     }
 
-    // ---- Гонка повторов ----------------------------------------------------
-
-    /// Одновременные запросы с одним ref (сайт повторил по таймауту, пока
-    /// первый ещё шёл) — зачисление ровно одно.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn parallel_repeats_of_one_ref_credit_once() {
         let st = state(Some(TOKEN));
@@ -1655,14 +1465,12 @@ mod tests {
             }
         }
         assert_eq!(fresh, 1, "проводка ровно одна");
-        let start = 0; // реальный счёт открывается нулём
+        let start = 0;
         assert_eq!(
             st.broker.lock().await.balance(DEFAULT_USER),
             Some(start + 123_456)
         );
     }
-
-    // ---- Заморозка ---------------------------------------------------------
 
     fn freeze_body(frozen: bool) -> serde_json::Value {
         serde_json::json!({
@@ -1724,9 +1532,6 @@ mod tests {
         assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
     }
 
-    /// Замороженный счёт: открыть, поставить ордер, вывести, сбросить —
-    /// нельзя; закрыть, пополнить — можно; SL срабатывает. Разморозка
-    /// возвращает торговлю.
     #[tokio::test]
     async fn a_frozen_account_can_close_and_deposit_but_not_open_or_withdraw() {
         let st = state(Some(TOKEN));
@@ -1741,7 +1546,6 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::OK);
 
-        // Две позиции до заморозки: одну закроем руками, вторую закроет SL.
         let (s, v) = send(&app, "POST", "/deals", deal(None)).await;
         assert_eq!(s, StatusCode::OK, "{v}");
         let (s, v) = send(&app, "POST", "/deals", deal(Some(4_900_000))).await;
@@ -1753,7 +1557,6 @@ mod tests {
         assert_eq!(v["frozen"], true);
         let frozen_seq = v["seq"].clone();
 
-        // Повтор — без новой записи.
         let (s, v) = call(&app, &uri("trading-freeze"), Some(TOKEN), freeze_body(true)).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v["changed"], false);
@@ -1777,7 +1580,6 @@ mod tests {
         let (s, v) = send(&app, "POST", "/deals/1/close", serde_json::json!({})).await;
         assert_eq!(s, StatusCode::OK, "закрытие разрешено: {v}");
 
-        // SL работает как обычно.
         price(&st, 1, 4_800_000).await;
         monitor_tick(&st).await;
         assert!(st.broker.lock().await.positions(DEFAULT_USER).is_empty());
@@ -1785,7 +1587,6 @@ mod tests {
         let (_, acc) = send(&app, "GET", "/account", serde_json::Value::Null).await;
         assert_eq!(acc["trading_frozen"], true, "{acc}");
 
-        // Журнал: запись с оператором, основанием и делом.
         {
             let js = st.journals.lock().await;
             let e = js[&DEFAULT_USER]
@@ -1822,7 +1623,6 @@ mod tests {
         );
     }
 
-    /// Заморозка живёт в журнале и переживает рестарт шлюза.
     #[tokio::test]
     async fn a_freeze_survives_a_restart() {
         let store = linked();
@@ -1844,8 +1644,6 @@ mod tests {
         assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
         assert_eq!(v["error"], "account_frozen");
     }
-
-    // ---- Демо и реальный счёт ----------------------------------------------
 
     async fn get(app: &Router, uri: &str, token: Option<&str>) -> (StatusCode, serde_json::Value) {
         let mut req = Request::builder().method("GET").uri(uri);
@@ -1869,15 +1667,12 @@ mod tests {
         format!("/internal/sites/{TENANT}/users/{SUB}/accounts")
     }
 
-    /// Пополнение заводит РЕАЛЬНЫЙ счёт с нуля; демо-счёт человека — другой
-    /// счёт со своим номером, своим `accountId` и своими деньгами.
     #[tokio::test]
     async fn money_lands_on_the_real_account_only() {
         let store = linked();
         let st = state_with(store.clone(), Some(TOKEN));
         let app = router(st.clone());
 
-        // До первого пополнения счетов нет — список пуст, ничего не заведено.
         let (s, v) = get(&app, &accounts_uri(), Some(TOKEN)).await;
         assert_eq!(s, StatusCode::OK, "{v}");
         assert_eq!(v["accounts"], serde_json::json!([]));
@@ -1899,7 +1694,6 @@ mod tests {
             AccountKind::Real
         );
 
-        // Демо-счёт того же человека — отдельный номер; деньги на нём не те.
         let demo = store
             .resolve_account(TENANT, SUB, AccountKind::Demo)
             .await
@@ -1920,7 +1714,6 @@ mod tests {
         assert!(by("demo")["balance_minor"].is_null(), "{v}");
         assert_ne!(by("demo")["account_id"], by("real")["account_id"]);
 
-        // У демо-счёта денежных ручек нет вовсе.
         for op in ["deposit", "withdraw"] {
             let (s, _) = call(
                 &app,
@@ -1931,13 +1724,10 @@ mod tests {
             .await;
             assert_eq!(s, StatusCode::NOT_FOUND, "{op} на демо");
         }
-        // Список — под тем же секретом.
         let (s, _) = get(&app, &accounts_uri(), None).await;
         assert_eq!(s, StatusCode::UNAUTHORIZED);
     }
 
-    /// События несут род и идентификатор счёта; у реального — свой ключ
-    /// `account.opened`, иначе дедуп потребителя склеил бы его с демо.
     #[tokio::test]
     async fn bus_events_name_the_account() {
         let st = state(Some(TOKEN));
@@ -1964,8 +1754,6 @@ mod tests {
         assert_eq!(changed.last().unwrap()["data"]["accountKind"], "real");
     }
 
-    /// Пока потребитель не различает род счёта, события реального счёта не
-    /// собираются вовсе: иначе они легли бы в строку демо-счёта.
     #[tokio::test]
     async fn real_account_events_stay_home_until_enabled() {
         let mut st = state(Some(TOKEN));
@@ -1976,7 +1764,6 @@ mod tests {
         assert!(queued(&st).await.is_empty(), "реальный счёт молчит на шине");
     }
 
-    /// Ворота реальной торговли закрыты, пока площадка их явно не открыла.
     #[tokio::test]
     async fn real_trading_is_closed_unless_enabled() {
         let mut st = state(Some(TOKEN));
@@ -1996,7 +1783,6 @@ mod tests {
         assert_eq!(v["error"], "identity_not_verified");
     }
 
-    /// `/account` называет род счёта — по нему фронт рисует бейдж.
     #[tokio::test]
     async fn the_account_names_its_kind() {
         let st = state(Some(TOKEN));
@@ -2029,8 +1815,6 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::NOT_FOUND);
     }
-
-    // ---- Плечо счёта (Р-446) -----------------------------------------------
 
     fn lev_uri(kind: &str) -> String {
         format!("/internal/sites/{TENANT}/users/{SUB}/{kind}/leverage")
@@ -2071,7 +1855,6 @@ mod tests {
         let (s, _) = call(&app, &lev_uri("real"), Some("nope"), lev_body(50.into())).await;
         assert_eq!(s, StatusCode::FORBIDDEN);
 
-        // Счёт заводим пополнением — дальше проверяем только тело.
         let (s, _) = call(&app, &uri("deposit"), Some(TOKEN), body(1, "seed-l")).await;
         assert_eq!(s, StatusCode::OK);
 
@@ -2105,19 +1888,13 @@ mod tests {
         let (s, _) = call(&app, &lev_uri("gold"), Some(TOKEN), lev_body(20.into())).await;
         assert_eq!(s, StatusCode::NOT_FOUND, "неизвестный род счёта");
 
-        // Ни один отказ ничего не записал.
         assert_eq!(st.broker.lock().await.assigned_leverage(DEFAULT_USER), None);
 
-        // Человек, ни разу не входивший демо-счётом: счёта нет, и ради плеча
-        // он не заводится — плечо приедет claim-ом при первом входе.
         let (s, v) = call(&app, &lev_uri("demo"), Some(TOKEN), lev_body(20.into())).await;
         assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
         assert_eq!(v["error"], "account_not_opened");
     }
 
-    /// Плечо из маршрута: журналируется с оператором, достаётся только новым
-    /// позициям, повтор не пишет запись, рестарт переживает (свёртка ленты
-    /// сходится со слепком), видно в `/account` и в списке счетов.
     #[tokio::test]
     async fn leverage_reaches_new_positions_only_and_survives_a_restart() {
         let store = linked();
@@ -2177,7 +1954,6 @@ mod tests {
             assert_eq!(op.incident(), "ext:adm-journal-42");
         }
 
-        // Рестарт: лента и слепок из того же хранилища.
         let st2 = state_with(store, Some(TOKEN));
         restore_state(&st2).await.unwrap();
         assert!(st2.quarantined.lock().await.is_empty(), "сверка сошлась");
@@ -2196,8 +1972,6 @@ mod tests {
         assert_eq!(real["leverage_assigned"], true);
     }
 
-    /// Дыра заморозки: ордер, поставленный ДО заморозки, при срабатывании не
-    /// открывает позицию — монитор снимает его записью с причиной.
     #[tokio::test]
     async fn a_pending_order_placed_before_a_freeze_is_rejected_when_it_fires() {
         let st = state(Some(TOKEN));
@@ -2244,8 +2018,6 @@ mod tests {
         assert!(st.quarantined.lock().await.is_empty(), "сверка сошлась");
     }
 
-    /// Незамороженный счёт — тот же ордер исполняется (контроль: отказ выше
-    /// не случайность триггера).
     #[tokio::test]
     async fn the_same_pending_order_fires_on_an_unfrozen_account() {
         let st = state(Some(TOKEN));
@@ -2267,8 +2039,6 @@ mod tests {
         assert_eq!(st.broker.lock().await.positions(DEFAULT_USER).len(), 1);
     }
 
-    /// Claim `leverage` токена входа: применяется записью журнала, повтор
-    /// молчит, вне диапазона — отказ входа, без claim-а — ничего.
     #[tokio::test]
     async fn the_sso_leverage_claim_syncs_the_account() {
         let st = state(Some(TOKEN));
@@ -2312,8 +2082,6 @@ mod tests {
             serde_json::from_str(r#"{"sub":"u","tenant":"t","jti":"j","leverage":20}"#).unwrap();
         assert_eq!(c.leverage, Some(20));
     }
-
-    // ---- Тариф счёта: наценка и комиссия (решение 10.11) --------------------
 
     fn fees_uri(kind: &str) -> String {
         format!("/internal/sites/{TENANT}/users/{SUB}/{kind}/fees")
@@ -2434,10 +2202,6 @@ mod tests {
         assert_eq!(v["error"], "account_not_opened");
     }
 
-    /// Тариф из маршрута: журналируется с оператором, повтор не пишет, виден
-    /// в `/account` и в списке счетов; новая позиция исполняется с наценкой
-    /// и платит комиссию на открытии и закрытии; старая — по своему снимку;
-    /// событие сделки на шине несёт доход площадки; рестарт сходится.
     #[tokio::test]
     async fn fees_reach_new_trades_and_the_bus_and_survive_a_restart() {
         let store = linked();
@@ -2457,7 +2221,6 @@ mod tests {
         let fi = feed_by_id(&st, 1).unwrap();
         let (pd, qd) = (fi.price_decimals, fi.qty_decimals);
 
-        // Позиция ДО тарифа — без наценки и комиссии.
         let (s, v) = send(&app, "POST", "/deals", deal(None)).await;
         assert_eq!(s, StatusCode::OK, "{v}");
         let old = v["id"].as_u64().unwrap();
@@ -2517,8 +2280,6 @@ mod tests {
             assert_eq!(e.canon(), "fees_set markup_bps=10 commission_bps=10");
         }
 
-        // Закрытие обеих: старая — без тарифа (снимок), новая — с наценкой
-        // и комиссией закрытия.
         let (s, _) = send(
             &app,
             "POST",
@@ -2540,7 +2301,6 @@ mod tests {
 
         let (_, closed) = send(&app, "GET", "/deals/closed", serde_json::Value::Null).await;
         let closed = closed.as_array().unwrap().clone();
-        // Ответ — от новых к старым.
         assert_eq!(closed[0]["exit"], exec_out, "продажа дешевле рынка");
         assert_eq!(
             closed[0]["commission"],
@@ -2581,7 +2341,6 @@ mod tests {
         assert_eq!(t["currency"], "USD");
         assert_eq!(t["currencyMinorUnits"], 2);
 
-        // Рестарт: лента и слепок из того же хранилища — сверка сходится.
         let st2 = state_with(store, Some(TOKEN));
         restore_state(&st2).await.unwrap();
         assert!(st2.quarantined.lock().await.is_empty(), "сверка сошлась");
@@ -2605,8 +2364,6 @@ mod tests {
         assert_eq!(real["commission_bps"], 10, "{real}");
     }
 
-    /// Комиссия открытия двигает остаток — событие баланса уходит с причиной
-    /// `trade`, а не без причины.
     #[tokio::test]
     async fn an_opening_commission_is_a_trade_balance_change() {
         let st = state(Some(TOKEN));
@@ -2636,8 +2393,6 @@ mod tests {
         assert_eq!(last["data"]["reason"], "trade", "{last}");
     }
 
-    /// Claims тарифа токена входа: применяются записью журнала, повтор молчит,
-    /// вне диапазона — отказ входа, один claim не трогает другую ставку.
     #[tokio::test]
     async fn the_sso_fee_claims_sync_the_account() {
         let st = state(Some(TOKEN));
@@ -2694,8 +2449,6 @@ mod tests {
         assert_eq!((c.markup_bps, c.commission_bps), (Some(12), Some(3)));
     }
 
-    /// Монитор: отложенный ордер исполняется с наценкой и комиссией тарифа,
-    /// стоп-лосс закрывает с комиссией — записями системы, сверка сходится.
     #[tokio::test]
     async fn the_monitor_charges_fees_on_pending_fill_and_stop_loss() {
         let st = state(Some(TOKEN));
@@ -2750,8 +2503,6 @@ mod tests {
         assert!(st.quarantined.lock().await.is_empty(), "сверка сошлась");
     }
 
-    // ---- Минимум стопов площадки (settings/stops) -------------------------
-
     fn stops_uri() -> String {
         format!("/internal/sites/{TENANT}/settings/stops")
     }
@@ -2799,7 +2550,6 @@ mod tests {
         let (s, _) = put_stops(&app, Some("wrong"), serde_json::json!({"min_stop_bps": 50})).await;
         assert_eq!(s, StatusCode::FORBIDDEN);
 
-        // До первой записи — умолчание окружения (в тестах MIN_STOP_BPS не задан).
         let (s, v) = get(&app, &stops_uri(), Some(TOKEN)).await;
         assert_eq!(
             (s, v),
@@ -2832,7 +2582,6 @@ mod tests {
         }
         let (_, v) = get(&app, &stops_uri(), Some(TOKEN)).await;
         assert_eq!(v, serde_json::json!({"min_stop_bps": 50}));
-        // Границы диапазона допустимы.
         for edge in [0, 10_000] {
             let (s, v) =
                 put_stops(&app, Some(TOKEN), serde_json::json!({"min_stop_bps": edge})).await;
@@ -2841,16 +2590,13 @@ mod tests {
                 (StatusCode::OK, serde_json::json!({"min_stop_bps": edge}))
             );
         }
-        // Чужая площадка своего значения не получила.
         assert_eq!(st.stops.for_tenant(Some("other-site")).await, 0);
-        // Настройка — не событие счёта: ни одной записи журнала.
         assert!(
             st.journals.lock().await.is_empty(),
             "журналы счетов не тронуты"
         );
     }
 
-    /// Значение площадки переживает рестарт: оно в хранилище, а не только в памяти.
     #[tokio::test]
     async fn the_stops_setting_survives_a_restart() {
         let store = linked();
@@ -2865,15 +2611,11 @@ mod tests {
         assert_eq!(v, serde_json::json!({"min_stop_bps": 75}));
     }
 
-    /// Граница на сервере: ближе минимума — `422` с причиной и числами, на
-    /// рыночном и на лимитном ордере, для покупки и для продажи.
     #[tokio::test]
     async fn stops_closer_than_the_minimum_are_refused_by_the_gateway() {
         let mut st = state(Some(TOKEN));
-        // Без площадки (SSO в тестах выключен) действует умолчание.
         st.stops = Arc::new(super::super::stops::StopSettings::new(100));
         let app = router(st.clone());
-        // ask = bid = 4 800 000 → 1 % = 48 000.
         price(&st, 1, 4_800_000).await;
 
         let body = |side: &str, sl: Option<i64>, tp: Option<i64>| serde_json::json!({"instrument": 1, "side": side, "qty": 1000, "sl": sl, "tp": tp});
@@ -2899,7 +2641,6 @@ mod tests {
             "ни одна не открыта"
         );
 
-        // Ровно на минимуме — можно; без уровней — можно.
         let (s, v) = send(
             &app,
             "POST",
@@ -2911,7 +2652,6 @@ mod tests {
         let (s, _) = send(&app, "POST", "/deals", body("buy", None, None)).await;
         assert_eq!(s, StatusCode::OK);
 
-        // Лимитный: от цены ордера (4 000 000 → 40 000), а не от рынка.
         let limit = |sl: i64, tp: i64| serde_json::json!({"instrument": 1, "side": "buy", "qty": 1000, "price": 4_000_000, "sl": sl, "tp": tp});
         let (s, v) = send(&app, "POST", "/pending", limit(3_970_000, 4_040_000)).await;
         assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
@@ -2919,7 +2659,6 @@ mod tests {
         let (s, v) = send(&app, "POST", "/pending", limit(3_960_000, 4_040_000)).await;
         assert_eq!(s, StatusCode::OK, "{v}");
 
-        // Ноль — ограничения нет.
         st.stops = Arc::new(super::super::stops::StopSettings::new(0));
         let app = router(st.clone());
         let (s, _) = send(
@@ -2932,7 +2671,6 @@ mod tests {
         assert_eq!(s, StatusCode::OK);
     }
 
-    /// `/account` отдаёт минимум стопов — по нему тикет подставляет уровни.
     #[tokio::test]
     async fn the_account_tells_the_ticket_the_minimum() {
         let mut st = state(Some(TOKEN));

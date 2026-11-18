@@ -1,33 +1,4 @@
 'use strict';
-/* ============================================================================
- * levels.js — изменение SL/TP у открытой позиции и отложенного ордера (17.11).
- *
- *   Levels.open({
- *     kind: 'deal' | 'pending',
- *     row,                       // строка /deals или /pending: id, side, symbol, qty, sl, tp, price?, price_decimals, qty_decimals
- *     field: 'sl' | 'tp',        // какое поле сфокусировать
- *     ref: () => number | null,  // цена отсчёта СЕЙЧАС: у позиции — цена закрытия (bid покупки, ask продажи), у ордера — его цена
- *     bps: () => number,         // минимум площадки (`/account.min_stop_bps`), 0 — нет
- *     submit: (body) => Promise<{ ok, status, data }>,   // PUT …/levels
- *     rejection: (status, code) => string,               // текст отказа (i18n.js)
- *     t: (key, en, vars?) => string,                     // перевод виджета
- *     onDone: () => void,                                // после успеха: обновить таблицу и линии графика
- *   });
- *
- * Граница — на шлюзе (`PUT /deals/{id}/levels`, `PUT /pending/{id}/levels`):
- * ближе минимума — `422 *_too_close`, уровень по ту сторону цены —
- * `409 *_already_reached`. Здесь — та же арифметика (stops.js), чтобы окно
- * подсвечивало слишком близкий уровень и подставляло допустимый минимум, а
- * не отправляло заведомо отвергнутое.
- *
- * Проверяется только ИЗМЕНЁННЫЙ уровень — так же, как на шлюзе: оставленный
- * как был человек не ставит заново. И отправляется только изменённое поле:
- * поле, которого нет в теле, шлюз оставляет как есть.
- *
- * Чистые функции (`evaluate`, `body`, `parse`) вынесены наружу ради тестов:
- * app.js в Node не поднимается, а арифметику, которую нельзя проверить, мы не
- * держим.
- * ========================================================================== */
 (function () {
   const CSS = `
 .lvl-back { position: fixed; inset: 0; z-index: 80; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; }
@@ -73,8 +44,6 @@
   }
 
   /**
-   * Поле ввода → сырые единицы цены. Пусто — уровня нет (`null`); мусор или
-   * не положительное — `NaN` (ошибка ввода, а не «снять»).
    * @param {string} text
    * @param {number} pd
    * @returns {number|null}
@@ -88,8 +57,10 @@
   }
 
   /**
-   * Сработал бы уровень уже сейчас — та же формула, что у движка стопов.
-   * @param {'buy'|'sell'} side @param {'sl'|'tp'} k @param {number} level @param {number} ref
+   * @param {'buy'|'sell'} side
+   * @param {'sl'|'tp'} k
+   * @param {number} level
+   * @param {number} ref
    */
   function reached(side, k, level, ref) {
     const buy = side === 'buy';
@@ -98,8 +69,6 @@
   }
 
   /**
-   * Что не так с новыми уровнями. Проверяется только изменённый уровень.
-   *
    * @param {{ side: 'buy'|'sell', ref: number|null, cur: {sl: number|null, tp: number|null}, next: {sl: number|null, tp: number|null}, bps: number }} a
    * @returns {{ sl: null | { code: string, limit?: number }, tp: null | { code: string, limit?: number } }}
    */
@@ -118,9 +87,9 @@
   }
 
   /**
-   * Тело запроса: только изменённые поля. `null` — снять.
-   * @param {{sl: number|null, tp: number|null}} cur @param {{sl: number|null, tp: number|null}} next
-   * @returns {Record<string, number|null> | null} `null` — менять нечего
+   * @param {{sl: number|null, tp: number|null}} cur
+   * @param {{sl: number|null, tp: number|null}} next
+   * @returns {Record<string, number|null> | null}
    */
   function body(cur, next) {
     /** @type {Record<string, number|null>} */
@@ -132,7 +101,6 @@
 
   let current = null;
 
-  /** Закрыть открытое окно, если есть. */
   function close() {
     if (!current) return;
     current.destroy();
@@ -234,7 +202,7 @@
         let res;
         try { res = await o.submit(b); } catch { res = { ok: false, status: 0, data: null }; }
         busy = false;
-        if (!current || current.el !== back) return; // окно уже закрыли
+        if (!current || current.el !== back) return;
         if (res && res.ok) { close(); if (o.onDone) o.onDone(res.data); return; }
         const d = res ? res.data : null;
         const code = d && d.error;
@@ -248,7 +216,6 @@
       else if (e.key === 'Enter' && !save.disabled && /** @type {HTMLElement} */ (e.target).tagName === 'INPUT') save.click();
     };
     document.addEventListener('keydown', onKey);
-    // Цена отсчёта живёт: подсветка и подсказка следуют за рынком.
     const timer = setInterval(render, 1000);
     current = {
       el: back,
