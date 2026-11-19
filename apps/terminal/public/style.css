@@ -91,7 +91,7 @@ button { font-family: inherit; }
 /* Состояние фида — короткая метка, без рамки: цвет слова и есть сигнал. */
 .feed { font-size: 10px; font-weight: 600; letter-spacing: .5px; color: var(--muted); padding: 0 2px; }
 .feed.up { color: var(--up); }
-.metrics { display: flex; flex: 1; justify-content: flex-start; gap: 4px 24px; padding: 0 4px; min-width: 0; overflow: hidden; }
+.metrics { display: flex; flex: 1; flex-wrap: wrap; justify-content: flex-start; gap: 4px clamp(14px, 1.5vw, 24px); padding: 4px; min-width: 0; overflow: hidden; }
 .metric { display: flex; flex-direction: column; gap: 2px; white-space: nowrap; }
 .metric__l { color: var(--muted); font-size: 10.5px; }
 .metric__v { font-weight: 500; font-size: 12.5px; font-variant-numeric: tabular-nums; }
@@ -420,7 +420,7 @@ body .drawbtn.active { background: var(--field-hover); color: var(--brand); }
   .top { flex-wrap: wrap; gap: 8px; padding: 6px 10px; }
   .logo__name, .feed { display: none; }
   .kind-badge { font-size: 11px; padding: 3px 8px; }
-  .metrics { order: 10; flex: 1 0 100%; overflow-x: auto; gap: 14px; padding: 2px 0 0; scrollbar-width: none; }
+  .metrics { order: 10; flex: 1 0 100%; flex-wrap: nowrap; overflow-x: auto; gap: 14px; padding: 2px 0 0; scrollbar-width: none; }
   .metric__v { font-size: 12.5px; }
   .top__right { gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
   .btn-top { padding: 0 7px; }
