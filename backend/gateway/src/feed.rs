@@ -13,8 +13,38 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::AppState;
 
-const REST: &str = "https://api.binance.com";
-const WS: &str = "wss://stream.binance.com:9443";
+const DEFAULT_REST: &str = "https://api.binance.com";
+const DEFAULT_WS: &str = "wss://stream.binance.com:9443";
+
+fn base_from(value: Option<&str>, default: &str) -> String {
+    match value.map(str::trim) {
+        Some(v) if !v.is_empty() => v.trim_end_matches('/').to_string(),
+        _ => default.to_string(),
+    }
+}
+
+pub fn rest_base() -> &'static str {
+    static BASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BASE.get_or_init(|| {
+        base_from(
+            std::env::var("BINANCE_API_URL").ok().as_deref(),
+            DEFAULT_REST,
+        )
+    })
+}
+
+pub fn ws_base() -> &'static str {
+    static BASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BASE.get_or_init(|| base_from(std::env::var("BINANCE_WS_URL").ok().as_deref(), DEFAULT_WS))
+}
+
+pub fn masked(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    match rest.split_once('/') {
+        Some((host, _)) => format!("{scheme}://{host}/…"),
+        None => url.to_string(),
+    }
+}
 
 /// Инструмент фида (крипто-пара Binance).
 #[derive(Clone)]
@@ -146,7 +176,10 @@ pub struct Depth {
 
 /// Запросить стакан (order book) с Binance REST.
 pub async fn fetch_depth(binance: &str, limit: usize, pd: u8, qd: u8) -> Result<Depth, String> {
-    let url = format!("{REST}/api/v3/depth?symbol={binance}&limit={limit}");
+    let url = format!(
+        "{}/api/v3/depth?symbol={binance}&limit={limit}",
+        rest_base()
+    );
     let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("binance {}", resp.status()));
@@ -195,7 +228,10 @@ fn depth_from_json(v: &Value, pd: u8, qd: u8) -> (Depth, usize) {
 
 /// Изменение цены за текущую свечу таймфрейма (в процентах). Для статистики актива.
 pub async fn fetch_change(binance: &str, interval: &str) -> Result<f64, String> {
-    let url = format!("{REST}/api/v3/klines?symbol={binance}&interval={interval}&limit=1");
+    let url = format!(
+        "{}/api/v3/klines?symbol={binance}&interval={interval}&limit=1",
+        rest_base()
+    );
     let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("binance {}", resp.status()));
@@ -231,7 +267,10 @@ pub async fn fetch_klines(
     pd: u8,
     qd: u8,
 ) -> Result<Vec<Kline>, String> {
-    let url = format!("{REST}/api/v3/klines?symbol={binance}&interval={interval}&limit={limit}");
+    let url = format!(
+        "{}/api/v3/klines?symbol={binance}&interval={interval}&limit={limit}",
+        rest_base()
+    );
     let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("binance {}", resp.status()));
@@ -288,7 +327,12 @@ pub fn spawn(state: AppState) {
                 [format!("{s}@ticker"), format!("{s}@aggTrade")]
             })
             .collect();
-        let url = format!("{WS}/stream?streams={}", streams.join("/"));
+        let url = format!("{}/stream?streams={}", ws_base(), streams.join("/"));
+        println!(
+            "[feed] источник рыночных данных: REST {}, WS {}",
+            masked(rest_base()),
+            masked(ws_base())
+        );
 
         loop {
             match connect_async(&url).await {
@@ -422,6 +466,29 @@ async fn handle_msg(state: &AppState, index: &HashMap<String, (u32, u8, u8)>, te
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn source_url_defaults_to_binance() {
+        assert_eq!(base_from(None, DEFAULT_REST), "https://api.binance.com");
+        assert_eq!(
+            base_from(Some("  "), DEFAULT_WS),
+            "wss://stream.binance.com:9443"
+        );
+    }
+
+    #[test]
+    fn source_url_keeps_path_and_drops_trailing_slash() {
+        assert_eq!(
+            base_from(Some("https://md.example/abc123/"), DEFAULT_REST),
+            "https://md.example/abc123"
+        );
+    }
+
+    #[test]
+    fn masked_url_hides_path_key() {
+        assert_eq!(masked("wss://md.example/abc123"), "wss://md.example/…");
+        assert_eq!(masked("https://api.binance.com"), "https://api.binance.com");
+    }
 
     // ---- to_raw: источник всех остальных нулей ----------------------------
 
