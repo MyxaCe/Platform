@@ -72,7 +72,7 @@ test('флаг шлюза выключен (или поля нет): SL/TP — �
     const term = await open(t, stubWorld({ edit }));
     assert.equal(await lvlButtons(term.page), 0, `sltp_edit=${edit}`);
     const cell = await term.page.evaluate(() => document.querySelector('.pane[data-pane="deals"] .deal-row .c-sl').textContent);
-    assert.equal(cell, '64200.00', 'уровень показан как был');
+    assert.equal(cell.replace(/\s/g, ' '), '64 200,00', 'уровень показан как был, в формате ru-RU');
     assert.deepEqual(term.errors, []);
   }
 });
@@ -93,7 +93,7 @@ test('флаг включён: окно подставляет минимум, �
   }));
   assert.deepEqual([opened.sl, opened.tp, opened.focus], ['64200.00', '', 'lvlSl']);
   // Покупку закрывают по bid 65 000.00; 0.5 % = 325.00.
-  assert.match(opened.ref, /bid.*65,000\.00.*0\.50%.*325\.00/);
+  assert.match(opened.ref, /bid.*65\s000,00.*0,50%.*325,00/);
 
   // Ближе минимума: подсветка, сохранить нельзя, назван ближайший уровень.
   const sl = await page.$('#lvlSl');
@@ -107,7 +107,7 @@ test('флаг включён: окно подставляет минимум, �
   }));
   assert.ok(bad.bad, 'поле подсвечено');
   assert.ok(bad.save, 'сохранить нельзя');
-  assert.match(bad.msg, /64,675\.00/, `ближайший допустимый: «${bad.msg}»`);
+  assert.match(bad.msg, /64\s675,00/, `ближайший допустимый: «${bad.msg}»`);
 
   // «Мин.» — уровень на минимуме с запасом на движение рынка (как тикет).
   await page.click('.lvl-f [data-act="min"][data-k="sl"]');
@@ -126,7 +126,7 @@ test('флаг включён: окно подставляет минимум, �
     lines: /** @type {any[]} */ (priceLines).map((l) => l.options()).filter((o) => o.title === 'SL').map((o) => o.price),
   }));
   assert.equal(after.open, false, 'окно закрылось');
-  assert.equal(after.cell, '64642.50', 'таблица перерисована');
+  assert.equal(after.cell.replace(/\s/g, ' '), '64 642,50', 'таблица перерисована');
   assert.ok(after.lines.includes(64642.5), `линия SL на графике перерисована: ${after.lines}`);
   assert.ok(!after.lines.includes(64200), 'старой линии нет');
   assert.deepEqual(term.errors, []);
@@ -158,7 +158,7 @@ test('«Снять» уводит null, отказ шлюза показан с�
   assert.ok(msg.open, 'окно не закрылось на отказе');
   assert.match(msg.text, /Take Profit/);
   assert.doesNotMatch(msg.text, /take_profit_too_close/, 'не сырым кодом');
-  assert.match(msg.text, /64,600\.00/, `уровень от шлюза: «${msg.text}»`);
+  assert.match(msg.text, /64\s600,00/, `уровень от шлюза: «${msg.text}»`);
 });
 
 test('ордер: отсчёт от цены ордера, запрос — на /pending/{id}/levels', async (t) => {
@@ -170,7 +170,7 @@ test('ордер: отсчёт от цены ордера, запрос — на
   await page.click('.deal-row .lvlbtn[data-id="12"][data-f="tp"]');
   await settle(page, 300);
   const ref = await page.evaluate(() => document.getElementById('lvlRef').textContent);
-  assert.match(ref, /64,000\.00.*320\.00/, `цена ордера и минимум от неё: «${ref}»`);
+  assert.match(ref, /64\s000,00.*320,00/, `цена ордера и минимум от неё: «${ref}»`);
   const tp = await page.$('#lvlTp');
   await tp.click({ clickCount: 3 });
   await tp.type('66500');

@@ -743,7 +743,7 @@ test('тикет подставляет SL/TP на минимальном рас
   const buy = await read();
   assert.equal(buy.sl, 64643.48);
   assert.equal(buy.tp, 65358.52);
-  assert.match(buy.hint, /0\.50%.*325\.01/, `минимум назван: «${buy.hint}»`);
+  assert.match(buy.hint, /0,50%.*325,01/, `минимум назван: «${buy.hint}»`);
   assert.deepEqual([buy.buyShown, buy.sellShown], [true, false], 'видна кнопка выбранной стороны');
 
   await term.page.click('#sideSell');
@@ -773,7 +773,7 @@ test('ближе минимума тикет не отправляет, а на�
   }));
   assert.equal(term.seen.filter((r) => r.path === '/deals' && r.method === 'POST').length, before, 'запрос не ушёл');
   assert.ok(ui.bad, 'поле подсвечено');
-  assert.match(ui.msg, /Stop Loss.*64,675\.99/, `причина и уровень: «${ui.msg}»`);
+  assert.match(ui.msg, /Stop Loss.*64\s675,99/, `причина и уровень: «${ui.msg}»`);
   assert.equal(ui.kept, '64900', 'тронутое человеком поле тикет не переписывает');
 });
 
@@ -793,7 +793,7 @@ test('отказ шлюза «стоп ближе минимума» показ�
   const msg = await term.page.evaluate(() => document.getElementById('dealMsg').textContent);
   assert.match(msg, /Take Profit/);
   assert.doesNotMatch(msg, /take_profit_too_close/, 'не сырым кодом');
-  assert.match(msg, /65,400\.00/, `ближайший уровень от шлюза: «${msg}»`);
+  assert.match(msg, /65\s400,00/, `ближайший уровень от шлюза: «${msg}»`);
 });
 
 /** Размер графика: секция, область и холст библиотеки. */

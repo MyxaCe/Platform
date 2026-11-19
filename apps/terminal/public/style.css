@@ -108,14 +108,14 @@ button { font-family: inherit; }
 .chip { flex: 0 0 auto; white-space: nowrap; font-size: 10.5px; font-weight: 500; letter-spacing: .04em;
   color: var(--muted); border: 1px solid var(--hair); border-radius: 4px; padding: 2px 6px; }
 .top__right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
-.lang { display: inline-flex; border-radius: 4px; overflow: hidden; background: var(--field); }
+.lang { display: inline-flex; flex: 0 0 auto; border-radius: 4px; overflow: hidden; background: var(--field); }
 .lang button { background: transparent; border: 0; color: var(--muted); font-size: 11px; font-weight: 600; padding: 4px 8px; cursor: pointer; }
 .lang button.active { color: var(--text); background: var(--field-hover); }
 .iconbtn-top { cursor: pointer; border: 0; background: var(--field); color: var(--muted);
   border-radius: 4px; width: 28px; height: 26px; }
 .iconbtn-top:hover { color: var(--text); background: var(--field-hover); }
 .btn-top { cursor: pointer; display: inline-flex; align-items: center; height: 26px; padding: 0 10px; border-radius: 4px;
-  background: transparent; color: var(--text); font-weight: 500; font-size: 12px; text-decoration: none; border: 1px solid var(--border); }
+  background: transparent; color: var(--text); font-weight: 500; font-size: 12px; text-decoration: none; border: 1px solid var(--border); white-space: nowrap; }
 .btn-top:hover { background: var(--field-hover); }
 .btn-top--ghost { color: var(--muted); }
 .btn { cursor: pointer; border: 1px solid var(--border); background: var(--field); color: var(--text);
@@ -136,6 +136,7 @@ button { font-family: inherit; }
    (их читают и проверки), здесь только показ. */
 .acct-warn, .volatile-warn { text-transform: lowercase; }
 .acct-warn::first-letter, .volatile-warn::first-letter { text-transform: uppercase; }
+html[lang="de"] .acct-warn, html[lang="de"] .volatile-warn, html[lang="de"] .acct-warn::first-letter, html[lang="de"] .volatile-warn::first-letter { text-transform: none; }
 /* Причина, по которой в метриках прочерки: сессии нет или счёт недоступен (BUG-011). */
 .acct-warn { flex: 0 0 auto; white-space: nowrap; font-size: 11px; font-weight: 500; color: var(--down);
   background: color-mix(in srgb, var(--down) 10%, transparent); border-radius: 4px; padding: 2px 8px; }
@@ -421,8 +422,9 @@ body .drawbtn.active { background: var(--field-hover); color: var(--brand); }
   .kind-badge { font-size: 11px; padding: 3px 8px; }
   .metrics { order: 10; flex: 1 0 100%; overflow-x: auto; gap: 14px; padding: 2px 0 0; scrollbar-width: none; }
   .metric__v { font-size: 12.5px; }
-  .top__right { gap: 6px; }
-  .btn-top { padding: 0 9px; }
+  .top__right { gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+  .btn-top { padding: 0 7px; }
+  .lang button { padding: 4px 6px; }
   .ihead { gap: 12px; flex-wrap: wrap; padding: 6px 10px; margin-bottom: 0; }
   .ih-caret { display: inline; }
   .ih-sym { font-size: 16px; }

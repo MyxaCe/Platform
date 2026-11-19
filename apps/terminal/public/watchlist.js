@@ -132,6 +132,8 @@
     const favsKey = `${prefix}.favs`;
     const colsKey = cfg.colsKey || `${prefix}.cols`;
     const t = cfg.t || ((k, en) => en);
+    const num = cfg.num || ((/** @type {number} */ v, /** @type {number} */ n) => v.toLocaleString('en-US', { minimumFractionDigits: n, maximumFractionDigits: n }));
+    const change = cfg.change || ((/** @type {number} */ v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`);
 
     const favs = new Set(readJson(favsKey, []));
     const cols = Object.assign({ last: 0, change: 1, sell: 1, buy: 1, spread: 1, high: 1 }, cfg.columnsDefault || {}, readJson(colsKey, {}));
@@ -198,7 +200,7 @@
 
     function fmtPrice(it, raw) {
       const d = it.price_decimals ?? 2;
-      return (raw / 10 ** d).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+      return num(raw / 10 ** d, d);
     }
 
     function renderRow(el, it) {
@@ -213,7 +215,7 @@
         `<span class="star ${favs.has(it.id) ? 'on' : ''}">${STAR}</span>` +
         `<div class="sym">${coinHtml(base)}<span class="symtxt">${base}<small>/${quote || 'USDT'}</small></span></div>` +
         `<div class="num c-last ${known ? (up ? 'up' : 'down') : ''}">${it.last != null ? fmtPrice(it, it.last) : '—'}</div>` +
-        `<div class="num chg c-change ${known ? (up ? 'up' : 'down') : ''}">${known ? `${up ? '+' : ''}${it.change.toFixed(2)}%` : '—'}</div>` +
+        `<div class="num chg c-change ${known ? (up ? 'up' : 'down') : ''}">${known ? change(it.change) : '—'}</div>` +
         `<div class="num sell c-sell">${it.bid != null ? fmtPrice(it, it.bid) : '—'}</div>` +
         `<div class="num buy c-buy">${it.ask != null ? fmtPrice(it, it.ask) : '—'}</div>` +
         `<div class="num muted c-spread">${it.bid != null && it.ask != null ? it.ask - it.bid : '—'}</div>` +

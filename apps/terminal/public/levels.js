@@ -148,10 +148,11 @@
     });
     const row = o.row;
     const pd = row.price_decimals;
-    const fmt = (/** @type {number} */ raw) => (raw / 10 ** pd).toLocaleString('en-US', { minimumFractionDigits: pd, maximumFractionDigits: pd });
+    const num = o.num || ((/** @type {number} */ v, /** @type {number} */ n) => v.toLocaleString('en-US', { minimumFractionDigits: n, maximumFractionDigits: n }));
+    const fmt = (/** @type {number} */ raw) => num(raw / 10 ** pd, pd);
     const inputVal = (/** @type {number|null} */ raw) => (raw == null ? '' : (raw / 10 ** pd).toFixed(pd));
     const cur = { sl: row.sl == null ? null : row.sl, tp: row.tp == null ? null : row.tp };
-    const lot = (row.qty / 10 ** row.qty_decimals).toFixed(row.qty_decimals);
+    const lot = num(row.qty / 10 ** row.qty_decimals, row.qty_decimals);
     const isDeal = o.kind === 'deal';
 
     const back = document.createElement('div');
@@ -193,7 +194,7 @@
       else {
         const what = isDeal ? t(row.side === 'buy' ? 'lv.ref.bid' : 'lv.ref.ask', row.side === 'buy' ? 'Closing price (bid) {px}' : 'Closing price (ask) {px}', { px: fmt(ref) })
           : t('lv.ref.order', 'Order price {px}', { px: fmt(ref) });
-        const min = bps > 0 ? ' · ' + t('lv.minDist', 'min. distance {p}% = {d}', { p: (bps / 100).toFixed(2), d: fmt(window.Stops.minDistance(ref, bps)) }) : '';
+        const min = bps > 0 ? ' · ' + t('lv.minDist', 'min. distance {p}% = {d}', { p: num(bps / 100, 2), d: fmt(window.Stops.minDistance(ref, bps)) }) : '';
         refEl.textContent = what + min;
       }
       const n = next();

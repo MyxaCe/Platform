@@ -121,18 +121,21 @@
   const DEFAULTS = { avg: false, ratio: true, rounding: true, depth: 'sum', anim: true, mode: 'both', groupMul: 1 };
 
   /** Компактный формат для колонки «Всего»: 2 090 → 2.09K. */
-  function compact(v) {
+  /** @param {number} v @param {(v: number, d: number) => string} num */
+  function compact(v, num) {
     const a = Math.abs(v);
-    if (a >= 1e9) return (v / 1e9).toFixed(2) + 'B';
-    if (a >= 1e6) return (v / 1e6).toFixed(2) + 'M';
-    if (a >= 1e3) return (v / 1e3).toFixed(2) + 'K';
-    return v.toFixed(2);
+    if (a >= 1e9) return num(v / 1e9, 2) + 'B';
+    if (a >= 1e6) return num(v / 1e6, 2) + 'M';
+    if (a >= 1e3) return num(v / 1e3, 2) + 'K';
+    return num(v, 2);
   }
 
   function mount(root, ctx) {
     const levels = ctx.levels || 20;
     /** Перевод: хост даёт `t(ключ, английский)`; без него — английский (ADR-015). */
     const t = ctx.t || ((_k, en) => en);
+    /** @type {(v: number, d: number) => string} */
+    const num = ctx.num || ((v, d) => v.toFixed(d));
     /** Подпись с ключом перевода: хост обновит её при смене языка сам. */
     const tx = (k, en) => `<span data-i18n="${k}">${t(k, en)}</span>`;
     const prefix = ctx.storagePrefix || 'ob';
@@ -248,7 +251,7 @@
       const row = ([p, q, c], cls) => {
         const price = (p / ps).toFixed(pd);
         return `<div class="brow ${cls}" data-p="${price}"><div class="bar" style="width:${width(q, c).toFixed(1)}%"></div>` +
-          `<span class="bp">${price}</span><span class="bq">${(q / qs).toFixed(qd)}</span><span class="bt">${compact((p / ps) * (q / qs))}</span></div>`;
+          `<span class="bp">${num(p / ps, pd)}</span><span class="bq">${num(q / qs, qd)}</span><span class="bt">${compact((p / ps) * (q / qs), num)}</span></div>`;
       };
       elAsks.innerHTML = asksC.slice().reverse().map((r) => row(r, 'ask')).join('');
       elBids.innerHTML = bidsC.map((r) => row(r, 'bid')).join('');
@@ -274,15 +277,15 @@
         const mid = (bb + ba) / 2 / ps;
         if (prevMid != null && mid !== prevMid) dir = mid > prevMid ? 'up' : 'down';
         if (mid !== prevMid) prevMid = mid;
-        elLast.textContent = mid.toFixed(pd);
+        elLast.textContent = num(mid, pd);
         elLast.classList.toggle('up', dir === 'up');
         elLast.classList.toggle('down', dir === 'down');
-        elSpread.textContent = `${t('ob.spread', 'spread')} ${((ba - bb) / ps).toFixed(pd)}`;
+        elSpread.textContent = `${t('ob.spread', 'spread')} ${num((ba - bb) / ps, pd)}`;
       } else {
         elLast.textContent = '—'; elSpread.textContent = '';
       }
       const mark = ctx.markPrice && ctx.markPrice(id);
-      elMark.textContent = mark != null ? `$${mark.toFixed(pd)}` : '';
+      elMark.textContent = mark != null ? `$${num(mark, pd)}` : '';
 
       // Полоса соотношения: доли суммарного объёма покупок и продаж.
       const sumB = bidsAll.slice(0, levels).reduce((s, x) => s + x[1], 0);

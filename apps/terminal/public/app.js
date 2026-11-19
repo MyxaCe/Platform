@@ -32,10 +32,12 @@ const qscale = (id) => 10 ** qdec(id);
 const cssChan = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const rgbT = (n) => { const [r, g, b] = cssChan(n).split(/\s+/); return `rgb(${r}, ${g}, ${b})`; };
 const rgbaT = (n, a) => { const [r, g, b] = cssChan(n).split(/\s+/); return `rgba(${r}, ${g}, ${b}, ${a})`; };
-const fmtP = (id, raw) => (raw / pscale(id)).toLocaleString('en-US', { minimumFractionDigits: pdec(id), maximumFractionDigits: pdec(id) });
+const fmtP = (id, raw) => I18N.num(raw / pscale(id), pdec(id));
 const fmtQ = (id, raw) => (raw / qscale(id)).toFixed(qdec(id));
+const fmtN = (/** @type {number} */ v, /** @type {number} */ d) => I18N.num(v, d);
+const fmtChange = (/** @type {number} */ v) => I18N.change(v);
 // Знак перед валютой: «$-0.06» читается как опечатка, правильно «-$0.06».
-const usd = (c) => (c < 0 ? '-' : '') + '$' + (Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const usd = (c) => I18N.money(c);
 const TFN = { 1: '1s', 60: '1m', 300: '5m', 900: '15m', 1800: '30m', 3600: '1h', 14400: '4h', 86400: '1d', 604800: '1w' };
 const settings = Object.assign(
   { shadows: true, shadowCustom: false, shadowColor: '#787b86', hollowColor: '#26a69a', priceLineWidth: 1, addLine: false, addLineWidth: 1, minChange: 'default' },
@@ -72,7 +74,7 @@ function fmtDT(t) { return new Date(t * 1000).toLocaleString(I18N.locale(), { ti
  * необъяснимость, которую мы только что нашли у объёма.
  */
 function updateLegend(id, t, c, forming) {
-  const rf = (x) => x.toLocaleString('en-US', { minimumFractionDigits: pdec(id), maximumFractionDigits: pdec(id) });
+  const rf = (x) => I18N.num(x, pdec(id));
   document.getElementById('lgSym').textContent = META[id]?.symbol || '';
   document.getElementById('lgTf').textContent = TFN[tf] || '';
   document.getElementById('lgTime').textContent = fmtDT(t) + (forming ? ` · ${T('legend.forming')}` : '');
@@ -160,7 +162,7 @@ const chart = LightweightCharts.createChart(chartEl, {
   layout: { background: { color: rgbT('--bg-base') }, textColor: rgbT('--text-secondary'), attributionLogo: false },
   // Локаль задаём явно: иначе библиотека берёт navigator.language, и подписи оси времени
   // зависят от настроек ОС клиента (а в окружении без локали — падают с RangeError). BUG-008.
-  localization: { locale: 'en-US' },
+  localization: { locale: I18N.locale() },
   grid: { vertLines: { color: rgbaT('--text-secondary', '.10') }, horzLines: { color: rgbaT('--text-secondary', '.10') } },
   rightPriceScale: { borderColor: rgbaT('--text-secondary', '.25') },
   timeScale: { borderColor: rgbaT('--text-secondary', '.25'), timeVisible: true, secondsVisible: false },
@@ -333,7 +335,7 @@ function updateDealPanel() {
   const chg = document.getElementById('dealChange');
   const chgKnown = it.change != null;
   const chgUp = chgKnown && it.change >= 0;
-  chg.textContent = chgKnown ? `${chgUp ? '+' : ''}${it.change.toFixed(2)}%` : '—';
+  chg.textContent = chgKnown ? I18N.change(it.change) : '—';
   chg.className = `deal__change${chgKnown ? (chgUp ? ' up' : ' down') : ''}`;
   // Цена на кнопках — цена ИСПОЛНЕНИЯ: рынок плюс наценка тарифа счёта
   // (10.11). Её и получит человек; показывать голый ask значило бы обещать
@@ -344,7 +346,7 @@ function updateDealPanel() {
   updateFeeInfo();
   document.getElementById('watermark').textContent = it.symbol;
   const pips = document.getElementById('pipsInfo');
-  if (showPips && it.bid != null && it.ask != null) { pips.classList.remove('hidden'); pips.textContent = tv('f.spread', { n: it.ask - it.bid }); } else pips.classList.add('hidden');
+  if (showPips && it.bid != null && it.ask != null) { pips.classList.remove('hidden'); pips.textContent = tv('f.spread', { n: I18N.num(it.ask - it.bid) }); } else pips.classList.add('hidden');
   const quote = it.symbol.split('-')[1] || '';
   document.getElementById('priceUnit').textContent = quote;
   if (orderMode === 'limit' && !/** @type {HTMLInputElement} */ (document.getElementById('price')).value && ref != null) /** @type {HTMLInputElement} */ (document.getElementById('price')).value = (ref / pscale(it.id)).toFixed(pdec(it.id));
@@ -356,10 +358,10 @@ function updateDealPanel() {
 /** Компактная запись большого числа: 915 234 567 → 915.23M. */
 const compactNum = (/** @type {number} */ v) => {
   const a = Math.abs(v);
-  if (a >= 1e9) return (v / 1e9).toFixed(2) + 'B';
-  if (a >= 1e6) return (v / 1e6).toFixed(2) + 'M';
-  if (a >= 1e3) return (v / 1e3).toFixed(2) + 'K';
-  return v.toFixed(2);
+  if (a >= 1e9) return I18N.num(v / 1e9, 2) + 'B';
+  if (a >= 1e6) return I18N.num(v / 1e6, 2) + 'M';
+  if (a >= 1e3) return I18N.num(v / 1e3, 2) + 'K';
+  return I18N.num(v, 2);
 };
 /** Направление последней цены в шапке инструмента — «липкое», как в стакане. */
 let ihPrev = { id: null, last: null, dir: '' };
@@ -388,7 +390,7 @@ function renderInstrumentHeader(it) {
   $('ihMid').textContent = it.bid != null && it.ask != null ? `${fmtP(it.id, it.bid)} / ${fmtP(it.id, it.ask)}` : '';
   const chg = $('ihChg');
   const known = it.change != null;
-  chg.textContent = known ? `${it.change >= 0 ? '+' : ''}${it.change.toFixed(2)}%` : '—';
+  chg.textContent = known ? I18N.change(it.change) : '—';
   chg.className = 'ih-v ' + (known ? (it.change >= 0 ? 'up' : 'down') : '');
   $('ihHigh').textContent = it.high != null ? fmtP(it.id, it.high) : '—';
   $('ihLow').textContent = it.low != null ? fmtP(it.id, it.low) : '—';
@@ -412,7 +414,7 @@ function renderTape(list) {
     const known = it.change != null;
     const up = known && it.change >= 0;
     return `<span class="tape__it" data-id="${it.id}"><b>${b}/${q || ''}</b><span>${it.last != null ? fmtP(it.id, it.last) : '—'}</span>` +
-      `<span class="${known ? (up ? 'up' : 'down') : 'muted'}">${known ? `${up ? '+' : ''}${it.change.toFixed(2)}%` : '—'}</span></span>`;
+      `<span class="${known ? (up ? 'up' : 'down') : 'muted'}">${known ? I18N.change(it.change) : '—'}</span></span>`;
   }).join('');
   track.innerHTML = html + html;
   track.style.animationDuration = `${Math.max(30, list.length * 5)}s`;
@@ -444,7 +446,7 @@ function renderMarketWarn() {
   if (!el) return;
   const down = Object.keys(marketDown).filter((k) => marketDown[k]);
   el.hidden = down.length === 0;
-  el.textContent = down.length ? tv('data.down', { what: down.map((k) => T('data.' + k)).join(', ').toUpperCase() }) : '';
+  el.textContent = down.length ? tv('data.down', { what: down.map((k) => T('data.' + k)).join(', ') }) : '';
 }
 
 const book = OrderBook.mount(document.getElementById('book'), {
@@ -460,11 +462,13 @@ const book = OrderBook.mount(document.getElementById('book'), {
   // виджет обязан это сказать в шапке.
   source: 'Binance',
   t: wT,
+  num: fmtN,
 });
 const stats = AssetStats.mount(document.getElementById('statbar'), {
   instrument: () => selected,
   fetch: async (id) => { const r = await api.statsDetailed(id); markMarketData('stats', r.reason === null); return r; },
   labels: TFN,
+  change: fmtChange,
   interval: 5000,
 });
 const panel = Positions.mount(document.getElementById('bottom'), {
@@ -480,6 +484,7 @@ const panel = Positions.mount(document.getElementById('bottom'), {
   signals: () => computeSignals(),
   balance: () => balanceRows(),
   t: wT,
+  num: fmtN,
   interval: 1500,
 });
 const trades = Trades.mount(document.getElementById('trades'), {
@@ -495,6 +500,7 @@ const trades = Trades.mount(document.getElementById('trades'), {
   fmtUsd: usd,
   source: 'Binance',
   t: wT,
+  num: fmtN,
   interval: 2500,
 });
 // Монтируется последним: его первый refresh выбирает инструмент, а selectInstrument
@@ -521,6 +527,8 @@ const watchlist = Watchlist.mount(document.querySelector('.watch'), {
   columnsDefault: { last: 1, change: 1, sell: 0, buy: 0, spread: 0, high: 0 },
   title: '',
   t: wT,
+  num: fmtN,
+  change: fmtChange,
 });
 async function selectInstrument(id) { selected = id; watchlist.setActive(id); /** @type {HTMLInputElement} */ (document.getElementById('price')).value = ''; resetStops(); await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.reset(); book.refresh(); stats.refresh(); trades.clearTape(); trades.refreshMine(); }
 document.getElementById('tfs').addEventListener('click', (e) => { const btn = /** @type {Element} */ (e.target).closest('button'); if (!btn) return; tf = +btn.dataset.tf; chart.applyOptions({ timeScale: { secondsVisible: tf < 60 } }); document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
@@ -819,7 +827,7 @@ let sltpEdit = false;
  */
 function openLevels(kind, row, field) {
   Levels.open({
-    kind, row, field, t: wT,
+    kind, row, field, t: wT, num: fmtN,
     ref: () => {
       if (kind === 'pending') return row.price;
       const it = META[row.instrument];
@@ -845,8 +853,8 @@ function refreshStops() {
   if (!it) { hint.textContent = ''; return; }
   if (minStopBps > 0) {
     const d = ref != null ? fmtP(it.id, Stops.minDistance(ref, minStopBps)) : '—';
-    hint.textContent = tv('f.stops.min', { p: (minStopBps / 100).toFixed(2), d });
-  } else hint.textContent = tv('f.stops.hint', { p: (Stops.HINT_BPS / 100).toFixed(0) });
+    hint.textContent = tv('f.stops.min', { p: I18N.num(minStopBps / 100, 2), d });
+  } else hint.textContent = tv('f.stops.hint', { p: I18N.num(Stops.HINT_BPS / 100) });
   validateStops();
 }
 /** Проблема с уровнями сейчас, или `null`. Красит поле, но ничего не отправляет. */
@@ -919,8 +927,8 @@ function updateFeeInfo() {
     px = Tariff.execPrice(true, it.ask, tariff.markup_bps);
   }
   const minor = px == null ? NaN : Tariff.commissionMinor(px, qty, pdec(it.id), qdec(it.id), bps);
-  el.textContent = Number.isFinite(minor) ? tv('fee.text', { v: (minor / 100).toFixed(2) }) : T('fee.unknown');
-  el.title = tv('fee.tip', { p: bps / 100 });
+  el.textContent = Number.isFinite(minor) ? tv('fee.text', { v: I18N.num(minor / 100, 2) }) : T('fee.unknown');
+  el.title = tv('fee.tip', { p: I18N.num(bps / 100, 0, 2) });
   el.classList.remove('hidden');
 }
 
@@ -944,13 +952,13 @@ function updateSizeEq() {
 
   el.title = '';
   el.textContent = sizeUnit === 'usd'
-    ? `≈ ${(v / p).toFixed(qdec(it.id))} ${base}`
-    : `${T('f.notional')} ≈ $${(v * p).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+    ? `≈ ${I18N.num(v / p, qdec(it.id))} ${base}`
+    : `${T('f.notional')} ≈ ${usd(Math.round(v * p * 100))}`;
   // Маржа под позицию — стоимость / плечо счёта. Плеча не знаем — строки нет:
   // догадка про деньги хуже её отсутствия.
   const lev = lastAccount && Number.isInteger(lastAccount.leverage) && lastAccount.leverage >= 1 ? lastAccount.leverage : null;
   const notional = sizeUnit === 'usd' ? v : v * p;
-  mEl.textContent = lev && notional > 0 ? `${T('f.marginReq')} ≈ $${(notional / lev).toLocaleString('en-US', { maximumFractionDigits: 2 })}` : '';
+  mEl.textContent = lev && notional > 0 ? `${T('f.marginReq')} ≈ ${usd(Math.round((notional / lev) * 100))}` : '';
 }
 
 /** Цена инструмента в единицах отображения или `null`, если её нет. */
@@ -1095,15 +1103,16 @@ function showMarginLevel(a) {
   const lvl = a && Number.isFinite(a.margin_level_pct) ? a.margin_level_pct : null;
   const call = a && Number.isFinite(a.margin_call_level_pct) ? a.margin_call_level_pct : null;
   const stop = a && Number.isFinite(a.stop_out_level_pct) ? a.stop_out_level_pct : null;
-  el.textContent = lvl == null ? '—' : `${lvl.toLocaleString('en-US')}%`;
+  el.textContent = lvl == null ? '—' : I18N.pct(lvl, 0, 2);
   el.title = lvl == null ? T('acct.level.none') : T('acct.level.tip');
   const bad = lvl != null && call != null && lvl <= call;
   const near = lvl != null && call != null && !bad && lvl <= call * 1.5;
   el.classList.toggle('lvl-bad', bad || (lvl != null && stop != null && lvl <= stop));
   el.classList.toggle('lvl-warn', near);
   let text = null;
-  if (lvl != null && stop != null && lvl <= stop) text = tv('mc.stopout', { lvl, stop });
-  else if (bad) text = stop != null ? tv('mc.call', { lvl, call, stop }) : tv('mc.call.nostop', { lvl, call });
+  const n = (/** @type {number} */ v) => I18N.num(v, 0, 2);
+  if (lvl != null && stop != null && lvl <= stop) text = tv('mc.stopout', { lvl: n(lvl), stop: n(stop) });
+  else if (bad) text = stop != null ? tv('mc.call', { lvl: n(lvl), call: n(call), stop: n(stop) }) : tv('mc.call.nostop', { lvl: n(lvl), call: n(call) });
   banner.hidden = !text;
   banner.textContent = text || '';
 }
@@ -1115,8 +1124,8 @@ function showMarginLevel(a) {
 function balanceRows() {
   const a = lastAccount;
   if (!a) return null;
-  const pct = (/** @type {any} */ v) => (Number.isFinite(v) ? `${v}%` : '—');
-  const bps = (/** @type {any} */ b) => (b > 0 ? `${(b / 100).toFixed(2)}%` : T('b.none'));
+  const pct = (/** @type {any} */ v) => (Number.isFinite(v) ? I18N.pct(v, 0, 2) : '—');
+  const bps = (/** @type {any} */ b) => (b > 0 ? I18N.pct(b / 100, 2) : T('b.none'));
   const money = (/** @type {any} */ c) => (Number.isFinite(c) ? usd(c) : '—');
   const sign = (/** @type {any} */ c) => (c > 0 ? 'pos' : c < 0 ? 'neg' : '');
   /** @type {Array<[string, string, string?]>} */
@@ -1259,7 +1268,16 @@ document.addEventListener('themechange', applyChartTheme);
 
 // ============================ Язык, мобильные вкладки, вход =================
 function renderLangButtons() {
-  document.querySelectorAll('.lang [data-lang]').forEach((b) => b.classList.toggle('active', /** @type {HTMLElement} */ (b).dataset.lang === I18N.lang()));
+  const box = /** @type {HTMLElement} */ (document.querySelector('.lang'));
+  /** @type {string[]} */
+  const langs = I18N.available();
+  const want = langs.join(',');
+  if (box.dataset.built !== want) {
+    box.dataset.built = want;
+    box.innerHTML = langs.map((l) => `<button type="button" data-lang="${l}" lang="${l}" title="${I18N.NAMES[l]}">${l.toUpperCase()}</button>`).join('');
+  }
+  box.style.display = langs.length > 1 ? '' : 'none';
+  box.querySelectorAll('[data-lang]').forEach((b) => b.classList.toggle('active', /** @type {HTMLElement} */ (b).dataset.lang === I18N.lang()));
 }
 document.querySelector('.lang').addEventListener('click', (e) => {
   const b = /** @type {HTMLElement} */ (/** @type {Element} */ (e.target).closest('[data-lang]'));
@@ -1269,8 +1287,9 @@ document.querySelector('.lang').addEventListener('click', (e) => {
 // перерисовка тех, кто держит текст у себя. Сессия и состояние не трогаются.
 I18N.onChange(() => {
   renderLangButtons();
+  chart.applyOptions({ localization: { locale: I18N.locale() } });
   updateDealPanel(); renderFeedStatus(); refreshLegend(); renderMarketWarn(); showStorageMode(); syncFullBtn();
-  pollAccount(); panel.refresh(); panel.refreshSignals(); trades.refreshMine(); book.refresh(); renderSsoUi();
+  pollAccount(); panel.refresh(); panel.refreshSignals(); trades.refreshMine(); book.refresh(); stats.refresh(); watchlist.refresh(); renderSsoUi();
 });
 
 /** Мобильная раскладка: одна панель на экран (style.css, `body[data-mtab]`). */

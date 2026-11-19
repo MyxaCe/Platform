@@ -129,6 +129,7 @@
 
         const list = /** @type {Array<{ tf: number|string, change: number|null }>} */ (got.data);
         succeeded();
+        const change = ctx.change || ((/** @type {number} */ v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`);
         root.innerHTML = list.map((st) => {
           const label = (ctx.labels && ctx.labels[st.tf]) || st.tf;
           // change === null — сервер не смог посчитать. Раньше он присылал в этом
@@ -137,7 +138,7 @@
             return `<div class="stat"><span class="stat__l">${label}</span><span class="stat__v" title="no data">&mdash;</span></div>`;
           }
           const up = st.change >= 0;
-          return `<div class="stat"><span class="stat__l">${label}</span><span class="stat__v ${up ? 'up' : 'down'}">${up ? '+' : ''}${st.change.toFixed(2)}%</span></div>`;
+          return `<div class="stat"><span class="stat__l">${label}</span><span class="stat__v ${up ? 'up' : 'down'}">${change(st.change)}</span></div>`;
         }).join('');
       }
       refresh(); // первичная отрисовка сразу при монтировании — виджет ставится одной строкой

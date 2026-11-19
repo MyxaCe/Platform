@@ -180,8 +180,9 @@
       if (ok) { refresh(); if (ctx.onChange) ctx.onChange(); }
     });
 
-    const lotOf = (d) => (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals);
-    const pxOf = (d) => (raw) => (raw == null ? '—' : (raw / 10 ** d.price_decimals).toFixed(d.price_decimals));
+    const num = ctx.num || ((/** @type {number} */ v, /** @type {number} */ n) => v.toFixed(n));
+    const lotOf = (d) => num(d.qty / 10 ** d.qty_decimals, d.qty_decimals);
+    const pxOf = (d) => (raw) => (raw == null ? '—' : num(raw / 10 ** d.price_decimals, d.price_decimals));
     // Комиссия сделки (10.11): вся — открытия и закрытия. Поля нет (старый
     // шлюз) или ноль (тарифа не было) — пусто, а не «$0.00»: нулевая строка
     // читалась бы как «комиссию посчитали и она ноль» у сделки без тарифа.

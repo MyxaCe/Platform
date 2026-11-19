@@ -52,6 +52,7 @@
   function mount(root, ctx) {
     const max = ctx.max || 60;
     const fmtUsd = ctx.fmtUsd || ((/** @type {number} */ c) => `${(c / 100).toFixed(2)}`);
+    const num = ctx.num || ((/** @type {number} */ v, /** @type {number} */ n) => v.toFixed(n));
     /** Перевод: хост даёт `t(ключ, английский)`; без него — английский (ADR-015). */
     const t = ctx.t || ((/** @type {string} */ _k, /** @type {string} */ en) => en);
     /** Подпись с ключом перевода: хост обновит её при смене языка сам. */
@@ -99,7 +100,7 @@
       const id = ctx.instrument();
       const { pd, qd } = (ctx.decimals && ctx.decimals(id)) || { pd: 2, qd: 5 };
       rows('market').innerHTML = tape.map((t) =>
-        `<div class="trow"><span class="tp ${t.side === 'sell' ? 'sell' : 'buy'}">${(t.price / 10 ** pd).toFixed(pd)}</span><span>${(t.qty / 10 ** qd).toFixed(qd)}</span><span class="muted">${hhmmss(t.at)}</span></div>`
+        `<div class="trow"><span class="tp ${t.side === 'sell' ? 'sell' : 'buy'}">${num(t.price / 10 ** pd, pd)}</span><span>${num(t.qty / 10 ** qd, qd)}</span><span class="muted">${hhmmss(t.at)}</span></div>`
       ).join('') || `<div class="trades__empty">${t('tr.waiting', 'Waiting for trades…')}</div>`;
     }
     /** Смена инструмента: старая лента к новой паре отношения не имеет. */
@@ -128,8 +129,8 @@
         return;
       }
       rows('mine').innerHTML = list.map((d) => {
-        const f = (/** @type {number} */ raw) => (raw / 10 ** d.price_decimals).toFixed(d.price_decimals);
-        const lot = (d.qty / 10 ** d.qty_decimals).toFixed(d.qty_decimals);
+        const f = (/** @type {number} */ raw) => num(raw / 10 ** d.price_decimals, d.price_decimals);
+        const lot = num(d.qty / 10 ** d.qty_decimals, d.qty_decimals);
         const pos = d.pnl >= 0;
         return `<div class="trow"><span class="tp ${d.side === 'sell' ? 'sell' : 'buy'}">${d.side.toUpperCase()} ${lot}</span><span>${f(d.entry)} → ${f(d.exit)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${fmtUsd(d.pnl)}</span></div>`;
       }).join('') || `<div class="trades__empty">${t('tr.none', 'No trades on this instrument')}</div>`;

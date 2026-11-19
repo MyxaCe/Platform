@@ -26,13 +26,14 @@ const PUBLIC_DIR = path.join(__dirname, '..', '..', 'public');
  * Поднять jsdom и выполнить в нём модули виджетов.
  *
  * @param {string[]} files имена файлов из public/, например ['watchlist.js']
+ * @param {{ url?: string }} [opts]
  * @returns {{ window: Window, document: Document, root: HTMLElement, cleanup: () => void }}
  */
-function loadWidget(files) {
+function loadWidget(files, opts) {
   const dom = new JSDOM('<!doctype html><html><head></head><body><div id="root"></div></body></html>', {
     // url обязателен: без origin'а jsdom не даёт localStorage, а виджет пишет в него
     // избранное и видимость колонок — то самое, что мы и хотим проверить.
-    url: 'http://localhost:8888/',
+    url: (opts && opts.url) || 'http://localhost:8888/',
     pretendToBeVisual: true,
     // outside-only: скрипты со страницы не исполняются (нам нечего грузить), но
     // `window.eval` получает контекст окна — без этого модуль не видит `document`.

@@ -243,6 +243,7 @@
   function applyBrand(raw) {
     const brand = normalizeBrand(raw);
     if (!brand) return false;
+    if (window.I18n) window.I18n.setSite(raw);
 
     if (brand.primaryColor) {
       const ch = hexToChannels(brand.primaryColor);
@@ -329,15 +330,20 @@
     return `${base.replace(/\/$/, '')}?${qs}`;
   }
 
+  function noBrand() {
+    if (!applied && window.I18n) window.I18n.setSite(null);
+  }
+
   async function fetchBrand(cfg) {
     const url = brandRequestUrl(cfg);
-    if (!url) return;
+    if (!url) { noBrand(); return; }
     try {
       const r = await fetch(url, { credentials: 'omit' });
-      if (!r.ok) return;
+      if (!r.ok) { noBrand(); return; }
       const brand = await r.json();
       if (applyBrand(brand)) cacheBrand(brand); // кешируем только валидный (last-good)
-    } catch { /* прокси/сеть недоступны — держим текущий бренд */ }
+      else noBrand();
+    } catch { noBrand(); }
   }
 
   // ---- Инициализация -------------------------------------------------------
