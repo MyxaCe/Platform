@@ -36,7 +36,7 @@ const fmtP = (id, raw) => (raw / pscale(id)).toLocaleString('en-US', { minimumFr
 const fmtQ = (id, raw) => (raw / qscale(id)).toFixed(qdec(id));
 // Знак перед валютой: «$-0.06» читается как опечатка, правильно «-$0.06».
 const usd = (c) => (c < 0 ? '-' : '') + '$' + (Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const TFN = { 60: '1m', 300: '5m', 900: '15m', 1800: '30m', 3600: '1h', 14400: '4h', 86400: '1d', 604800: '1w' };
+const TFN = { 1: '1s', 60: '1m', 300: '5m', 900: '15m', 1800: '30m', 3600: '1h', 14400: '4h', 86400: '1d', 604800: '1w' };
 const settings = Object.assign(
   { shadows: true, shadowCustom: false, shadowColor: '#787b86', hollowColor: '#26a69a', priceLineWidth: 1, addLine: false, addLineWidth: 1, minChange: 'default' },
   JSON.parse(localStorage.getItem('settings') || '{}')
@@ -303,7 +303,7 @@ function drawForming(bar) {
 }
 // Агрегация живой сделки в свечу — в `series.js`. Отрисовка остаётся здесь:
 // пока ряд разорван, модуль не возвращает ничего, и рисовать нечего.
-function onLiveTrade(id, price, qty) { if (id !== selected) return; const b = priceSeries.onTrade({ now: Math.floor(Date.now() / 1000), tf, price, qty }); if (b) drawForming(b); }
+function onLiveTrade(id, price, qty, timeMs) { if (id !== selected) return; const now = Number.isFinite(timeMs) ? Math.floor(timeMs / 1000) : Math.floor(Date.now() / 1000); const b = priceSeries.onTrade({ now, tf, price, qty }); if (b) drawForming(b); }
 async function syncLast() {
   const id = selected; if (id == null) return;
   // Разорванный ряд возвращается ПОЛНОЙ перезагрузкой, а не заплаткой на два
@@ -523,7 +523,7 @@ const watchlist = Watchlist.mount(document.querySelector('.watch'), {
   t: wT,
 });
 async function selectInstrument(id) { selected = id; watchlist.setActive(id); /** @type {HTMLInputElement} */ (document.getElementById('price')).value = ''; resetStops(); await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.reset(); book.refresh(); stats.refresh(); trades.clearTape(); trades.refreshMine(); }
-document.getElementById('tfs').addEventListener('click', (e) => { const btn = /** @type {Element} */ (e.target).closest('button'); if (!btn) return; tf = +btn.dataset.tf; document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
+document.getElementById('tfs').addEventListener('click', (e) => { const btn = /** @type {Element} */ (e.target).closest('button'); if (!btn) return; tf = +btn.dataset.tf; chart.applyOptions({ timeScale: { secondsVisible: tf < 60 } }); document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
 
 // ============================ Toolbar (dropdowns) ==========================
 function closeDD() { document.querySelectorAll('.dd').forEach((d) => d.classList.add('hidden')); }
@@ -764,7 +764,7 @@ function connectWS() {
     }
     lastFeedMsgAt = Date.now();
     renderFeedStatus();
-    for (const x of e) if (x.type === 'trade') { onLiveTrade(x.instrument, x.price, x.qty); trades.pushMarket(x); }
+    for (const x of e) if (x.type === 'trade') { onLiveTrade(x.instrument, x.price, x.qty, x.time); trades.pushMarket(x); }
   };
 }
 // Точка обязана гаснуть сама: без этого «живо» осталось бы висеть с последнего тика.

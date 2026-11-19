@@ -141,6 +141,7 @@ pub fn instruments() -> Vec<FeedInstrument> {
 /// Таймфрейм (сек) → интервал Binance.
 pub fn interval(tf: u32) -> &'static str {
     match tf {
+        1 => "1s",
         60 => "1m",
         300 => "5m",
         900 => "15m",
@@ -443,7 +444,7 @@ async fn handle_msg(state: &AppState, index: &HashMap<String, (u32, u8, u8)>, te
         match trade_from_data(&data, pd, qd) {
             Some((price, qty, side)) => {
                 let msg = serde_json::json!([{
-                    "type": "trade", "instrument": id, "price": price, "qty": qty, "taker_side": side
+                    "type": "trade", "instrument": id, "price": price, "qty": qty, "taker_side": side, "time": data["T"].as_i64()
                 }])
                 .to_string();
                 let _ = state.events_tx.send(msg);
@@ -466,6 +467,12 @@ async fn handle_msg(state: &AppState, index: &HashMap<String, (u32, u8, u8)>, te
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn one_second_timeframe_maps_to_1s() {
+        assert_eq!(interval(1), "1s");
+        assert_eq!(interval(60), "1m");
+    }
 
     #[test]
     fn source_url_defaults_to_binance() {
