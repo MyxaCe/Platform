@@ -79,8 +79,7 @@ function updateLegend(id, t, c, forming) {
   document.getElementById('lgTf').textContent = TFN[tf] || '';
   document.getElementById('lgTime').textContent = fmtDT(t) + (forming ? ` · ${T('legend.forming')}` : '');
   document.getElementById('lgOhlc').innerHTML = `O <b>${rf(c.open)}</b>  H <b>${rf(c.high)}</b>  L <b>${rf(c.low)}</b>  C <b class="${c.close >= c.open ? 'up' : 'down'}">${rf(c.close)}</b>`;
-  // Значения MA 7/25/99 на том же баре. Формирующегося бара в рядах MA нет
-  // (индикаторы считаются по закрытым барам, TRM-33) — показываем последнее.
+  // Значения MA 7/25/99 на том же баре.
   const ma = document.getElementById('lgMa');
   if (ma) {
     if (!overlays.ma || !maLegend.arrays.length) ma.innerHTML = '';
@@ -175,6 +174,13 @@ volume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 const draw = Drawings.mount(chartEl.parentElement, { chart, series: () => mainSeries });
 
 let mainSeries = null, overlaySeries = [], oscSeriesList = [], priceLines = [];
+/** @type {{ calc: (cs: any[]) => { values: (number | null)[] }[], series: any[] }[]} */
+let indGroups = [];
+/** @type {ReturnType<typeof setTimeout> | null} */
+let indTimer = null;
+/** @type {number | null} */
+let indFrom = null;
+const IND_EVERY_MS = 250;
 // Формирующаяся свеча и её РАЗРЫВ живут в `series.js` (TRM-19, Р-073). Здесь
 // лежала пара модульных переменных, которую правили из четырёх мест, — и
 // именно поэтому бар переживал обрыв связи: сбрасывать его было некому.
@@ -211,21 +217,48 @@ function mainData() {
   const src = chartType === 'heikin' ? heikin(rawCandles) : rawCandles;
   return src.map((c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }));
 }
-function applyIndicators() {
-  overlaySeries.forEach((s) => chart.removeSeries(s)); overlaySeries = [];
-  oscSeriesList.forEach((s) => chart.removeSeries(s)); oscSeriesList = [];
-  const times = rawCandles.map((c) => c.time);
+function buildMaLegend(times) {
   maLegend = overlays.ma
     ? { index: new Map(times.map((t, i) => [t, i])), arrays: MA_SPEC.map(([n]) => sma(rawCandles.map((c) => c.close), n)) }
     : { index: new Map(), arrays: [] };
+}
+function applyIndicators() {
+  if (indTimer) clearTimeout(indTimer);
+  indTimer = null; indFrom = null; indGroups = [];
+  overlaySeries.forEach((s) => chart.removeSeries(s)); overlaySeries = [];
+  oscSeriesList.forEach((s) => chart.removeSeries(s)); oscSeriesList = [];
+  const times = rawCandles.map((c) => c.time);
+  buildMaLegend(times);
   for (const key in overlays) {
     if (!overlays[key] || !OVERLAYS[key]) continue;
-    for (const ln of OVERLAYS[key](rawCandles)) { const s = chart.addLineSeries({ color: ln.color, lineWidth: ln.width || 1, priceLineVisible: false, lastValueVisible: false }); s.setData(toSeries(ln.values, times)); overlaySeries.push(s); }
+    const group = { calc: OVERLAYS[key], series: [] };
+    for (const ln of OVERLAYS[key](rawCandles)) { const s = chart.addLineSeries({ color: ln.color, lineWidth: ln.width || 1, priceLineVisible: false, lastValueVisible: false }); s.setData(toSeries(ln.values, times)); overlaySeries.push(s); group.series.push(s); }
+    indGroups.push(group);
   }
   if (oscillator && OSC[oscillator]) {
     volume.applyOptions({ visible: false });
-    OSC[oscillator](rawCandles).forEach((ln, i) => { const s = chart.addLineSeries({ color: ln.color, lineWidth: 1, priceScaleId: 'osc', priceLineVisible: false, lastValueVisible: false }); if (i === 0) s.priceScale().applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } }); s.setData(toSeries(ln.values, times)); oscSeriesList.push(s); });
+    const group = { calc: OSC[oscillator], series: [] };
+    OSC[oscillator](rawCandles).forEach((ln, i) => { const s = chart.addLineSeries({ color: ln.color, lineWidth: 1, priceScaleId: 'osc', priceLineVisible: false, lastValueVisible: false }); if (i === 0) s.priceScale().applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } }); s.setData(toSeries(ln.values, times)); oscSeriesList.push(s); group.series.push(s); });
+    indGroups.push(group);
   } else volume.applyOptions({ visible: true });
+}
+/** @param {number} time */
+function queueLiveIndicators(time) {
+  indFrom = indFrom == null ? time : Math.min(indFrom, time);
+  if (!indTimer) indTimer = setTimeout(flushLiveIndicators, IND_EVERY_MS);
+}
+function flushLiveIndicators() {
+  const from = indFrom;
+  indTimer = null; indFrom = null;
+  if (from == null || !rawCandles.length) return;
+  const times = rawCandles.map((c) => c.time);
+  const i0 = LiveBars.indexFrom(rawCandles, from);
+  for (const g of indGroups) {
+    const lines = g.calc(rawCandles);
+    g.series.forEach((s, k) => { if (lines[k]) for (const p of LiveBars.tail(lines[k].values, times, i0)) s.update(p); });
+  }
+  buildMaLegend(times);
+  refreshLegend();
 }
 function redrawPriceLines() {
   if (!mainSeries) return;
@@ -276,20 +309,16 @@ async function loadCandles(id, timeframe) {
  * полной загрузкой: цена рисовала новые свечи, а столбцов под ними не
  * появлялось — гистограмма обрывалась на моменте выбора инструмента, и ничто
  * на экране об этом не говорило.
- *
- * ИНДИКАТОРЫ ЖИВЫМИ НЕ СТАНОВЯТСЯ, и это решение, а не недоделка. Гистограмма
- * показывает НАБЛЮДЁННОЕ: сделки произошли, не показать их — скрыть факт.
- * Индикатор показывает ПРОИЗВОДНУЮ величину, и на незакрытом баре она
- * перерисовывается на каждом тике: человек решал бы по линии, которой через
- * секунду не будет. Поэтому они считаются по `rawCandles`, то есть по
- * закрытым барам, и дозакрывать это ради единообразия не надо.
- *
- * Плата за решение — расхождение на один бар, и оно названо вслух пометкой
- * «бар не закрыт» в легенде (см. `updateLegend`).
  */
 function drawForming(bar) {
   const b = bar || priceSeries.forming();
   if (!b) return;
+  const s = pscale(selected), v = qscale(selected);
+  const n = rawCandles.length;
+  const prev = n ? rawCandles[n - 1].time : b.time;
+  const kind = LiveBars.upsert(rawCandles, { time: b.time, open: b.open / s, high: b.high / s, low: b.low / s, close: b.close / s, volume: b.volume / v });
+  if (kind === 'old') return;
+  queueLiveIndicators(kind === 'new' ? prev : b.time);
   // Объём от типа графика не зависит: хейкин-аши пересчитывает цену, а сделки
   // остаются теми же.
   volume.update({ time: b.time, value: b.volume / qscale(selected), color: volColor(b) });

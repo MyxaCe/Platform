@@ -30,7 +30,8 @@
     "public/api.js",
     "public/diag.js",
     "public/stats.js",
-    "public/trades.js"
+    "public/trades.js",
+    "public/livebars.js"
   ],
   "exclude": ["node_modules"]
 }
