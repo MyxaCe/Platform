@@ -1476,13 +1476,38 @@
 
   function locale() { return TAGS[lang]; }
 
-  /** @type {Map<string, Intl.NumberFormat>} */
+  /** @typedef {{ format: (v: number) => string }} NumberFormatter */
+  /** @type {Map<string, NumberFormatter>} */
   const formats = new Map();
-  /** @param {Intl.NumberFormatOptions} opts */
+  /** @param {Intl.NumberFormatOptions} opts @returns {NumberFormatter} */
+  function plainFormat(opts) {
+    const digits = opts.maximumFractionDigits == null ? 2 : opts.maximumFractionDigits;
+    const percent = opts.style === 'percent';
+    const currency = opts.style === 'currency';
+    return {
+      format: (v) => {
+        const n = percent ? v * 100 : v;
+        const s = (n < 0 ? '-' : '') + Math.abs(n).toFixed(digits);
+        return currency ? (n < 0 ? '-$' + s.slice(1) : '$' + s) : percent ? s + '%' : s;
+      },
+    };
+  }
+  /** @param {Intl.NumberFormatOptions} opts @returns {NumberFormatter} */
+  function makeFormat(opts) {
+    try { return new Intl.NumberFormat(TAGS[lang], opts); } catch { /* */ }
+    if (opts.currencyDisplay) {
+      const rest = Object.assign({}, opts);
+      delete rest.currencyDisplay;
+      try { return new Intl.NumberFormat(TAGS[lang], rest); } catch { /* */ }
+    }
+    try { return new Intl.NumberFormat('en-US', opts); } catch { /* */ }
+    return plainFormat(opts);
+  }
+  /** @param {Intl.NumberFormatOptions} opts @returns {NumberFormatter} */
   function nf(opts) {
     const k = lang + JSON.stringify(opts);
     let f = formats.get(k);
-    if (!f) { f = new Intl.NumberFormat(TAGS[lang], opts); formats.set(k, f); }
+    if (!f) { f = makeFormat(opts); formats.set(k, f); }
     return f;
   }
 
