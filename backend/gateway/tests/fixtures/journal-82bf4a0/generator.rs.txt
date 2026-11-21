@@ -1,0 +1,188 @@
+#[cfg(test)]
+mod wave2_fixture_gen {
+    use super::*;
+    use broker::PositionModel;
+    use domain::account::UserId;
+
+    pub(crate) fn summary_of(
+        b: &Broker,
+        js: &HashMap<UserId, Journal>,
+        q: &std::collections::HashSet<UserId>,
+        user: UserId,
+        sym: &dyn Fn(u32) -> String,
+    ) -> String {
+        let raw = b.snapshot(user);
+        let mut s = raw.clone();
+        s.positions.sort_by_key(|p| p.id);
+        s.pendings.sort_by_key(|p| p.id);
+        let mut out = String::new();
+        out += &format!("user={} quarantined={}\n", user.0, q.contains(&user));
+        out += &format!(
+            "profile={:?} balance={} next_id={} model={:?} leverage={:?} fees={:?}\n",
+            s.profile, s.balance, s.next_id, s.model, s.leverage, s.fees
+        );
+        for p in &s.positions {
+            out += &format!("position {:?} symbol={}\n", p, sym(p.instrument));
+        }
+        for p in &s.pendings {
+            out += &format!("pending {:?} symbol={}\n", p, sym(p.instrument));
+        }
+        for c in &s.closed {
+            out += &format!("closed {:?} symbol={}\n", c, sym(c.instrument));
+        }
+        let empty = Journal::new(b.start_balance());
+        let j = js.get(&user).unwrap_or(&empty);
+        out += &format!(
+            "journal entries={} audit={} replayed_balance={}\n",
+            j.events().len(),
+            journal::audit(j, &raw).tag(),
+            j.replay().balance
+        );
+        for e in j.events() {
+            out += &format!("event {} {}\n", e.seq(), e.kind().encode());
+        }
+        out
+    }
+
+    async fn px(st: &AppState, id: u32, bid: i64, ask: i64) {
+        st.tickers.lock().await.insert(
+            id,
+            feed::Ticker {
+                last: (bid + ask) / 2,
+                change: 0.0,
+                high: ask,
+                bid,
+                ask,
+                ..Default::default()
+            },
+        );
+    }
+
+    async fn open(st: &AppState, u: UserId, inst: u32, side: PosSide, qty: i64, sl: Option<i64>, tp: Option<i64>) -> u64 {
+        let fi = feed_by_id(st, inst).unwrap();
+        let m = marks(st).await;
+        let t = *st.tickers.lock().await.get(&inst).unwrap();
+        let entry = if matches!(side, PosSide::Long) { t.ask } else { t.bid };
+        with_account_gated(st, u, Origin::Client, Gate::NotFrozen, |b| {
+            b.open(u, &m, inst, side, qty, entry, fi.price_decimals, fi.qty_decimals, sl, tp)
+                .map_err(deal_error)
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn pending(st: &AppState, u: UserId, inst: u32, side: PosSide, qty: i64, price: i64, sl: Option<i64>, tp: Option<i64>) -> u64 {
+        let fi = feed_by_id(st, inst).unwrap();
+        with_account_gated(st, u, Origin::Client, Gate::NotFrozen, |b| {
+            b.place_pending(u, inst, side, qty, price, fi.price_decimals, fi.qty_decimals, sl, tp)
+                .map_err(deal_error)
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn close(st: &AppState, u: UserId, id: u64) {
+        let m = marks(st).await;
+        with_account(st, u, Origin::Client, |b| {
+            let inst = b.positions(u).into_iter().find(|p| p.id == id).unwrap().instrument;
+            b.close(u, id, m[&inst]).map_err(deal_error)
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "генератор фикстуры волны 2"]
+    async fn generate_old_journal_fixture() {
+        let url = std::env::var("FIXTURE_DATABASE_URL").unwrap();
+        let out_dir = std::env::var("FIXTURE_OUT").unwrap();
+        let store = persistence::PgStore::connect(&url).await.unwrap();
+        let st = build_state_with(Arc::new(store));
+        restore_state(&st).await.unwrap();
+        let a = UserId(910001);
+        let n = UserId(910002);
+        let c = UserId(910003);
+
+        px(&st, 1, 6_500_000, 6_500_100).await;
+        px(&st, 2, 320_000, 320_010).await;
+        px(&st, 5, 21_000, 21_002).await;
+        px(&st, 8, 31_000, 31_010).await;
+        px(&st, 9, 3_500, 3_502).await;
+        px(&st, 22, 18_000, 18_010).await;
+        px(&st, 26, 4_100, 4_105).await;
+        px(&st, 28, 1_450, 1_452).await;
+
+        let a1 = open(&st, a, 1, PosSide::Long, 15_000, Some(6_300_000), Some(7_000_000)).await;
+        let a2 = open(&st, a, 28, PosSide::Short, 50_000_000, Some(1_600), Some(1_300)).await;
+        let a3 = open(&st, a, 9, PosSide::Long, 4_000, None, None).await;
+        let _p1 = pending(&st, a, 2, PosSide::Long, 2_000, 315_000, Some(300_000), None).await;
+        let _p2 = pending(&st, a, 26, PosSide::Short, 10_000, 4_500, None, None).await;
+        let p3 = pending(&st, a, 22, PosSide::Long, 300, 17_000, None, None).await;
+        with_account(&st, a, Origin::Client, |b| {
+            b.set_position_levels(a, a1, Some(6_350_000), Some(7_100_000), &[6_500_000])
+                .map_err(deal_error)
+        })
+        .await
+        .unwrap();
+        with_account(&st, a, Origin::Client, |b| b.cancel_pending(a, p3).map_err(deal_error))
+            .await
+            .unwrap();
+        px(&st, 28, 1_610, 1_612).await;
+        px(&st, 2, 314_000, 314_010).await;
+        monitor_tick(&st).await;
+        px(&st, 9, 3_650, 3_652).await;
+        close(&st, a, a3).await;
+        let _ = a2;
+
+        with_account(&st, n, Origin::Client, |b| {
+            b.adopt_model(n, PositionModel::Netting);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let op = journal::Operator::new("fixture", "тариф фикстуры", "wave2").unwrap();
+        money::apply_fees(&st, n, broker::Fees { markup_bps: 5, commission_bps: 7 }, op)
+            .await
+            .unwrap();
+        let op = journal::Operator::new("fixture", "плечо фикстуры", "wave2").unwrap();
+        money::apply_leverage(&st, n, 10, op).await.unwrap();
+        open(&st, n, 5, PosSide::Long, 5_000, None, Some(25_000)).await;
+        px(&st, 5, 21_500, 21_502).await;
+        open(&st, n, 5, PosSide::Long, 2_500, None, Some(25_000)).await;
+        px(&st, 5, 22_000, 22_002).await;
+        open(&st, n, 5, PosSide::Short, 3_000, None, None).await;
+        open(&st, n, 8, PosSide::Short, 400_000, Some(33_000), None).await;
+        px(&st, 8, 33_100, 33_110).await;
+        monitor_tick(&st).await;
+
+        with_account(&st, c, Origin::Client, |b| {
+            b.deposit(c, 250_000);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        open(&st, c, 22, PosSide::Long, 1_000, Some(17_500), None).await;
+        open(&st, c, 26, PosSide::Short, 200_000, None, Some(3_900)).await;
+        open(&st, c, 1, PosSide::Short, 2_000, None, None).await;
+        let m = marks(&st).await;
+        with_account(&st, c, Origin::Client, |b| {
+            b.withdraw(c, 100_000, &m).map_err(deal_error)
+        })
+        .await
+        .unwrap();
+        px(&st, 26, 3_880, 3_885).await;
+        monitor_tick(&st).await;
+
+        let st2 = build_state_with(st.store.clone());
+        restore_state(&st2).await.unwrap();
+        let b = st2.broker.lock().await;
+        let js = st2.journals.lock().await;
+        let q = st2.quarantined.lock().await;
+        let sym = |id: u32| feed_by_id(&st2, id).map(|f| f.symbol).unwrap_or_default();
+        let mut all = String::new();
+        for u in [a, n, c] {
+            all += &summary_of(&b, &js, &q, u, &sym);
+        }
+        std::fs::write(format!("{out_dir}/expected.txt"), all).unwrap();
+    }
+}

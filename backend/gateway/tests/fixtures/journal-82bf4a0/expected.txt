@@ -1,0 +1,59 @@
+user=910001 quarantined=false
+profile=AccountProfile { owner: UserId(910001), kind: Demo, origin: Registration, category_at_open: CategoryAtOpen(Retail), currency: Currency { code: [85, 83, 68], minor_units: 2 } } balance=9997910 next_id=7 model=Hedging leverage=None fees=Fees { markup_bps: 0, commission_bps: 0 }
+position Position { id: 1, instrument: 1, side: Long, qty: 15000, entry: 6500100, pd: 2, qd: 5, margin: 975015, sl: Some(6350000), tp: Some(7100000), leverage: 1, fees: PositionFees { markup_bps: 0, commission_bps: 0, commission: 0, markup: 0 } } symbol=BTC-USDT
+position Position { id: 7, instrument: 2, side: Long, qty: 2000, entry: 314005, pd: 2, qd: 4, margin: 62801, sl: Some(300000), tp: None, leverage: 1, fees: PositionFees { markup_bps: 0, commission_bps: 0, commission: 0, markup: 0 } } symbol=ETH-USDT
+pending PendingOrder { id: 5, instrument: 26, side: Short, qty: 10000, price: 4500, pd: 5, qd: 0, sl: None, tp: None } symbol=VET-USDT
+closed ClosedDeal { instrument: 28, side: Short, qty: 50000000, entry: 1450, exit: 1611, pnl: -8050, pd: 8, qd: 0, level: Some(1600), across_gap: Some(false), fees: DealFees { commission: 0, markup: 0, market_exit: Some(1611) } } symbol=SHIB-USDT
+closed ClosedDeal { instrument: 9, side: Long, qty: 4000, entry: 3502, exit: 3651, pnl: 5960, pd: 2, qd: 2, level: None, across_gap: Some(false), fees: DealFees { commission: 0, markup: 0, market_exit: Some(3651) } } symbol=AVAX-USDT
+journal entries=13 audit=reconciled replayed_balance=9997910
+event 1 account_opened balance=10000000 owner=910001 kind=demo origin=registration category_at_open=retail currency=USD
+event 2 position_opened id=1 instrument=1 side=long qty=15000 entry=6500100 pd=2 qd=5 sl=6300000 tp=7000000 lev=1
+event 3 position_opened id=2 instrument=28 side=short qty=50000000 entry=1450 pd=8 qd=0 sl=1600 tp=1300 lev=1
+event 4 position_opened id=3 instrument=9 side=long qty=4000 entry=3502 pd=2 qd=2 sl=- tp=- lev=1
+event 5 pending_placed id=4 instrument=2 side=long qty=2000 price=315000 pd=2 qd=4 sl=300000 tp=-
+event 6 pending_placed id=5 instrument=26 side=short qty=10000 price=4500 pd=5 qd=0 sl=- tp=-
+event 7 pending_placed id=6 instrument=22 side=long qty=300 price=17000 pd=4 qd=1 sl=- tp=-
+event 8 position_levels_changed id=1 sl=6350000 tp=7100000
+event 9 pending_cancelled id=6
+event 10 pending_triggered id=4 price=315000 exec=314005 gap=0
+event 11 position_opened id=7 instrument=2 side=long qty=2000 entry=314005 pd=2 qd=4 sl=300000 tp=- lev=1
+event 12 position_closed id=2 exit=1611 cause=stop_loss level=1600 gap=0
+event 13 position_closed id=3 exit=3651 cause=command level=- gap=0
+user=910002 quarantined=false
+profile=AccountProfile { owner: UserId(910002), kind: Demo, origin: Registration, category_at_open: CategoryAtOpen(Retail), currency: Currency { code: [85, 83, 68], minor_units: 2 } } balance=9129119 next_id=2 model=Netting leverage=Some(10) fees=Fees { markup_bps: 5, commission_bps: 7 }
+position Position { id: 1, instrument: 5, side: Long, qty: 4500, entry: 21180, pd: 4, qd: 1, margin: 9531, sl: None, tp: Some(25000), leverage: 10, fees: PositionFees { markup_bps: 5, commission_bps: 7, commission: 0, markup: 0 } } symbol=XRP-USDT
+closed ClosedDeal { instrument: 5, side: Long, qty: 3000, entry: 21180, exit: 21989, pnl: 2427, pd: 4, qd: 1, level: None, across_gap: Some(false), fees: DealFees { commission: 158, markup: 115, market_exit: Some(22000) } } symbol=XRP-USDT
+closed ClosedDeal { instrument: 8, side: Short, qty: 400000, entry: 30984, exit: 33122, pnl: -855200, pd: 5, qd: 0, level: Some(33000), across_gap: Some(false), fees: DealFees { commission: 17950, markup: 13200, market_exit: Some(33105) } } symbol=TRX-USDT
+journal entries=19 audit=reconciled replayed_balance=9129119
+event 1 account_opened balance=10000000 owner=910002 kind=demo origin=registration category_at_open=retail currency=USD
+event 2 model_adopted model=netting
+event 3 fees_set markup_bps=5 commission_bps=7
+event 4 leverage_set lev=10
+event 5 position_opened id=1 instrument=5 side=long qty=5000 entry=21013 pd=4 qd=1 sl=- tp=25000 lev=10
+event 6 markup_applied trade=1 mkt=21002 exec=21013 amount=55
+event 7 commission_charged amount=74 trade=1
+event 8 position_increased id=1 add_qty=2500 add_entry=21513 sl=- tp=25000
+event 9 markup_applied trade=1 mkt=21502 exec=21513 amount=27
+event 10 commission_charged amount=38 trade=1
+event 11 markup_applied trade=1 mkt=22000 exec=21989 amount=33
+event 12 commission_charged amount=46 trade=1
+event 13 position_reduced id=1 qty=3000 exit=21989
+event 14 position_opened id=2 instrument=8 side=short qty=400000 entry=30984 pd=5 qd=0 sl=33000 tp=- lev=10
+event 15 markup_applied trade=2 mkt=31000 exec=30984 amount=6400
+event 16 commission_charged amount=8676 trade=2
+event 17 markup_applied trade=2 mkt=33105 exec=33122 amount=6800
+event 18 commission_charged amount=9274 trade=2
+event 19 position_closed id=2 exit=33122 cause=stop_loss level=33000 gap=0
+user=910003 quarantined=false
+profile=AccountProfile { owner: UserId(910003), kind: Demo, origin: Registration, category_at_open: CategoryAtOpen(Retail), currency: Currency { code: [85, 83, 68], minor_units: 2 } } balance=10193600 next_id=3 model=Hedging leverage=None fees=Fees { markup_bps: 0, commission_bps: 0 }
+position Position { id: 1, instrument: 22, side: Long, qty: 1000, entry: 18010, pd: 4, qd: 1, margin: 18010, sl: Some(17500), tp: None, leverage: 1, fees: PositionFees { markup_bps: 0, commission_bps: 0, commission: 0, markup: 0 } } symbol=OP-USDT
+position Position { id: 3, instrument: 1, side: Short, qty: 2000, entry: 6500000, pd: 2, qd: 5, margin: 130000, sl: None, tp: None, leverage: 1, fees: PositionFees { markup_bps: 0, commission_bps: 0, commission: 0, markup: 0 } } symbol=BTC-USDT
+closed ClosedDeal { instrument: 26, side: Short, qty: 200000, entry: 4100, exit: 3882, pnl: 43600, pd: 5, qd: 0, level: Some(3900), across_gap: Some(false), fees: DealFees { commission: 0, markup: 0, market_exit: Some(3882) } } symbol=VET-USDT
+journal entries=7 audit=reconciled replayed_balance=10193600
+event 1 account_opened balance=10000000 owner=910003 kind=demo origin=registration category_at_open=retail currency=USD
+event 2 deposited amount=250000
+event 3 position_opened id=1 instrument=22 side=long qty=1000 entry=18010 pd=4 qd=1 sl=17500 tp=- lev=1
+event 4 position_opened id=2 instrument=26 side=short qty=200000 entry=4100 pd=5 qd=0 sl=- tp=3900 lev=1
+event 5 position_opened id=3 instrument=1 side=short qty=2000 entry=6500000 pd=2 qd=5 sl=- tp=- lev=1
+event 6 withdrawn amount=100000
+event 7 position_closed id=2 exit=3882 cause=take_profit level=3900 gap=0

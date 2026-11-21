@@ -2,6 +2,7 @@
 /target
 **/target
 Cargo.lock.bak
+/backend/data/
 
 # OS
 .DS_Store

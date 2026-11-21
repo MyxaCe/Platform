@@ -29,6 +29,8 @@ async fn main() {
     gateway::announce_account_mode(&state);
     gateway::spawn_bus_relay(&mut state);
     gateway::feed::spawn(state.clone()); // реальные данные с Binance (ADR-013)
+    gateway::instruments::spawn(state.clone());
+    gateway::feed_v2::spawn(state.clone());
     gateway::spawn_monitor(state.clone()); // триггеры лимитных ордеров и SL/TP (ADR-014)
 
     let app = gateway::router(state);

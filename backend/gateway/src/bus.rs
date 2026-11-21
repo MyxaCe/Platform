@@ -255,6 +255,9 @@ fn side_tag(s: PosSide) -> &'static str {
 /// то же, которым платформа задаёт allow-list: иначе у одного инструмента было бы
 /// два имени на одной границе.
 pub fn platform_symbol(f: &FeedInstrument) -> String {
+    if !f.canonical.is_empty() {
+        return f.canonical.clone();
+    }
     let up: String = f
         .binance
         .chars()
@@ -944,6 +947,18 @@ mod tests {
             quote: 100,
             price_decimals: 2,
             qty_decimals: 5,
+            ..FeedInstrument::default()
+        }
+    }
+
+    #[test]
+    fn platform_symbol_of_the_thirty_pairs_is_unchanged_by_the_registry() {
+        for f in crate::feed::instruments() {
+            let before = platform_symbol(&FeedInstrument {
+                canonical: String::new(),
+                ..f.clone()
+            });
+            assert_eq!(platform_symbol(&f), before, "{}", f.binance);
         }
     }
 

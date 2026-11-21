@@ -12,7 +12,7 @@ fn view<'a>(
     marks: &'a HashMap<u32, i64>,
     exec: &'a HashMap<u32, i64>,
     gap: &'a HashSet<u32>,
-    close_only: &'a dyn Fn(UserId, u32) -> bool,
+    close_only: &'a (dyn Fn(UserId, u32) -> bool + Sync),
     reject: bool,
 ) -> MarketView<'a> {
     MarketView {

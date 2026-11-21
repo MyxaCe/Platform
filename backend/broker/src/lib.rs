@@ -1230,7 +1230,7 @@ pub struct MarketView<'a> {
     pub marks: &'a HashMap<u32, i64>,
     pub exec: &'a HashMap<u32, i64>,
     pub gap: &'a HashSet<u32>,
-    pub close_only: &'a dyn Fn(UserId, u32) -> bool,
+    pub close_only: &'a (dyn Fn(UserId, u32) -> bool + Sync),
     pub reject_close_only: bool,
 }
 

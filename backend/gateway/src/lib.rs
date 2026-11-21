@@ -9,9 +9,12 @@
 
 /// Публикация событий счёта на шину платформы (TRM-40).
 pub mod bus;
+mod dec;
 /// Исключение истории счёта из реальных балансов и отчётности (TRM-48).
 pub mod exclusion;
 pub mod feed;
+pub mod feed_v2;
+pub mod instruments;
 /// Правило видимости по юрисдикции (TRM-15, Р-058). Публичный модуль, хотя
 /// вызывается сегодня только из тестов: он участник сверки реализаций между
 /// репозиториями, и прятать его значило бы прятать сам факт сверки.
@@ -23,6 +26,8 @@ mod money;
 mod sso;
 /// Минимальное расстояние SL/TP от цены — настройка площадки (сайта).
 mod stops;
+#[cfg(test)]
+mod wave2_tests;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,6 +63,7 @@ type KlineCache = HashMap<(u32, u32), (Instant, Vec<feed::Kline>)>;
 type DepthCache = HashMap<(u32, usize), (Instant, feed::Depth)>;
 /// Кэш статистики: инструмент → (время, изменения по таймфреймам).
 type StatsCache = HashMap<u32, (Instant, Vec<StatDto>)>;
+type DailyCache = HashMap<u32, (i64, i64, i64)>;
 /// Счёт → внешняя личность `(tenant, sub)`; `None` — счёт не привязан к сайту.
 type IdentityCache = HashMap<UserId, Option<BusIdentity>>;
 
@@ -75,8 +81,11 @@ const STAT_TFS: [u32; 8] = [60, 300, 900, 1800, 3600, 14400, 86400, 604800];
 #[derive(Clone)]
 pub struct AppState {
     events_tx: broadcast::Sender<String>,
-    // Реальные данные (Binance):
-    feed_instruments: Arc<Vec<feed::FeedInstrument>>,
+    catalog: Arc<std::sync::RwLock<instruments::Catalog>>,
+    markets: Arc<std::sync::Mutex<HashMap<u32, instruments::MarketState>>>,
+    platform: Arc<instruments::Platform>,
+    v2_last_msg: Arc<std::sync::atomic::AtomicI64>,
+    v2_daily: Arc<std::sync::Mutex<DailyCache>>,
     tickers: Arc<Mutex<HashMap<u32, feed::Ticker>>>,
     /// Unix-секунды последнего **принятого** сообщения Binance, 0 — не было ни одного.
     ///
@@ -124,10 +133,6 @@ pub struct AppState {
     /// `TenantSource::None` — источник не сконфигурирован вовсе. Это **не** «всё
     /// разрешено»: в тенантном режиме отсутствие списка закрывает торговлю.
     tenant_instruments: Arc<TenantSource>,
-    /// Сопоставление «символ → внутренний id», построенное из `DEFS` (Р-024).
-    ///
-    /// Граница перевода стоит здесь, у нас, потому что нумерация — наша деталь.
-    symbols: Arc<HashMap<String, u32>>,
     // SSO платформы (ADR-023, Т2): вход по handoff-JWT, сессии терминала.
     sso: Arc<sso::Sso>,
     /// Требовать ли сессию на торговых ручках. Выкл (dev/standalone) → счёт по умолчанию.
@@ -333,13 +338,15 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
     if !bus_real_events {
         eprintln!("[gateway] события реальных счетов на шину НЕ публикуются (BUS_REAL_ACCOUNT_EVENTS не задан): потребитель ещё не различает accountKind");
     }
-    let feed_instruments = feed::instruments();
-    let symbols = symbol_index(&feed_instruments);
-    let tenant_instruments = TenantSource::from_env(&symbols);
+    let catalog = instruments::Catalog::legacy();
+    let tenant_instruments = TenantSource::from_env(&catalog.index());
     AppState {
         events_tx,
-        feed_instruments: Arc::new(feed_instruments),
-        symbols: Arc::new(symbols),
+        catalog: Arc::new(std::sync::RwLock::new(catalog)),
+        markets: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        platform: Arc::new(instruments::Platform::from_env()),
+        v2_last_msg: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        v2_daily: Arc::new(std::sync::Mutex::new(HashMap::new())),
         tickers: Arc::new(Mutex::new(HashMap::new())),
         feed_last_msg: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         feed_gap_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -441,6 +448,7 @@ pub fn spawn_bus_relay(st: &mut AppState) {
 /// Поднять счета из хранилища. Вызывается один раз на старте, до приёма запросов.
 pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError> {
     st.store.init().await?;
+    instruments::load_registry(st).await?;
     // Ошибка чтения поднимается наружу и роняет старт. Это **не** то же самое, что
     // «журнала нет»: недоступное хранилище и пустая лента — разные беды, и сервис,
     // который их путает, стартует на выдуманной истории (TRM-13).
@@ -1080,6 +1088,76 @@ async fn commit_journal(st: &AppState, user: UserId, sealed: Vec<broker::journal
 }
 
 impl AppState {
+    pub(crate) fn catalog_snapshot(&self) -> Vec<feed::FeedInstrument> {
+        self.catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .by_id
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn catalog_get(&self, id: u32) -> Option<feed::FeedInstrument> {
+        self.catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    pub(crate) fn symbol_index(&self) -> HashMap<String, u32> {
+        self.catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .index()
+    }
+
+    pub(crate) fn platform_mode(&self, id: u32) -> instruments::Mode {
+        self.catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .platform_mode(id)
+    }
+
+    pub(crate) fn subscriptions_v1(
+        &self,
+    ) -> tokio::sync::watch::Receiver<std::collections::BTreeSet<String>> {
+        self.platform.subscriptions_v1()
+    }
+
+    pub(crate) fn mark_v2_alive(&self) {
+        self.v2_last_msg
+            .store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn v2_silent_for_secs(&self) -> i64 {
+        now_secs() - self.v2_last_msg.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn v2_daily_of(&self, id: u32) -> Option<(i64, i64, i64)> {
+        self.v2_daily
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .copied()
+    }
+
+    pub(crate) fn set_v2_daily(&self, id: u32, v: (i64, i64, i64)) {
+        self.v2_daily
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, v);
+    }
+
+    pub(crate) fn market_of(&self, id: u32) -> Option<instruments::MarketState> {
+        self.markets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .cloned()
+    }
+
     /// Отметить, что от Binance пришло опознанное сообщение (см. `feed_last_msg`).
     pub(crate) fn mark_feed_alive(&self) {
         self.feed_last_msg
@@ -1145,7 +1223,7 @@ fn normalize_symbol(s: &str) -> String {
 /// разрешение «поплывёт» молча. Ловится тестом `symbol_index_has_no_collisions`.
 fn symbol_index(instruments: &[feed::FeedInstrument]) -> HashMap<String, u32> {
     let mut out: HashMap<String, u32> = HashMap::new();
-    for f in instruments {
+    for f in instruments.iter().filter(|f| f.source == feed::Source::V1) {
         let binance = normalize_symbol(&f.binance);
         let mut spellings = vec![binance.clone(), normalize_symbol(&f.symbol)];
         if let Some(base) = binance.strip_suffix("USDT") {
@@ -1164,6 +1242,23 @@ fn symbol_index(instruments: &[feed::FeedInstrument]) -> HashMap<String, u32> {
                     );
                 }
                 _ => {}
+            }
+        }
+    }
+    for f in instruments.iter().filter(|f| !f.canonical.is_empty()) {
+        let canonical = normalize_symbol(&f.canonical);
+        let mut spellings = vec![canonical];
+        if f.source == feed::Source::V2 {
+            spellings.push(normalize_symbol(&f.binance));
+        }
+        for s in spellings {
+            if let Some(other) = out.insert(s.clone(), f.id) {
+                if other != f.id {
+                    eprintln!(
+                        "[gateway] символ платформы «{s}» отдан инструменту {} (до этого псевдоним инструмента {other})",
+                        f.id
+                    );
+                }
             }
         }
     }
@@ -1364,11 +1459,12 @@ impl TenantSource {
     }
 
     /// Список сайта. Любой отказ закрывает торговлю и называет причину в логе.
-    async fn allow_list(
+    async fn site_lists(
         &self,
         site: &str,
         index: &HashMap<String, u32>,
-    ) -> Result<Vec<u32>, NoList> {
+    ) -> Result<(Vec<u32>, Vec<u32>), NoList> {
+        let mut close_only: Vec<u32> = Vec::new();
         let list = match self {
             TenantSource::None => {
                 eprintln!(
@@ -1415,6 +1511,12 @@ impl TenantSource {
                         return Err(NoList::Unavailable);
                     }
                 };
+                close_only = body
+                    .close_only_instruments
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|s| index.get(&normalize_symbol(s)).copied())
+                    .collect();
                 match body.instruments {
                     // Отсутствие поля — это «источник ничего не сказал», а не
                     // «ничего не разрешено» и тем более не «разрешено всё».
@@ -1427,7 +1529,10 @@ impl TenantSource {
             }
         };
         match list {
-            TenantAllowList::Resolved(ids) => Ok(ids),
+            TenantAllowList::Resolved(ids) => {
+                close_only.retain(|id| ids.contains(id));
+                Ok((ids, close_only))
+            }
             TenantAllowList::Unknown(unknown) => {
                 eprintln!(
                     "[gateway] {site}: allow-list содержит неизвестные терминалу символы [{}] — \
@@ -1456,6 +1561,8 @@ struct SiteConfigDto {
     /// `instruments: None` не значит «ничего не разрешено».
     #[serde(default, rename = "demoStartBalanceCents")]
     demo_start_balance_cents: Option<i128>,
+    #[serde(default, rename = "closeOnlyInstruments")]
+    close_only_instruments: Option<Vec<String>>,
 }
 
 /// Ответ источника про стартовую сумму демо-счёта.
@@ -1538,19 +1645,81 @@ async fn ensure_can_open(st: &AppState, who: &Principal, instrument: u32) -> Res
         return Err(err(StatusCode::FORBIDDEN, "identity_not_verified"));
     }
 
+    let platform_close_only = st.catalog_get(instrument).is_some()
+        && st.platform_mode(instrument) == instruments::Mode::CloseOnly;
     let Some(tenant) = who.tenant.as_deref() else {
+        if platform_close_only {
+            return Err(err(StatusCode::CONFLICT, "instrument_close_only"));
+        }
         return Ok(()); // standalone: сайта нет, ограничивать нечем и не от чьего имени
     };
-    let allowed = st
+    let (allowed, close_only) = st
         .tenant_instruments
-        .allow_list(tenant, &st.symbols)
+        .site_lists(tenant, &st.symbol_index())
         .await
         .map_err(|e| e.api())?;
-    if allowed.contains(&instrument) {
-        Ok(())
-    } else {
-        Err(err(StatusCode::FORBIDDEN, "instrument_not_allowed"))
+    st.platform
+        .note_site_close_only(tenant, close_only.iter().copied().collect());
+    if !allowed.contains(&instrument) {
+        return Err(err(StatusCode::FORBIDDEN, "instrument_not_allowed"));
     }
+    if platform_close_only || close_only.contains(&instrument) {
+        return Err(err(StatusCode::CONFLICT, "instrument_close_only"));
+    }
+    Ok(())
+}
+
+fn market_closed(code: &str, next_open: Option<i64>) -> ApiErr {
+    (
+        StatusCode::CONFLICT,
+        Json(ErrResp {
+            error: code.to_string(),
+            extra: Some(serde_json::json!({ "next_open": next_open })),
+        }),
+    )
+}
+
+fn market_gate(st: &AppState, instrument: u32) -> Result<(), ApiErr> {
+    let Some(m) = st.market_of(instrument) else {
+        return Ok(());
+    };
+    match m.status {
+        instruments::Status::Closed => Err(market_closed("market_closed", m.next_open)),
+        instruments::Status::Halted => Err(market_closed("market_halted", m.next_open)),
+        instruments::Status::Open if !m.tradable(now_ms()) => {
+            Err(err(StatusCode::SERVICE_UNAVAILABLE, "no price yet"))
+        }
+        instruments::Status::Open => Ok(()),
+    }
+}
+
+fn qty_gate(fi: &feed::FeedInstrument, qty: i64) -> Result<(), ApiErr> {
+    if fi.legacy {
+        return Ok(());
+    }
+    if let Some(min) = fi.min_qty.filter(|m| *m > 0) {
+        if qty < min {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrResp {
+                    error: "qty_below_min".into(),
+                    extra: Some(serde_json::json!({ "min_qty": min })),
+                }),
+            ));
+        }
+    }
+    if let Some(step) = fi.qty_step.filter(|s| *s > 0) {
+        if qty % step != 0 {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrResp {
+                    error: "qty_not_multiple_of_step".into(),
+                    extra: Some(serde_json::json!({ "qty_step": step })),
+                }),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Текущие марк-цены (инструмент → last) из фида — для P&L/equity брокера.
@@ -1564,7 +1733,7 @@ async fn marks(st: &AppState) -> HashMap<u32, i64> {
 }
 
 fn feed_by_id(st: &AppState, id: u32) -> Option<feed::FeedInstrument> {
-    st.feed_instruments.iter().find(|f| f.id == id).cloned()
+    st.catalog_get(id)
 }
 
 /// `Authorization: Bearer <token>` → сам токен.
@@ -1629,6 +1798,7 @@ pub fn router(state: AppState) -> Router {
         // проксирует только явный список префиксов и `/internal` закрывает сам.
         .merge(money::routes())
         .merge(stops::routes())
+        .merge(instruments::routes())
         .with_state(state)
 }
 
@@ -1658,6 +1828,7 @@ fn err(code: StatusCode, msg: &str) -> ApiErr {
 struct CandleQuery {
     tf: Option<u32>,
     limit: Option<usize>,
+    end: Option<i64>,
 }
 #[derive(Serialize)]
 struct CandleDto {
@@ -1666,7 +1837,7 @@ struct CandleDto {
     high: i64,
     low: i64,
     close: i64,
-    volume: i64,
+    volume: Option<i64>,
 }
 #[derive(Deserialize)]
 struct DealReq {
@@ -1848,6 +2019,27 @@ struct InstrumentDto {
     low: Option<i64>,
     volume: Option<i64>,
     quote_volume: Option<i64>,
+    canonical: String,
+    name: Option<String>,
+    category: String,
+    tick_size: Option<i64>,
+    qty_step: Option<i64>,
+    min_qty: Option<i64>,
+    contract_size: Option<String>,
+    lot_decimals: Option<u8>,
+    has_depth: bool,
+    has_trades: bool,
+    has_1s: bool,
+    mode: &'static str,
+    market: MarketDto,
+    session: Option<serde_json::Value>,
+}
+#[derive(Serialize)]
+struct MarketDto {
+    status: &'static str,
+    next_open: Option<i64>,
+    reason: Option<String>,
+    tradable: bool,
 }
 #[derive(Serialize)]
 struct DepthResp {
@@ -1908,6 +2100,11 @@ struct HealthDto {
     shared_account: bool,
     /// Включены ли внутренние денежные ручки (задан ли `INTERNAL_MONEY_TOKEN`).
     internal_money: bool,
+    feed_v2: Option<bool>,
+    feed_v2_age_secs: Option<i64>,
+    platform_instruments_source: &'static str,
+    platform_instruments_version: Option<i64>,
+    platform_instruments: usize,
 }
 
 /// Насколько старым может быть последнее сообщение Binance, чтобы фид считался живым.
@@ -1917,6 +2114,10 @@ const FEED_STALE_AFTER_SECS: i64 = 30;
 async fn health(State(st): State<AppState>) -> Json<HealthDto> {
     let last = st.feed_last_msg.load(std::sync::atomic::Ordering::Relaxed);
     let age = (last > 0).then(|| now_secs() - last);
+    let (cat_source, cat_version, cat_len) = {
+        let cat = st.catalog.read().unwrap_or_else(|e| e.into_inner());
+        (cat.source, cat.version, cat.platform.len())
+    };
     Json(HealthDto {
         status: "ok",
         storage: st.store.kind(),
@@ -1929,6 +2130,18 @@ async fn health(State(st): State<AppState>) -> Json<HealthDto> {
         outbox_pending: st.store.outbox_backlog().await.ok(),
         shared_account: !st.sso_enabled,
         internal_money: st.internal_money_token.is_some(),
+        feed_v2: st
+            .platform
+            .v2
+            .as_ref()
+            .map(|_| st.v2_silent_for_secs() <= instruments::QUOTE_STALE_MS / 1000),
+        feed_v2_age_secs: st.platform.v2.as_ref().and_then(|_| {
+            let last = st.v2_last_msg.load(std::sync::atomic::Ordering::Relaxed);
+            (last > 0).then(|| now_secs() - last)
+        }),
+        platform_instruments_source: cat_source,
+        platform_instruments_version: cat_version,
+        platform_instruments: cat_len,
     })
 }
 
@@ -1959,14 +2172,18 @@ async fn list_instruments(
     State(st): State<AppState>,
     Query(q): Query<SiteQuery>,
 ) -> Result<Json<Vec<InstrumentDto>>, ApiErr> {
+    let mut site_close_only: Vec<u32> = Vec::new();
     let allowed: Option<Vec<u32>> = match q.site.as_deref().filter(|s| !s.is_empty()) {
         None => None,
         Some(site) => {
-            let list = st
+            let (list, close_only) = st
                 .tenant_instruments
-                .allow_list(site, &st.symbols)
+                .site_lists(site, &st.symbol_index())
                 .await
                 .map_err(|e| e.api())?;
+            st.platform
+                .note_site_close_only(site, close_only.iter().copied().collect());
+            site_close_only = close_only;
             if list.is_empty() {
                 // «Пустой список инструментов не отдаётся никогда» (КОНТРАКТЫ §4б).
                 // Сайту действительно ничего не разрешено (Р-025) — но пустой массив
@@ -1980,13 +2197,40 @@ async fn list_instruments(
             Some(list)
         }
     };
+    let exposed = instruments::exposure_ids(&st).await;
+    let (shown, modes) = {
+        let cat = st.catalog.read().unwrap_or_else(|e| e.into_inner());
+        let shown = cat.shown(&exposed);
+        let modes: HashMap<u32, instruments::Mode> = shown
+            .iter()
+            .map(|f| (f.id, cat.platform_mode(f.id)))
+            .collect();
+        (shown, modes)
+    };
+    let now = now_ms();
+    let markets = st.markets.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let tickers = st.tickers.lock().await;
-    let out = st
-        .feed_instruments
+    let out = shown
         .iter()
         .filter(|f| allowed.as_ref().is_none_or(|a| a.contains(&f.id)))
         .map(|f| {
             let t = tickers.get(&f.id);
+            let close_only = modes.get(&f.id) == Some(&instruments::Mode::CloseOnly)
+                || site_close_only.contains(&f.id);
+            let market = match markets.get(&f.id) {
+                Some(m) => MarketDto {
+                    status: m.status.tag(),
+                    next_open: m.next_open,
+                    reason: m.reason.clone(),
+                    tradable: m.tradable(now),
+                },
+                None => MarketDto {
+                    status: "open",
+                    next_open: None,
+                    reason: None,
+                    tradable: true,
+                },
+            };
             InstrumentDto {
                 id: f.id,
                 symbol: f.symbol.clone(),
@@ -1998,10 +2242,28 @@ async fn list_instruments(
                 bid: t.map(|t| t.bid),
                 ask: t.map(|t| t.ask),
                 high: t.map(|t| t.high),
-                change: t.map(|t| t.change),
+                change: t.map(|t| t.change).filter(|c| c.is_finite()),
                 low: t.and_then(|t| t.low),
                 volume: t.and_then(|t| t.volume),
                 quote_volume: t.and_then(|t| t.quote_volume),
+                canonical: f.canonical.clone(),
+                name: f.name.clone(),
+                category: f.category.clone(),
+                tick_size: f.tick_size,
+                qty_step: f.qty_step,
+                min_qty: f.min_qty,
+                contract_size: f.contract_size.clone(),
+                lot_decimals: f.lot_decimals,
+                has_depth: f.has_depth,
+                has_trades: f.has_trades,
+                has_1s: f.has_1s,
+                mode: if close_only {
+                    instruments::Mode::CloseOnly.tag()
+                } else {
+                    instruments::Mode::Trade.tag()
+                },
+                market,
+                session: f.session.clone(),
             }
         })
         .collect();
@@ -2020,8 +2282,11 @@ async fn get_candles(
     let tf = q.tf.unwrap_or(3600);
     let limit = q.limit.unwrap_or(300).min(1000);
     let fi = feed_by_id(&st, id).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
+    if tf == 1 && !fi.has_1s {
+        return Err(err(StatusCode::BAD_REQUEST, "interval_unsupported"));
+    }
     let key = (id, tf);
-    {
+    if q.end.is_none() {
         let cache = st.klines_cache.lock().await;
         if let Some((t, v)) = cache.get(&key) {
             if t.elapsed() < Duration::from_secs(2) {
@@ -2029,21 +2294,36 @@ async fn get_candles(
             }
         }
     }
-    match feed::fetch_klines(
-        &fi.binance,
-        feed::interval(tf),
-        500,
-        fi.price_decimals,
-        fi.qty_decimals,
-    )
-    .await
-    {
+    let fetch_n = if q.end.is_some() { limit } else { 500 };
+    let fetched = match fi.source {
+        feed::Source::V1 => {
+            feed::fetch_klines(
+                &fi.binance,
+                feed::interval(tf),
+                fetch_n,
+                q.end,
+                fi.price_decimals,
+                fi.qty_decimals,
+            )
+            .await
+        }
+        feed::Source::V2 => match (&st.platform.v2, feed_v2::interval(tf)) {
+            (Some(v2), Some(iv)) => {
+                feed_v2::fetch_candles(&st.platform.http, v2, &fi, iv, fetch_n, q.end).await
+            }
+            (None, _) => Err("модуль v2 не настроен".into()),
+            (_, None) => return Err(err(StatusCode::BAD_REQUEST, "interval_unsupported")),
+        },
+    };
+    match fetched {
         Ok(v) => {
             let out = tail_dto(&v, limit);
-            st.klines_cache
-                .lock()
-                .await
-                .insert(key, (Instant::now(), v));
+            if q.end.is_none() {
+                st.klines_cache
+                    .lock()
+                    .await
+                    .insert(key, (Instant::now(), v));
+            }
             Ok(Json(out))
         }
         Err(e) => {
@@ -2076,6 +2356,9 @@ async fn get_depth(
     Query(q): Query<DepthQuery>,
 ) -> Result<Json<DepthResp>, ApiErr> {
     let fi = feed_by_id(&st, id).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
+    if !fi.has_depth {
+        return Err(err(StatusCode::NOT_FOUND, "depth_unavailable"));
+    }
     // Клиент просит глубину под свой шаг группировки; Binance принимает фиксированный набор.
     let limit = match q.limit.unwrap_or(20) {
         0..=20 => 20,
@@ -2097,7 +2380,16 @@ async fn get_depth(
             }
         }
     }
-    match feed::fetch_depth(&fi.binance, limit, fi.price_decimals, fi.qty_decimals).await {
+    let fetched = match (fi.source, &st.platform.v2) {
+        (feed::Source::V1, _) => {
+            feed::fetch_depth(&fi.binance, limit, fi.price_decimals, fi.qty_decimals).await
+        }
+        (feed::Source::V2, Some(v2)) => {
+            feed_v2::fetch_depth(&st.platform.http, v2, &fi, limit.min(100)).await
+        }
+        (feed::Source::V2, None) => Err("модуль v2 не настроен".into()),
+    };
+    match fetched {
         Ok(d) => {
             let resp = DepthResp {
                 price_decimals: fi.price_decimals,
@@ -2138,8 +2430,23 @@ async fn get_stats(
     let futs = STAT_TFS.iter().map(|&tf| {
         let sym = fi.binance.clone();
         let label = fi.symbol.clone();
+        let source = fi.source;
+        let st = st.clone();
         async move {
-            match feed::fetch_change(&sym, feed::interval(tf)).await {
+            let got = match (source, &st.platform.v2) {
+                (feed::Source::V1, _) => feed::fetch_change(&sym, feed::interval(tf)).await,
+                (feed::Source::V2, Some(v2)) => {
+                    feed_v2::fetch_change(
+                        &st.platform.http,
+                        v2,
+                        &sym,
+                        feed_v2::interval(tf).unwrap_or("1h"),
+                    )
+                    .await
+                }
+                (feed::Source::V2, None) => Err("модуль v2 не настроен".into()),
+            };
+            match got {
                 Ok(change) => StatDto {
                     tf,
                     change: Some(change),
@@ -2178,6 +2485,8 @@ async fn open_deal(
     }
     let fi = feed_by_id(&st, req.instrument)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
+    market_gate(&st, req.instrument)?;
+    qty_gate(&fi, req.qty)?;
     let (entry, mark) = {
         let tickers = st.tickers.lock().await;
         let t = tickers
@@ -2268,6 +2577,7 @@ async fn place_pending(
     }
     let fi = feed_by_id(&st, req.instrument)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown instrument"))?;
+    qty_gate(&fi, req.qty)?;
     // У лимитного ордера вход — цена ордера: от неё и отсчитывается минимум.
     let min_bps = st.stops.for_tenant(who.tenant.as_deref()).await;
     stops::check(side, req.price, req.sl, req.tp, min_bps)
@@ -2438,6 +2748,17 @@ async fn close_deal(
     Path(id): Path<u64>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let user = require_user(&st, &headers).await?;
+    let inst = st
+        .broker
+        .lock()
+        .await
+        .positions(user)
+        .into_iter()
+        .find(|p| p.id == id)
+        .map(|p| p.instrument);
+    if let Some(inst) = inst {
+        market_gate(&st, inst)?;
+    }
     let m = marks(&st).await;
     let (pnl, mark) = with_account(&st, user, Origin::Client, |b| {
         let inst = b
@@ -2866,6 +3187,44 @@ pub async fn monitor_tick(st: &AppState) {
     // снова непрерывен. Порог тот же, что у `/health`: два разных
     // числа для одного вопроса однажды разойдутся.
     let across_gap = st.note_feed_gap();
+    let now = now_ms();
+    let (exec, gap) = {
+        let mut markets = st.markets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut exec = m.clone();
+        let mut gap = std::collections::HashSet::new();
+        for (id, state) in markets.iter_mut() {
+            if !state.tradable(now) {
+                exec.remove(id);
+                state.gap = true;
+            } else if state.gap {
+                gap.insert(*id);
+            }
+        }
+        (exec, gap)
+    };
+    let tenants: HashMap<UserId, String> = st
+        .identities
+        .lock()
+        .await
+        .iter()
+        .filter_map(|(u, i)| i.as_ref().map(|i| (*u, i.tenant.clone())))
+        .collect();
+    let site_close_only = st.platform.site_close_only_snapshot();
+    let platform_close_only: std::collections::HashSet<u32> = {
+        let cat = st.catalog.read().unwrap_or_else(|e| e.into_inner());
+        cat.by_id
+            .keys()
+            .copied()
+            .filter(|id| cat.platform_mode(*id) == instruments::Mode::CloseOnly)
+            .collect()
+    };
+    let close_only = |u: UserId, i: u32| {
+        platform_close_only.contains(&i)
+            || tenants
+                .get(&u)
+                .and_then(|t| site_close_only.get(t))
+                .is_some_and(|s| s.contains(&i))
+    };
     // Замороженные счета — по свёртке журналов (заморозку держит шлюз, не
     // брокер). Их сработавшие отложенные ордера снимаются, а не исполняются:
     // проверка на постановке ордера не закрывает ордер, поставленный ДО
@@ -2878,11 +3237,26 @@ pub async fn monitor_tick(st: &AppState) {
             .filter(|(_, j)| j.state().trading_frozen)
             .map(|(u, _)| *u)
             .collect();
+        let view = broker::MarketView {
+            marks: &m,
+            exec: &exec,
+            gap: &gap,
+            close_only: &close_only,
+            reject_close_only: st.platform.reject_close_only,
+        };
         st.broker
             .lock()
             .await
-            .check_with_frozen(&m, across_gap, &frozen)
+            .check_market(&view, across_gap, &frozen)
     };
+    if !gap.is_empty() {
+        let mut markets = st.markets.lock().unwrap_or_else(|e| e.into_inner());
+        for id in &gap {
+            if let Some(state) = markets.get_mut(id) {
+                state.gap = false;
+            }
+        }
+    }
     for user in changed {
         let lock = account_lock(st, user).await;
         let _guard = lock.lock().await;

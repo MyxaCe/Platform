@@ -55,6 +55,11 @@ services:
       CMS_BASE_URL: ${CMS_BASE_URL:-}
       CMS_API_KEY: ${CMS_API_KEY:-}
       TENANT_INSTRUMENTS: ${TENANT_INSTRUMENTS:-}
+      MARKET_V2_API_URL: ${MARKET_V2_API_URL:-}
+      MARKET_V2_WS_URL: ${MARKET_V2_WS_URL:-}
+      CMS_WEBHOOK_SECRET: ${CMS_WEBHOOK_SECRET:-}
+      PLATFORM_INSTRUMENTS_CACHE: /data/platform-instruments.json
+      CLOSE_ONLY_REJECT_PENDING_ENABLED: ${CLOSE_ONLY_REJECT_PENDING_ENABLED:-0}
       # Шина платформы (TRM-40). Пусто → релей не запускается, но исходящая
       # очередь наполняется: события копятся в bus_outbox и уедут после
       # настройки. Кредл нужен свой, publish-only (КОНТРАКТЫ §4а).
@@ -97,6 +102,8 @@ services:
       BUS_EXCHANGE: ${BUS_EXCHANGE:-platform.events}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - gateway-data:/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -131,3 +138,4 @@ services:
 
 volumes:
   pgdata:
+  gateway-data:

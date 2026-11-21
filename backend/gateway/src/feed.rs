@@ -46,8 +46,32 @@ pub fn masked(url: &str) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Source {
+    #[default]
+    V1,
+    V2,
+}
+
+impl Source {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Source::V1 => "v1",
+            Source::V2 => "v2",
+        }
+    }
+
+    pub fn parse(t: &str) -> Option<Source> {
+        match t {
+            "v1" => Some(Source::V1),
+            "v2" => Some(Source::V2),
+            _ => None,
+        }
+    }
+}
+
 /// Инструмент фида (крипто-пара Binance).
-#[derive(Clone)]
+#[derive(Clone, Debug, Default)]
 pub struct FeedInstrument {
     pub id: u32,
     pub symbol: String,  // отображаемый, "ETH-USDT"
@@ -56,6 +80,20 @@ pub struct FeedInstrument {
     pub quote: u32,
     pub price_decimals: u8,
     pub qty_decimals: u8,
+    pub canonical: String,
+    pub source: Source,
+    pub category: String,
+    pub name: Option<String>,
+    pub tick_size: Option<i64>,
+    pub qty_step: Option<i64>,
+    pub min_qty: Option<i64>,
+    pub contract_size: Option<String>,
+    pub lot_decimals: Option<u8>,
+    pub has_depth: bool,
+    pub has_trades: bool,
+    pub has_1s: bool,
+    pub session: Option<Value>,
+    pub legacy: bool,
 }
 
 /// Живая котировка (raw-единицы).
@@ -85,7 +123,7 @@ pub struct Kline {
     pub high: i64,
     pub low: i64,
     pub close: i64,
-    pub volume: i64,
+    pub volume: Option<i64>,
 }
 
 /// Топ-30 крипто-пар: (Binance-символ, price_decimals, qty_decimals).
@@ -134,6 +172,35 @@ pub fn instruments() -> Vec<FeedInstrument> {
             quote: 100,
             price_decimals: pd,
             qty_decimals: qd,
+            canonical: canonical_of_usdt(bn),
+            source: Source::V1,
+            category: "crypto".into(),
+            has_depth: true,
+            has_trades: true,
+            has_1s: true,
+            legacy: true,
+            ..FeedInstrument::default()
+        })
+        .collect()
+}
+
+pub fn canonical_of_usdt(binance: &str) -> String {
+    match binance.strip_suffix("USDT") {
+        Some(base) if !base.is_empty() => format!("{base}USD"),
+        _ => binance.to_string(),
+    }
+}
+
+pub fn legacy_rows() -> Vec<persistence::InstrumentRow> {
+    instruments()
+        .into_iter()
+        .map(|f| persistence::InstrumentRow {
+            id: f.id,
+            symbol: f.canonical,
+            source: Source::V1.tag().into(),
+            provider_symbol: f.binance,
+            price_decimals: f.price_decimals,
+            qty_decimals: f.qty_decimals,
         })
         .collect()
 }
@@ -160,7 +227,7 @@ pub fn interval(tf: u32) -> &'static str {
 /// неразобранная цена превращалась в **цену 0**, неотличимую от котировки: отказ
 /// уезжал в тикеры, свечи и стакан под видом данных (BUG-011). Ноль — правдоподобное
 /// значение, поэтому отказ обязан выходить наружу отказом.
-fn to_raw(s: &str, dec: u8) -> Option<i64> {
+pub(crate) fn to_raw(s: &str, dec: u8) -> Option<i64> {
     let v: f64 = s.parse().ok()?;
     if !v.is_finite() {
         return None;
@@ -199,7 +266,7 @@ pub async fn fetch_depth(binance: &str, limit: usize, pd: u8, qd: u8) -> Result<
 ///
 /// Уровень с неразобранными числами пропускаем, но счётчик отдаём наружу: молчаливый
 /// пропуск искажает стакан, а знать об этом надо (BUG-011).
-fn depth_from_json(v: &Value, pd: u8, qd: u8) -> (Depth, usize) {
+pub(crate) fn depth_from_json(v: &Value, pd: u8, qd: u8) -> (Depth, usize) {
     let mut skipped = 0usize;
     let mut parse = |side: &Value| -> Vec<(i64, i64)> {
         side.as_array()
@@ -245,7 +312,7 @@ pub async fn fetch_change(binance: &str, interval: &str) -> Result<f64, String> 
 ///
 /// Отказ разбора — это отказ, а не «изменение 0.00 %»: ноль процентов означает
 /// «рынок стоял», и отличить его от «мы не смогли посчитать» вызывающий обязан.
-fn change_from_row(row: &[Value]) -> Result<f64, String> {
+pub(crate) fn change_from_row(row: &[Value]) -> Result<f64, String> {
     let num = |i: usize| -> Result<f64, String> {
         row.get(i)
             .and_then(|v| v.as_str())
@@ -265,13 +332,17 @@ pub async fn fetch_klines(
     binance: &str,
     interval: &str,
     limit: usize,
+    end: Option<i64>,
     pd: u8,
     qd: u8,
 ) -> Result<Vec<Kline>, String> {
-    let url = format!(
+    let mut url = format!(
         "{}/api/v3/klines?symbol={binance}&interval={interval}&limit={limit}",
         rest_base()
     );
+    if let Some(end) = end {
+        url.push_str(&format!("&endTime={end}"));
+    }
     let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("binance {}", resp.status()));
@@ -304,69 +375,113 @@ fn klines_from_rows(rows: &[Vec<Value>], pd: u8, qd: u8) -> Result<Vec<Kline>, S
                 high: raw_at(r, 2, pd)?,
                 low: raw_at(r, 3, pd)?,
                 close: raw_at(r, 4, pd)?,
-                volume: raw_at(r, 5, qd)?,
+                volume: Some(raw_at(r, 5, qd)?),
             })
         })
         .collect()
 }
 
+pub const RESUBSCRIBE_MIN_SECS: u64 = 30;
+
+type V1Index = HashMap<String, (u32, u8, u8)>;
+
+fn v1_index(state: &AppState) -> V1Index {
+    state
+        .catalog_snapshot()
+        .into_iter()
+        .filter(|f| f.source == Source::V1)
+        .map(|f| (f.binance.clone(), (f.id, f.price_decimals, f.qty_decimals)))
+        .collect()
+}
+
+pub fn stream_url(base: &str, symbols: &std::collections::BTreeSet<String>) -> String {
+    let streams: Vec<String> = symbols
+        .iter()
+        .flat_map(|b| {
+            let s = b.to_lowercase();
+            [format!("{s}@ticker"), format!("{s}@aggTrade")]
+        })
+        .collect();
+    format!("{base}/stream?streams={}", streams.join("/"))
+}
+
 /// Запустить WS-фид Binance: @ticker (котировки) + @aggTrade (сделки). Реконнект при обрыве.
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
-        // Индекс: Binance-символ (верхний регистр) → (id, pd, qd).
-        let index: HashMap<String, (u32, u8, u8)> = state
-            .feed_instruments
-            .iter()
-            .map(|f| (f.binance.clone(), (f.id, f.price_decimals, f.qty_decimals)))
-            .collect();
-
-        let streams: Vec<String> = state
-            .feed_instruments
-            .iter()
-            .flat_map(|f| {
-                let s = f.binance.to_lowercase();
-                [format!("{s}@ticker"), format!("{s}@aggTrade")]
-            })
-            .collect();
-        let url = format!("{}/stream?streams={}", ws_base(), streams.join("/"));
         println!(
             "[feed] источник рыночных данных: REST {}, WS {}",
             masked(rest_base()),
             masked(ws_base())
         );
-
+        let mut subs = state.subscriptions_v1();
         loop {
-            match connect_async(&url).await {
-                Ok((mut ws, _)) => {
-                    println!(
-                        "[feed] Binance подключён ({} пар)",
-                        state.feed_instruments.len()
-                    );
-                    while let Some(msg) = ws.next().await {
-                        match msg {
-                            Ok(Message::Text(t)) => handle_msg(&state, &index, &t).await,
-                            Ok(Message::Ping(p)) => {
-                                let _ = ws.send(Message::Pong(p)).await;
+            let wanted = subs.borrow_and_update().clone();
+            if wanted.is_empty() {
+                if subs.changed().await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            let url = stream_url(ws_base(), &wanted);
+            let mut ws = match connect_async(&url).await {
+                Ok((ws, _)) => ws,
+                Err(e) => {
+                    eprintln!("[feed] ошибка подключения: {e}");
+                    eprintln!("[feed] переподключение через 3с");
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    continue;
+                }
+            };
+            println!("[feed] Binance подключён ({} пар)", wanted.len());
+            let mut index = v1_index(&state);
+            let mut current = wanted;
+            let mut connected_at = tokio::time::Instant::now();
+            let mut recheck = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    msg = ws.next() => match msg {
+                        Some(Ok(Message::Text(t))) => handle_msg(&state, &index, &t).await,
+                        Some(Ok(Message::Ping(p))) => {
+                            let _ = ws.send(Message::Pong(p)).await;
+                        }
+                        Some(Ok(Message::Close(f))) => {
+                            eprintln!("[feed] соединение закрыто биржей: {f:?}");
+                            break;
+                        }
+                        Some(Err(e)) => {
+                            eprintln!("[feed] обрыв соединения: {e}");
+                            break;
+                        }
+                        None => break,
+                        _ => {}
+                    },
+                    _ = recheck.tick() => {
+                        let next = subs.borrow().clone();
+                        if next == current || next.is_empty() {
+                            continue;
+                        }
+                        if connected_at.elapsed() < Duration::from_secs(RESUBSCRIBE_MIN_SECS) {
+                            continue;
+                        }
+                        match connect_async(&stream_url(ws_base(), &next)).await {
+                            Ok((fresh, _)) => {
+                                println!(
+                                    "[feed] список пар изменился ({} → {}): новое соединение открыто до закрытия старого",
+                                    current.len(),
+                                    next.len()
+                                );
+                                let mut old = std::mem::replace(&mut ws, fresh);
+                                let _ = old.close(None).await;
+                                index = v1_index(&state);
+                                current = next;
+                                connected_at = tokio::time::Instant::now();
                             }
-                            // Класс ошибки здесь терялся: `Err(_) => break` уводил в
-                            // бесшумный реконнект каждые 3с, и обрыв фида выглядел как
-                            // тишина. Диагностика, съеденная рабочим циклом, — это отказ,
-                            // превращённый в задержку.
-                            Ok(Message::Close(f)) => {
-                                eprintln!("[feed] соединение закрыто биржей: {f:?}");
-                                break;
-                            }
-                            Err(e) => {
-                                eprintln!("[feed] обрыв соединения: {e}");
-                                break;
-                            }
-                            _ => {}
+                            Err(e) => eprintln!("[feed] переподписка не удалась ({e}), работаем по прежнему списку"),
                         }
                     }
-                    eprintln!("[feed] поток сообщений завершился");
                 }
-                Err(e) => eprintln!("[feed] ошибка подключения: {e}"),
             }
+            eprintln!("[feed] поток сообщений завершился");
             eprintln!("[feed] переподключение через 3с");
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
