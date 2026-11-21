@@ -979,32 +979,53 @@ impl Account {
     /// запись: закрытие на разрыве должно быть отличимо в журнале, потому что
     /// спорят именно о нём.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn run_triggers(
         &mut self,
         t: Terms,
-        marks: &HashMap<u32, i64>,
+        mv: &MarketView<'_>,
+        user: UserId,
         across_gap: bool,
         stop_out_pct: Option<i128>,
         frozen: bool,
     ) -> bool {
+        let marks = mv.marks;
+        let exec_marks = mv.exec;
+        let gap_of = |instrument: u32| across_gap || mv.gap.contains(&instrument);
         let protect_negative = t.protect;
         // Сработавшие лимитные ордера → открыть позицию.
         let mut fire: Vec<PendingOrder> = Vec::new();
-        self.pendings.retain(|_, p| match marks.get(&p.instrument) {
-            Some(&m) => {
-                let hit = match p.side {
-                    PosSide::Long => m <= p.price,  // buy limit — ниже рынка
-                    PosSide::Short => m >= p.price, // sell limit — выше рынка
-                };
-                if hit {
+        let mut close_only_hit: Vec<PendingOrder> = Vec::new();
+        self.pendings
+            .retain(|_, p| match exec_marks.get(&p.instrument) {
+                Some(&m) => {
+                    let hit = match p.side {
+                        PosSide::Long => m <= p.price,  // buy limit — ниже рынка
+                        PosSide::Short => m >= p.price, // sell limit — выше рынка
+                    };
+                    if !hit {
+                        return true;
+                    }
+                    if (mv.close_only)(user, p.instrument) {
+                        if mv.reject_close_only {
+                            close_only_hit.push(p.clone());
+                            return false;
+                        }
+                        return true;
+                    }
                     fire.push(p.clone());
                     false
-                } else {
-                    true
                 }
-            }
-            None => true,
-        });
+                None => true,
+            });
+        let rejected_any = !close_only_hit.is_empty();
+        for p in close_only_hit {
+            self.log(EventKind::PendingRejected {
+                id: p.id,
+                exec: exec_marks.get(&p.instrument).copied(),
+                reason: RejectReason::InstrumentCloseOnly,
+            });
+        }
         let fired_any = !fire.is_empty();
         for p in fire {
             // Сначала «ордер сработал», потом открытие позиции отдельной записью: это
@@ -1016,7 +1037,7 @@ impl Account {
             // уровня или выше. То есть на разрыве клиент получает лучшую цену,
             // и это не щедрость, а то же самое правило: исполняется то, что на
             // рынке, а не то, что мы пообещали нарисовать.
-            let exec = marks.get(&p.instrument).copied().unwrap_or(p.price);
+            let exec = exec_marks.get(&p.instrument).copied().unwrap_or(p.price);
             // Счёт заморожен оператором — ордер, поставленный ДО заморозки,
             // позицию не открывает. Проверка на постановке есть, но ордер
             // исполняется позже и без человека: заморозка, проверяемая только
@@ -1035,7 +1056,7 @@ impl Account {
                 id: p.id,
                 price: p.price,
                 exec: Some(exec),
-                across_gap,
+                across_gap: gap_of(p.instrument),
             });
             // Тариф и плечо — действующие на момент ИСПОЛНЕНИЯ (как с плечом,
             // Р-446): ордер ничего не резервирует, допуск идёт сейчас.
@@ -1057,9 +1078,9 @@ impl Account {
         // считаются деньги) и ПОСТАВЛЕННЫЙ УРОВЕНЬ (её ставил человек). На
         // спокойном рынке они совпадают, на разрыве расходятся — и журналу
         // нужны обе, иначе проскальзывание потом не из чего восстановить.
-        let mut to_close: Vec<(u64, i64, i64, CloseCause)> = Vec::new();
+        let mut to_close: Vec<(u64, u32, i64, i64, CloseCause)> = Vec::new();
         for pos in self.positions.values() {
-            if let Some(&m) = marks.get(&pos.instrument) {
+            if let Some(&m) = exec_marks.get(&pos.instrument) {
                 let sl_hit = pos.sl.is_some_and(|sl| stop_loss_reached(pos.side, m, sl));
                 let tp_hit = pos
                     .tp
@@ -1072,15 +1093,27 @@ impl Account {
                 // Уровень идёт рядом, в запись: человек ставил именно его, и
                 // разницу между «поставил» и «исполнилось» он вправе видеть.
                 if sl_hit {
-                    to_close.push((pos.id, m, pos.sl.unwrap(), CloseCause::StopLoss));
+                    to_close.push((
+                        pos.id,
+                        pos.instrument,
+                        m,
+                        pos.sl.unwrap(),
+                        CloseCause::StopLoss,
+                    ));
                 } else if tp_hit {
-                    to_close.push((pos.id, m, pos.tp.unwrap(), CloseCause::TakeProfit));
+                    to_close.push((
+                        pos.id,
+                        pos.instrument,
+                        m,
+                        pos.tp.unwrap(),
+                        CloseCause::TakeProfit,
+                    ));
                 }
             }
         }
         let closed_any = !to_close.is_empty();
-        for (id, exec, level, cause) in to_close {
-            self.close_pos(id, exec, Some(level), across_gap, cause, t.protect);
+        for (id, instrument, exec, level, cause) in to_close {
+            self.close_pos(id, exec, Some(level), gap_of(instrument), cause, t.protect);
         }
 
         // Защита от отрицательного остатка идёт ПОСЛЕ закрытия (TRM-42): она
@@ -1095,10 +1128,10 @@ impl Account {
         // (TRM-41). Порядок не стилистический: если стоп человека сработал на
         // этом же тике, закрыть обязан он, а не мы. Иначе брокер отбирает у
         // клиента исполнение его же распоряжения и ставит себе причину закрытия.
-        let stopped_out = self.run_stop_out(marks, across_gap, stop_out_pct, t.protect);
+        let stopped_out = self.run_stop_out(mv, across_gap, stop_out_pct, t.protect);
         let compensated = self.cover_negative_balance(protect_negative);
 
-        fired_any || closed_any || stopped_out || compensated
+        rejected_any || fired_any || closed_any || stopped_out || compensated
     }
 
     /// Погасить отрицательный остаток за счёт брокера (TRM-42).
@@ -1149,7 +1182,7 @@ impl Account {
     /// закрыв ничего лишнего.
     fn run_stop_out(
         &mut self,
-        marks: &HashMap<u32, i64>,
+        mv: &MarketView<'_>,
         across_gap: bool,
         stop_out_pct: Option<i128>,
         protect: bool,
@@ -1167,7 +1200,7 @@ impl Account {
             // Сравнение без деления: `equity * 100 <= порог * занятая маржа`.
             // Делением мы бы округляли уровень и срабатывали на долю процента
             // раньше или позже порога, в зависимости от величин.
-            if self.equity(marks) * 100 > threshold * used {
+            if self.equity(mv.marks) * 100 > threshold * used {
                 break;
             }
             // Самая убыточная ИЗ ТЕХ, у кого есть цена.
@@ -1175,21 +1208,30 @@ impl Account {
                 .positions
                 .values()
                 .filter_map(|p| {
-                    marks
+                    mv.exec
                         .get(&p.instrument)
-                        .map(|m| (p.id, *m, p.unrealized(*m, minor)))
+                        .map(|m| (p.id, p.instrument, *m, p.unrealized(*m, minor)))
                 })
-                .min_by_key(|(_, _, pnl)| *pnl);
-            let Some((id, mark, _)) = worst else {
+                .min_by_key(|(_, _, _, pnl)| *pnl);
+            let Some((id, instrument, mark, _)) = worst else {
                 break; // цен нет ни по одной — закрывать нечем
             };
             // Уровня человек здесь не ставил: закрытие наше, и называть
             // что-либо «уровнем» было бы приписыванием ему чужого решения.
-            self.close_pos(id, mark, None, across_gap, CloseCause::StopOut, protect);
+            let gap = across_gap || mv.gap.contains(&instrument);
+            self.close_pos(id, mark, None, gap, CloseCause::StopOut, protect);
             closed = true;
         }
         closed
     }
+}
+
+pub struct MarketView<'a> {
+    pub marks: &'a HashMap<u32, i64>,
+    pub exec: &'a HashMap<u32, i64>,
+    pub gap: &'a HashSet<u32>,
+    pub close_only: &'a dyn Fn(UserId, u32) -> bool,
+    pub reject_close_only: bool,
 }
 
 pub struct Broker {
@@ -1752,6 +1794,24 @@ impl Broker {
         across_gap: bool,
         frozen: &HashSet<UserId>,
     ) -> Vec<UserId> {
+        let none = HashSet::new();
+        let open_everywhere = |_: UserId, _: u32| false;
+        let mv = MarketView {
+            marks,
+            exec: marks,
+            gap: &none,
+            close_only: &open_everywhere,
+            reject_close_only: false,
+        };
+        self.check_market(&mv, across_gap, frozen)
+    }
+
+    pub fn check_market(
+        &mut self,
+        mv: &MarketView<'_>,
+        across_gap: bool,
+        frozen: &HashSet<UserId>,
+    ) -> Vec<UserId> {
         let platform = self.leverage;
         let stop_out = self.stop_out_pct;
         let protect = self.protect_negative_balance;
@@ -1763,7 +1823,7 @@ impl Broker {
                 protect,
             };
             let is_frozen = frozen.contains(user);
-            if a.run_triggers(t, marks, across_gap, stop_out, is_frozen) {
+            if a.run_triggers(t, mv, *user, across_gap, stop_out, is_frozen) {
                 changed.push(*user);
             }
         }

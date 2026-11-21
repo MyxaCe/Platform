@@ -441,12 +441,14 @@ pub enum EventKind {
 pub enum RejectReason {
     /// Торговля по счёту заморожена оператором (`TradingFreezeSet`).
     AccountFrozen,
+    InstrumentCloseOnly,
 }
 
 impl RejectReason {
     pub fn tag(self) -> &'static str {
         match self {
             RejectReason::AccountFrozen => "account_frozen",
+            RejectReason::InstrumentCloseOnly => "instrument_close_only",
         }
     }
 }
@@ -865,6 +867,7 @@ impl EventKind {
                 exec: num_opt(&f, "exec")?,
                 reason: match pick(&f, "reason")? {
                     "account_frozen" => RejectReason::AccountFrozen,
+                    "instrument_close_only" => RejectReason::InstrumentCloseOnly,
                     _ => return Err(BadRecord("неизвестная причина отказа ордера")),
                 },
             },
@@ -1972,6 +1975,11 @@ mod tests {
                 id: 2,
                 exec: None,
                 reason: RejectReason::AccountFrozen,
+            },
+            EventKind::PendingRejected {
+                id: 2,
+                exec: Some(3990),
+                reason: RejectReason::InstrumentCloseOnly,
             },
         ]
     }
