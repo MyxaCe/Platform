@@ -32,6 +32,9 @@
   line-height: 1; padding: 2px 6px; border-radius: 4px; font-family: inherit; }
 .ob__dots:hover { background: var(--panel2,#151a25); color: var(--text,#d7dce5); }
 .ob__wrap { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.ob__off { display: none; padding: 18px 14px; color: var(--muted,#6b7688); font-size: 12px; line-height: 1.45; text-align: center; }
+.ob--off .ob__wrap, .ob--off .ob__dots { display: none; }
+.ob--off .ob__off { display: block; }
 
 /* Меню настроек */
 .ob__menu { position: absolute; right: 8px; top: 4px; z-index: 20; width: 232px; padding: 8px;
@@ -173,7 +176,8 @@
         <div class="ob__mid"><span class="ob__last">—</span><span class="ob__mark"></span><span class="ob__spread"></span></div>
         <div class="ob__side bids"></div>
         <div class="ob__ratio"><span class="b">B</span><span class="bv">—</span><div class="ob__bar"><i style="width:50%"></i></div><span class="sv">—</span><span class="s">S</span></div>
-      </div>`;
+      </div>
+      <div class="ob__off" role="status"></div>`;
 
     const $ = (s) => root.querySelector(s);
     const elAsks = $('.asks'), elBids = $('.bids'), elMenu = $('.ob__menu'), elGroup = $('.ob__group');
@@ -352,8 +356,20 @@
       root.title = '';
     }
 
+    /** @param {string|null} text */
+    function setOff(text) {
+      const off = !!text;
+      if (off === root.classList.contains('ob--off') && (!off || $('.ob__off').textContent === text)) return;
+      root.classList.toggle('ob--off', off);
+      $('.ob__off').textContent = text || '';
+      if (off) { last = null; prevMid = null; dir = null; succeeded(); }
+    }
+
     async function refresh() {
       const id = ctx.instrument(); if (id == null) return;
+      const off = ctx.unavailable ? ctx.unavailable(id) : null;
+      setOff(off);
+      if (off) return;
 
       let answer;
       try {

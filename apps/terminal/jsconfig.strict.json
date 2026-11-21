@@ -31,7 +31,9 @@
     "public/diag.js",
     "public/stats.js",
     "public/trades.js",
-    "public/livebars.js"
+    "public/livebars.js",
+    "public/market.js",
+    "public/sizing.js"
   ],
   "exclude": ["node_modules"]
 }

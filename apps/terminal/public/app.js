@@ -24,6 +24,16 @@ const pdec = (id) => (META[id]?.price_decimals ?? 2);
 const qdec = (id) => (META[id]?.qty_decimals ?? 3);
 const pscale = (id) => 10 ** pdec(id);
 const qscale = (id) => 10 ** qdec(id);
+/** @param {any} it @returns {[string, string]} */
+const pairOf = (it) => {
+  if (!it) return ['', ''];
+  if (it.symbol.includes('-')) { const [b, q] = it.symbol.split('-'); return [b, q || '']; }
+  return [it.base || it.symbol, it.quote || ''];
+};
+/** @param {number} id */
+const quoteDriven = (id) => { const it = META[id]; return !!it && typeof it.category === 'string' && it.category !== 'crypto'; };
+/** @param {any} c */
+const volPoint = (c) => (c.volume == null ? { time: c.time } : { time: c.time, value: c.volume, color: volColor(c) });
 
 // Цвета графика берём из CSS-токенов платформы (theming-pack, ADR-023), чтобы график
 // следовал теме и бренду. Токены — RGB-каналы ("212 164 55"), см. tokens.v1.css.
@@ -289,10 +299,10 @@ async function loadCandles(id, timeframe) {
     }
     const raw = fetched;
     const s = pscale(id), v = qscale(id);
-    rawCandles = raw.map((c) => ({ time: c.time, open: c.open / s, high: c.high / s, low: c.low / s, close: c.close / s, volume: c.volume / v }));
+    rawCandles = raw.map((c) => ({ time: c.time, open: c.open / s, high: c.high / s, low: c.low / s, close: c.close / s, volume: c.volume == null ? null : c.volume / v }));
     makeMainSeries();
     mainSeries.setData(mainData());
-    volume.setData(rawCandles.map((c) => ({ time: c.time, value: c.volume, color: volColor(c) })));
+    volume.setData(rawCandles.map(volPoint));
     applyIndicators(); redrawPriceLines(); panel.refreshSignals();
     // Загрузка с сервера — авторитетный пересев ряда: ответ REST видел и дыру
     // тоже, поэтому он же снимает разрыв.
@@ -316,12 +326,13 @@ function drawForming(bar) {
   const s = pscale(selected), v = qscale(selected);
   const n = rawCandles.length;
   const prev = n ? rawCandles[n - 1].time : b.time;
-  const kind = LiveBars.upsert(rawCandles, { time: b.time, open: b.open / s, high: b.high / s, low: b.low / s, close: b.close / s, volume: b.volume / v });
+  const vol = b.volume == null || (quoteDriven(selected) && !b.volume) ? null : b.volume / v;
+  const kind = LiveBars.upsert(rawCandles, { time: b.time, open: b.open / s, high: b.high / s, low: b.low / s, close: b.close / s, volume: vol });
   if (kind === 'old') return;
   queueLiveIndicators(kind === 'new' ? prev : b.time);
   // Объём от типа графика не зависит: хейкин-аши пересчитывает цену, а сделки
   // остаются теми же.
-  volume.update({ time: b.time, value: b.volume / qscale(selected), color: volColor(b) });
+  volume.update(volPoint({ time: b.time, open: b.open, close: b.close, volume: vol }));
   if (!mainSeries) return;
   // Здесь стоял выход для хейкин-аши (TRM-34): в этом режиме график не
   // обновлялся живьём ВООБЩЕ — ни свеча, ни легенда, — и пометка «бар не
@@ -334,6 +345,31 @@ function drawForming(bar) {
 }
 // Агрегация живой сделки в свечу — в `series.js`. Отрисовка остаётся здесь:
 // пока ряд разорван, модуль не возвращает ничего, и рисовать нечего.
+let quoteRedraw = null;
+/** @param {{ instrument: number, bid: number|null, ask: number|null, price: number, time: number|null }} q */
+function onLiveQuote(q) {
+  const it = META[q.instrument];
+  if (!it) return;
+  if (q.bid !== null) it.bid = q.bid;
+  if (q.ask !== null) it.ask = q.ask;
+  if (it.has_trades === false || it.last == null) it.last = q.price;
+  if (q.instrument !== selected) return;
+  if (quoteDriven(q.instrument)) {
+    const now = Math.floor((q.time !== null ? q.time : Date.now()) / 1000);
+    const b = priceSeries.onTrade({ now, tf, price: q.price, qty: 0 });
+    if (b) drawForming(b);
+  }
+  if (!quoteRedraw) quoteRedraw = setTimeout(() => { quoteRedraw = null; updateDealPanel(); }, 250);
+}
+/** @param {{ instrument: number, market: any }} m */
+function onMarketStatus(m) {
+  const it = META[m.instrument];
+  if (!it) return;
+  it.market = m.market;
+  watchlist.update(m.instrument, { market: m.market });
+  if (m.instrument === selected) updateDealPanel();
+  panel.refreshDeals();
+}
 function onLiveTrade(id, price, qty, timeMs) { if (id !== selected) return; const now = Number.isFinite(timeMs) ? Math.floor(timeMs / 1000) : Math.floor(Date.now() / 1000); const b = priceSeries.onTrade({ now, tf, price, qty }); if (b) drawForming(b); }
 async function syncLast() {
   const id = selected; if (id == null) return;
@@ -376,7 +412,7 @@ function updateDealPanel() {
   document.getElementById('watermark').textContent = it.symbol;
   const pips = document.getElementById('pipsInfo');
   if (showPips && it.bid != null && it.ask != null) { pips.classList.remove('hidden'); pips.textContent = tv('f.spread', { n: I18N.num(it.ask - it.bid) }); } else pips.classList.add('hidden');
-  const quote = it.symbol.split('-')[1] || '';
+  const quote = pairOf(it)[1];
   document.getElementById('priceUnit').textContent = quote;
   if (orderMode === 'limit' && !/** @type {HTMLInputElement} */ (document.getElementById('price')).value && ref != null) /** @type {HTMLInputElement} */ (document.getElementById('price')).value = (ref / pscale(it.id)).toFixed(pdec(it.id));
   updateSizeEq();
@@ -401,7 +437,7 @@ let ihPrev = { id: null, last: null, dir: '' };
  * @param {any} it
  */
 function renderInstrumentHeader(it) {
-  const [base, quote] = it.symbol.split('-');
+  const [base, quote] = pairOf(it);
   const $ = (/** @type {string} */ id) => document.getElementById(id);
   $('ihBase').textContent = base;
   $('ihQuote').textContent = '/' + (quote || '');
@@ -428,6 +464,47 @@ function renderInstrumentHeader(it) {
   $('ihVol').textContent = it.volume != null ? compactNum(it.volume / qscale(it.id)) : '—';
   $('ihQVol').textContent = it.quote_volume != null ? compactNum(it.quote_volume / pscale(it.id)) : '—';
   $('ihSpread').textContent = it.bid != null && it.ask != null ? fmtP(it.id, it.ask - it.bid) : '—';
+  const mkText = marketText(it);
+  const only = Market.closeOnly(it);
+  const mk = $('ihMarket');
+  mk.hidden = !mkText && !only;
+  mk.textContent = [mkText, only ? T('mk.closeOnly') : null].filter(Boolean).join(' · ');
+  mk.title = only && !mkText ? T('gate.closeOnly') : mk.textContent;
+  mk.classList.toggle('ih-market--only', only && !mkText);
+  document.body.classList.toggle('src-v2', quoteDriven(it.id));
+}
+
+/** @param {any} it @returns {string|null} */
+function marketText(it) {
+  const st = Market.state(it).status;
+  if (st === 'halted') return T('mk.halted');
+  if (st !== 'closed') return null;
+  const now = Date.now();
+  const at = Market.nextOpen(it, now);
+  return at ? tv('mk.closedAt', { when: Market.when(at, I18N.locale(), now) }) : T('mk.closed');
+}
+/** @param {any} it */
+function marketNote(it) {
+  const st = Market.state(it).status;
+  const only = Market.closeOnly(it);
+  if (st === 'closed' || st === 'halted') {
+    return { kind: st, text: T(`mk.${st}.short`), tip: [marketText(it), only ? T('mk.closeOnly') : null].filter(Boolean).join(' · ') };
+  }
+  return only ? { kind: 'closeOnly', text: T('mk.closeOnly.short'), tip: T('gate.closeOnly') } : null;
+}
+/** @param {any} it @param {number} raw */
+const sizeLabel = (it, raw) => `${Sizing.format(it, raw, fmtN)} ${Sizing.contract(it) ? T('sz.lot') : pairOf(it)[0]}`;
+/** @param {any} d */
+function dealSize(d) {
+  const it = META[d.instrument];
+  if (!Sizing.contract(it)) return null;
+  const spec = Object.assign({}, it, Number.isInteger(d.qty_decimals) ? { qty_decimals: d.qty_decimals } : {});
+  return sizeLabel(spec, d.qty);
+}
+/** @param {number} status @param {any} data */
+function refusal(status, data) {
+  const at = data && Number.isFinite(data.next_open) && data.next_open > 0 ? data.next_open : null;
+  return rejectionText(status, data?.error) + (at ? ' ' + tv('mk.opens', { when: Market.when(at, I18N.locale(), Date.now()) }) : '');
 }
 
 /**
@@ -439,7 +516,7 @@ function renderTape(list) {
   const track = document.getElementById('tapeTrack');
   if (!track || !list.length) return;
   const html = list.map((it) => {
-    const [b, q] = it.symbol.split('-');
+    const [b, q] = pairOf(it);
     const known = it.change != null;
     const up = known && it.change >= 0;
     return `<span class="tape__it" data-id="${it.id}"><b>${b}/${q || ''}</b><span>${it.last != null ? fmtP(it.id, it.last) : '—'}</span>` +
@@ -483,7 +560,8 @@ const book = OrderBook.mount(document.getElementById('book'), {
   fetch: async (id, limit) => { const r = await api.depthDetailed(id, limit); markMarketData('depth', r.reason === null); return r; },
   onPick: (price) => { setMode('limit'); const inp = /** @type {HTMLInputElement} */ (document.getElementById('price')); inp.value = price; inp.classList.add('flash'); setTimeout(() => inp.classList.remove('flash'), 400); },
   // Подписи колонок и марк-цена — из данных инструмента, которыми владеет хост.
-  symbols: (id) => { const [base, quote] = (META[id]?.symbol || '-').split('-'); return { base, quote }; },
+  symbols: (id) => { const [base, quote] = pairOf(META[id]); return { base, quote }; },
+  unavailable: (id) => (META[id]?.has_depth === false ? T('ob.unavailable') : null),
   markPrice: (id) => (META[id]?.last != null ? META[id].last / pscale(id) : null),
   interval: 700,
   storagePrefix: 'ob',
@@ -510,6 +588,9 @@ const panel = Positions.mount(document.getElementById('bottom'), {
   // Изменение SL/TP (17.11): ячейки уровней — кнопки, только если шлюз
   // разрешил запись (`/account.sltp_edit`) и счёт не заморожен.
   levels: { enabled: () => sltpEdit && !(lastAccount && lastAccount.trading_frozen), edit: openLevels },
+  size: dealSize,
+  closeBlock: (d) => { const why = Market.blockClose(META[d.instrument]); return why ? T('gate.close.' + why) : null; },
+  onReject: (status, data) => { const msg = document.getElementById('dealMsg'); msg.textContent = refusal(status, data); msg.style.color = 'var(--down)'; },
   signals: () => computeSignals(),
   balance: () => balanceRows(),
   t: wT,
@@ -528,6 +609,8 @@ const trades = Trades.mount(document.getElementById('trades'), {
   },
   fmtUsd: usd,
   source: 'Binance',
+  feed: (id) => META[id]?.has_trades !== false,
+  size: dealSize,
   t: wT,
   num: fmtN,
   interval: 2500,
@@ -537,6 +620,7 @@ const trades = Trades.mount(document.getElementById('trades'), {
 // Сайт (тенант) — из своего URL. Для витрины это фильтр по allow-list; настоящая
 // граница стоит на сервере, на пути открытия сделки: `?site=` подставит кто угодно.
 const SITE = new URLSearchParams(location.search).get('site') || '';
+const WANT_SYMBOL = new URLSearchParams(location.search).get('symbol') || '';
 const watchlist = Watchlist.mount(document.querySelector('.watch'), {
   fetch: async () => {
     const list = await api.instruments(SITE);
@@ -558,9 +642,23 @@ const watchlist = Watchlist.mount(document.querySelector('.watch'), {
   t: wT,
   num: fmtN,
   change: fmtChange,
+  note: marketNote,
+  initial: (list) => Market.matchSymbol(list, WANT_SYMBOL),
 });
-async function selectInstrument(id) { selected = id; watchlist.setActive(id); /** @type {HTMLInputElement} */ (document.getElementById('price')).value = ''; resetStops(); await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.reset(); book.refresh(); stats.refresh(); trades.clearTape(); trades.refreshMine(); }
-document.getElementById('tfs').addEventListener('click', (e) => { const btn = /** @type {Element} */ (e.target).closest('button'); if (!btn) return; tf = +btn.dataset.tf; chart.applyOptions({ timeScale: { secondsVisible: tf < 60 } }); document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
+/** @param {any} it */
+function syncTimeframes(it) {
+  const one = /** @type {HTMLButtonElement} */ (document.querySelector('#tfs button[data-tf="1"]'));
+  if (!one) return;
+  const off = !!it && it.has_1s === false;
+  one.disabled = off;
+  one.title = off ? T('tf.unsupported') : '';
+  if (!off || tf !== 1) return;
+  tf = 60;
+  chart.applyOptions({ timeScale: { secondsVisible: false } });
+  document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', /** @type {HTMLElement} */ (b).dataset.tf === '60'));
+}
+async function selectInstrument(id) { selected = id; watchlist.setActive(id); syncTimeframes(META[id]); syncLotStep(); /** @type {HTMLInputElement} */ (document.getElementById('price')).value = ''; resetStops(); await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.reset(); book.refresh(); stats.refresh(); trades.clearTape(); trades.refreshMine(); }
+document.getElementById('tfs').addEventListener('click', (e) => { const btn = /** @type {Element} */ (e.target).closest('button'); if (!btn || btn.disabled) return; tf = +btn.dataset.tf; chart.applyOptions({ timeScale: { secondsVisible: tf < 60 } }); document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
 
 // ============================ Toolbar (dropdowns) ==========================
 function closeDD() { document.querySelectorAll('.dd').forEach((d) => d.classList.add('hidden')); }
@@ -801,7 +899,11 @@ function connectWS() {
     }
     lastFeedMsgAt = Date.now();
     renderFeedStatus();
-    for (const x of e) if (x.type === 'trade') { onLiveTrade(x.instrument, x.price, x.qty, x.time); trades.pushMarket(x); }
+    for (const x of e) {
+      if (x.type === 'trade') { if (!quoteDriven(x.instrument)) onLiveTrade(x.instrument, x.price, x.qty, x.time); trades.pushMarket(x); }
+      else if (x.type === 'quote') { const q = Market.quoteOf(x); if (q) onLiveQuote(q); }
+      else if (x.type === 'market') { const m = Market.statusOf(x); if (m) onMarketStatus(m); }
+    }
   };
 }
 // Точка обязана гаснуть сама: без этого «живо» осталось бы висеть с последнего тика.
@@ -912,15 +1014,39 @@ document.getElementById('shares').addEventListener('click', (e) => {
   if (p === null) return;
   const usdAmount = (a.free_margin / 100) * a.leverage * (+b.dataset.share / 100);
   const inp = /** @type {HTMLInputElement} */ (document.getElementById('lot'));
-  inp.value = sizeUnit === 'usd' ? usdAmount.toFixed(0) : (Math.floor((usdAmount / p) * qscale(it.id)) / qscale(it.id)).toFixed(qdec(it.id));
+  if (sizeUnit === 'usd') inp.value = usdAmount.toFixed(0);
+  else if (Sizing.contract(it)) inp.value = Sizing.toLots(it, Sizing.fromUnits(it, usdAmount / p)).toFixed(Sizing.lotDecimals(it));
+  else inp.value = (Math.floor((usdAmount / p) * qscale(it.id)) / qscale(it.id)).toFixed(qdec(it.id));
   updateSizeEq();
 });
 document.getElementById('lotMinus').addEventListener('click', () => stepLot(-1));
 document.getElementById('lotPlus').addEventListener('click', () => stepLot(1));
-function stepLot(d) { const i = document.getElementById('lot'); if (sizeUnit === 'usd') /** @type {HTMLInputElement} */ (i).value = Math.max(1, (parseFloat(/** @type {HTMLInputElement} */ (i).value) || 0) + d * 10).toFixed(0); else /** @type {HTMLInputElement} */ (i).value = Math.max(0.001, (parseFloat(/** @type {HTMLInputElement} */ (i).value) || 0) + d * 0.01).toFixed(3); updateSizeEq(); }
+function stepLot(d) {
+  const i = /** @type {HTMLInputElement} */ (document.getElementById('lot'));
+  const it = META[selected];
+  const cur = parseFloat(i.value) || 0;
+  if (sizeUnit === 'usd') i.value = Math.max(1, cur + d * 10).toFixed(0);
+  else if (Sizing.contract(it)) {
+    const st = Sizing.toLots(it, Sizing.step(it));
+    const lo = Sizing.toLots(it, Sizing.minQty(it) ?? Sizing.step(it));
+    i.value = Math.max(lo, cur + d * st).toFixed(Sizing.lotDecimals(it));
+  } else {
+    const st = Math.max(0.01, Sizing.toUnits(it, Sizing.step(it)));
+    const lo = Math.max(0.001, Sizing.minQty(it) === null ? 0 : Sizing.toUnits(it, Sizing.minQty(it)));
+    i.value = Math.max(lo, cur + d * st).toFixed(st >= 1 ? 0 : 3);
+  }
+  updateSizeEq();
+}
+function syncLotStep() {
+  const it = META[selected];
+  const inp = /** @type {HTMLInputElement} */ (document.getElementById('lot'));
+  inp.step = sizeUnit === 'usd' ? '1' : Sizing.contract(it) ? String(Sizing.toLots(it, Sizing.step(it))) : '0.001';
+}
 function readSlTp(id) { const sl = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('sl')).value), tp = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('tp')).value); return { sl: sl > 0 ? Math.round(sl * pscale(id)) : null, tp: tp > 0 ? Math.round(tp * pscale(id)) : null }; }
 // Размер сделки в базовых единицах (учитывает выбор LOT/USD).
-function sizeBaseQty(id) { const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('lot')).value) || 0; if (v <= 0) return 0; if (sizeUnit === 'usd') { const p = refPrice(META[id]) / pscale(id); return p > 0 ? v / p : 0; } return v; }
+function sizeBaseQty(id) { const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('lot')).value) || 0; if (v <= 0) return 0; if (sizeUnit === 'usd') { const p = refPrice(META[id]) / pscale(id); return p > 0 ? v / p : 0; } return v * (Sizing.contract(META[id]) || 1); }
+/** @param {number} id */
+const sizeRaw = (id) => Sizing.fromUnits(META[id], sizeBaseQty(id));
 /**
  * Эквивалент размера: сколько это в другой валюте (TRM-24).
  *
@@ -947,7 +1073,7 @@ function updateFeeInfo() {
   const it = META[selected];
   const bps = tariff.commission_bps;
   if (!it || !(bps > 0)) { el.classList.add('hidden'); el.textContent = ''; return; }
-  const qty = Math.round(sizeBaseQty(it.id) * qscale(it.id));
+  const qty = sizeRaw(it.id);
   let px = null;
   if (orderMode === 'limit') {
     const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('price')).value);
@@ -961,8 +1087,56 @@ function updateFeeInfo() {
   el.classList.remove('hidden');
 }
 
+let tradingFrozen = false;
+/** @param {any} it @returns {string|null} */
+function gateBlock(it) {
+  if (!it) return null;
+  const why = orderMode === 'limit' ? Market.blockPending(it) : Market.blockOpen(it);
+  if (!why) return null;
+  if (why === 'closeOnly') return T('gate.closeOnly');
+  if (why === 'untradable') return T('gate.untradable');
+  return `${marketText(it)}. ${T(why === 'closed' ? 'gate.closed' : 'gate.halted')}`;
+}
+/** @param {any} it @returns {string|null} */
+function sizeBlock(it) {
+  if (!it) return null;
+  const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('lot')).value) || 0;
+  if (!(v > 0) || (sizeUnit === 'usd' && priceOrNull(it) === null)) return null;
+  const min = Sizing.minQty(it) ?? (Sizing.step(it) > 1 ? Sizing.step(it) : null);
+  if (min === null || sizeRaw(it.id) >= min) return null;
+  return tv('sz.belowMin', { min: sizeLabel(it, min) });
+}
+function applyGate() {
+  const it = META[selected];
+  const block = gateBlock(it) || sizeBlock(it);
+  const waits = !block && orderMode === 'limit' && it && Market.state(it).status !== 'open' ? T('gate.waits') : '';
+  ['btnBuy', 'btnSell'].forEach((id) => {
+    const b = /** @type {HTMLButtonElement} */ (document.getElementById(id));
+    b.disabled = tradingFrozen || !!block;
+    b.title = block || '';
+  });
+  const el = document.getElementById('dealGate');
+  el.hidden = !(block || waits);
+  el.textContent = block || waits;
+  el.classList.toggle('deal-gate--info', !block);
+}
+function renderSizeHint() {
+  const it = META[selected];
+  const el = document.getElementById('sizeHint');
+  const min = it ? Sizing.minQty(it) : null;
+  const st = it ? Sizing.step(it) : 1;
+  if (!it || ((min ?? 1) <= 1 && st <= 1)) { el.hidden = true; el.textContent = ''; return; }
+  const parts = [tv('sz.limits', { min: sizeLabel(it, min ?? st), step: sizeLabel(it, st) })];
+  const raw = sizeRaw(it.id);
+  if (raw > 0 && raw !== Math.round(sizeBaseQty(it.id) * qscale(it.id))) parts.push(tv('sz.rounded', { v: sizeLabel(it, raw) }));
+  el.hidden = false;
+  el.textContent = parts.join(' · ');
+}
+
 function updateSizeEq() {
   updateFeeInfo();
+  renderSizeHint();
+  applyGate();
   const it = META[selected];
   const el = document.getElementById('sizeEq');
   const mEl = document.getElementById('marginEq');
@@ -970,7 +1144,8 @@ function updateSizeEq() {
 
   const p = priceOrNull(it);
   const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('lot')).value) || 0;
-  const base = it.symbol.split('-')[0];
+  const cs = Sizing.contract(it);
+  const base = cs ? T('sz.lot') : pairOf(it)[0];
 
   if (p === null) {
     el.textContent = sizeUnit === 'usd' ? `≈ — ${base}` : `${T('f.notional')} ≈ $—`;
@@ -981,12 +1156,12 @@ function updateSizeEq() {
 
   el.title = '';
   el.textContent = sizeUnit === 'usd'
-    ? `≈ ${I18N.num(v / p, qdec(it.id))} ${base}`
-    : `${T('f.notional')} ≈ ${usd(Math.round(v * p * 100))}`;
+    ? `≈ ${cs ? I18N.num(v / p / cs, Sizing.lotDecimals(it)) : I18N.num(v / p, qdec(it.id))} ${base}`
+    : `${T('f.notional')} ≈ ${usd(Math.round((cs ? Sizing.toUnits(it, sizeRaw(it.id)) : v) * p * 100))}`;
   // Маржа под позицию — стоимость / плечо счёта. Плеча не знаем — строки нет:
   // догадка про деньги хуже её отсутствия.
   const lev = lastAccount && Number.isInteger(lastAccount.leverage) && lastAccount.leverage >= 1 ? lastAccount.leverage : null;
-  const notional = sizeUnit === 'usd' ? v : v * p;
+  const notional = sizeUnit === 'usd' ? v : (cs ? Sizing.toUnits(it, sizeRaw(it.id)) : v) * p;
   mEl.textContent = lev && notional > 0 ? `${T('f.marginReq')} ≈ ${usd(Math.round((notional / lev) * 100))}` : '';
 }
 
@@ -1012,12 +1187,13 @@ function setUnit(u) {
   const v = parseFloat(inp.value) || 0;
   const p = it ? priceOrNull(it) : null;
 
+  const cs = it ? Sizing.contract(it) : null;
   if (p !== null) {
-    inp.value = u === 'usd' ? (v * p).toFixed(0) : (v / p).toFixed(3);
+    inp.value = u === 'usd' ? (v * (cs || 1) * p).toFixed(0) : cs ? (v / p / cs).toFixed(Sizing.lotDecimals(it)) : (v / p).toFixed(3);
   }
-  inp.step = u === 'usd' ? '1' : '0.001';
 
   sizeUnit = u;
+  syncLotStep();
   document.getElementById('unitLot').classList.toggle('active', u === 'lot');
   document.getElementById('unitUsd').classList.toggle('active', u === 'usd');
   updateSizeEq();
@@ -1045,7 +1221,10 @@ async function submit(side) {
     msg.style.color = 'var(--down)';
     return;
   }
-  const { sl, tp } = readSlTp(id); const qty = Math.round(baseQty * qscale(id)); let body;
+  const gate = gateBlock(META[id]) || sizeBlock(META[id]);
+  if (gate) { msg.textContent = gate; msg.style.color = 'var(--down)'; return; }
+  const { sl, tp } = readSlTp(id); const qty = sizeRaw(id); let body;
+  if (!(qty > 0)) { msg.textContent = T('f.enterSize'); msg.style.color = 'var(--down)'; return; }
   const isLimit = orderMode === 'limit';
   if (isLimit) { const price = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('price')).value); if (!(price > 0)) { msg.textContent = T('f.enterPrice'); msg.style.color = 'var(--down)'; return; } body = { instrument: id, side, qty, price: Math.round(price * pscale(id)), sl, tp }; }
   else body = { instrument: id, side, qty, sl, tp };
@@ -1054,7 +1233,7 @@ async function submit(side) {
   else {
     // Шлюз называет ближайший допустимый уровень — его и показываем.
     const near = Number.isInteger(data?.limit) ? ' ' + tv('f.nearest', { px: fmtP(id, data.limit) }) : '';
-    msg.textContent = rejectionText(status, data?.error) + near; msg.style.color = 'var(--down)';
+    msg.textContent = refusal(status, data) + near; msg.style.color = 'var(--down)';
   }
 }
 document.getElementById('btnBuy').addEventListener('click', () => submit('buy'));
@@ -1118,7 +1297,8 @@ function showAccountKind(kind, frozen) {
   if (banner) { banner.hidden = !frozen; banner.textContent = T('frozen.banner'); }
   const form = document.getElementById('dealFrozen');
   if (form) form.hidden = !frozen;
-  ['btnBuy', 'btnSell'].forEach((id) => { /** @type {HTMLButtonElement} */ (document.getElementById(id)).disabled = !!frozen; });
+  tradingFrozen = !!frozen;
+  applyGate();
 }
 
 /**
@@ -1290,7 +1470,7 @@ function applyChartTheme() {
     mainSeries.setData(mainData());
     applyIndicators();
     redrawPriceLines();
-    volume.setData(rawCandles.map((c) => ({ time: c.time, value: c.volume, color: volColor(c) })));
+    volume.setData(rawCandles.map(volPoint));
   }
 }
 document.addEventListener('themechange', applyChartTheme);
@@ -1317,7 +1497,7 @@ document.querySelector('.lang').addEventListener('click', (e) => {
 I18N.onChange(() => {
   renderLangButtons();
   chart.applyOptions({ localization: { locale: I18N.locale() } });
-  updateDealPanel(); renderFeedStatus(); refreshLegend(); renderMarketWarn(); showStorageMode(); syncFullBtn();
+  updateDealPanel(); renderFeedStatus(); refreshLegend(); renderMarketWarn(); showStorageMode(); syncFullBtn(); syncTimeframes(META[selected]); if (META[selected]?.has_trades === false) trades.clearTape();
   pollAccount(); panel.refresh(); panel.refreshSignals(); trades.refreshMine(); book.refresh(); stats.refresh(); watchlist.refresh(); renderSsoUi();
 });
 

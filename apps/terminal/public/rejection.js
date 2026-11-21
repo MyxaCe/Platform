@@ -74,6 +74,12 @@
     unknown_pending:
       'This order is no longer active — it may have just been filled or cancelled.',
     invalid_level: 'Enter a price above zero, or leave the field empty to remove the level.',
+    market_closed:
+      'The market for this instrument is closed — market orders and closing positions are unavailable until it opens. A limit order can be placed and will wait for the open.',
+    market_halted:
+      'Trading in this instrument is halted by the price provider — market orders and closing positions are unavailable for now.',
+    instrument_close_only:
+      'This instrument is close-only: new positions and orders are not accepted. You can still close existing positions.',
   };
 
   // НЕ закрыты здесь намеренно, и названы, чтобы следующий не считал их

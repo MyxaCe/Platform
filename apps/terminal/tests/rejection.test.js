@@ -183,3 +183,12 @@ test('стоп ближе минимума площадки объяснён с�
   assert.match(tp, /take profit/i);
   assert.notEqual(sl, tp);
 });
+
+test('закрытый рынок, приостановка и «только закрытие» — три разных объяснения, не код', () => {
+  const codes = ['market_closed', 'market_halted', 'instrument_close_only'];
+  const texts = codes.map((c) => Rejection.text(409, c));
+  texts.forEach((t, i) => assert.ok(!t.includes(codes[i]) && t.length > 20, `«${codes[i]}» объяснён: ${t}`));
+  assert.equal(new Set(texts).size, 3);
+  assert.match(texts[0], /limit order/i, 'при закрытом рынке подсказываем отложенный ордер');
+  assert.match(texts[2], /close existing positions/i, 'closeOnly не запрещает закрывать');
+});

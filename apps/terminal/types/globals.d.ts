@@ -32,6 +32,8 @@ interface Window {
   /** Тариф счёта в тикете: цена исполнения и комиссия (10.11). */
   Tariff?: any;
   Stops?: any;
+  Market?: any;
+  Sizing?: any;
   /** Окно изменения SL/TP открытой позиции и ордера (17.11). */
   Levels?: any;
   Indicators?: any;
@@ -61,6 +63,8 @@ declare const Diag: any;
 declare const Rejection: any;
 declare const Tariff: any;
 declare const Stops: any;
+declare const Market: any;
+declare const Sizing: any;
 declare const Levels: any;
 declare const Indicators: any;
 declare const OrderBook: any;

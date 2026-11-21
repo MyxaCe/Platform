@@ -58,6 +58,7 @@
 .deal-row .lvlbtn:hover, .deal-row .lvlbtn:focus-visible { border-color: var(--border,#1f2735); background: var(--panel2,#151a25); outline: none; }
 .deal-row .lvlbtn:hover .pen, .deal-row .lvlbtn:focus-visible .pen { opacity: 1; color: var(--text,#d7dce5); }
 @media (hover: none) { .deal-row .lvlbtn .pen { opacity: .75; } }
+.deal-row .closebtn:disabled { opacity: .45; cursor: not-allowed; }
 /* Телефон (17.11): позиции и ордера — карточкой в три строки, а не таблицей в
    девять колонок. Таблица не помещалась уже до правки SL/TP — кнопка «Закрыть»
    уезжала за край экрана; редактируемым уровням нужна площадь пальца. Подписи
@@ -169,9 +170,10 @@
     // Кнопки внутри строк вешаются делегированием: строки перерисовываются каждый тик.
     rowsEl('deals').addEventListener('click', async (e) => {
       if (onLevel(e)) return;
-      const b = e.target.closest('.closebtn'); if (!b) return;
-      const { ok } = await ctx.api.closeDeal(+b.dataset.id);
+      const b = e.target.closest('.closebtn'); if (!b || b.disabled) return;
+      const { ok, status, data } = await ctx.api.closeDeal(+b.dataset.id);
       if (ok) { refresh(); if (ctx.onChange) ctx.onChange(); }
+      else if (ctx.onReject) ctx.onReject(status, data);
     });
     rowsEl('pending').addEventListener('click', async (e) => {
       if (onLevel(e)) return;
@@ -181,7 +183,8 @@
     });
 
     const num = ctx.num || ((/** @type {number} */ v, /** @type {number} */ n) => v.toFixed(n));
-    const lotOf = (d) => num(d.qty / 10 ** d.qty_decimals, d.qty_decimals);
+    const lotOf = (d) => { const v = ctx.size ? ctx.size(d) : null; return v != null ? v : num(d.qty / 10 ** d.qty_decimals, d.qty_decimals); };
+    const closeAttrs = (d) => { const why = ctx.closeBlock ? ctx.closeBlock(d) : null; return why ? ` disabled title="${why}"` : ''; };
     const pxOf = (d) => (raw) => (raw == null ? '—' : num(raw / 10 ** d.price_decimals, d.price_decimals));
     // Комиссия сделки (10.11): вся — открытия и закрытия. Поля нет (старый
     // шлюз) или ноль (тарифа не было) — пусто, а не «$0.00»: нулевая строка
@@ -200,7 +203,7 @@
       rowsEl('deals').innerHTML = list.map((d) => {
         const pos = d.pnl >= 0, f = pxOf(d);
         const p = pips() ? ` (${d.side === 'buy' ? d.mark - d.entry : d.entry - d.mark}p)` : '';
-        return `<div class="deal-row"><span class="c-sym">${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span class="c-qty"${lab('p.qty', 'Size')}>${lotOf(d)}</span><span class="c-entry"${lab('p.entry', 'Entry')}>${f(d.entry)}</span><span class="c-mark"${lab('p.mark', 'Current')}>${f(d.mark)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${fmtUsd(d.pnl)}${p}</span>${lvlCell('deal', d, 'sl', f)}${lvlCell('deal', d, 'tp', f)}<button class="closebtn c-act" data-id="${d.id}">${t('p.close', 'Close')}</button></div>`;
+        return `<div class="deal-row"><span class="c-sym">${d.symbol}</span><span class="sd ${d.side}">${d.side.toUpperCase()}</span><span class="c-qty"${lab('p.qty', 'Size')}>${lotOf(d)}</span><span class="c-entry"${lab('p.entry', 'Entry')}>${f(d.entry)}</span><span class="c-mark"${lab('p.mark', 'Current')}>${f(d.mark)}</span><span class="pnl ${pos ? 'pos' : 'neg'}">${fmtUsd(d.pnl)}${p}</span>${lvlCell('deal', d, 'sl', f)}${lvlCell('deal', d, 'tp', f)}<button class="closebtn c-act" data-id="${d.id}"${closeAttrs(d)}>${t('p.close', 'Close')}</button></div>`;
       }).join('') || empty(t('p.noPositions', 'No open positions'));
     }
     async function refreshPending() {

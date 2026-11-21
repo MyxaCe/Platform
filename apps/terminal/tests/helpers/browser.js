@@ -185,6 +185,91 @@ function stubApi(routes, sessionTtl) {
   return Object.assign(base, routes || {});
 }
 
+const HOUR = 3600 * 1000;
+const FOREX_SESSION = { timezone: 'America/New_York', weekly: [{ open: 'sun 17:00', close: 'fri 17:00' }], holidays: ['2026-12-25'] };
+const OPEN = { status: 'open', next_open: null, reason: null, tradable: true };
+
+/** @param {number} base @param {number} amp @param {boolean} withVolume */
+function wave2Candles(base, amp, withVolume) {
+  return (/** @type {URL} */ u) => {
+    const out = [];
+    const tf = Number(u.searchParams.get('tf')) || 60;
+    const now = Math.floor(Date.now() / 1000);
+    let t = now - (now % tf) - 299 * tf;
+    let p = base;
+    for (let i = 0; i < 300; i += 1) {
+      const open = p;
+      p = Math.round(p + Math.sin(i / 7) * amp + (i % 11 === 0 ? -2 * amp : amp / 2));
+      out.push({
+        time: t, open, high: Math.max(open, p) + Math.round(amp / 3), low: Math.min(open, p) - Math.round(amp / 3), close: p,
+        volume: withVolume ? 10 + (i % 17) : null,
+      });
+      t += tf;
+    }
+    return out;
+  };
+}
+
+/** @param {{ nextOpen?: number|null, eurusd?: object, xauusd?: object, aapl?: object, ltc?: object }} [over] */
+function wave2Instruments(over) {
+  const o = over || {};
+  const nextOpen = o.nextOpen === undefined ? Date.now() + 30 * HOUR : o.nextOpen;
+  const v2 = {
+    tick_size: null, qty_step: null, min_qty: null, contract_size: null, lot_decimals: null,
+    has_depth: true, has_trades: true, has_1s: true, mode: 'trade', market: OPEN, session: null,
+  };
+  return [
+    Object.assign({}, v2, {
+      id: 1, symbol: 'BTC-USDT', canonical: 'BTCUSD', name: 'Bitcoin', category: 'crypto', base: 'BTC', quote: 'USDT',
+      price_decimals: 2, qty_decimals: 5, tick_size: 1, qty_step: 1, min_qty: 1,
+      last: 6500000, bid: 6500000, ask: 6500100, high: 6600000, low: 6400000, change: 1.5, volume: 123400000, quote_volume: 80210000000,
+    }),
+    Object.assign({}, v2, {
+      id: 3, symbol: 'EURUSD', canonical: 'EURUSD', name: 'Euro / US Dollar', category: 'forex', base: 'EUR', quote: 'USD',
+      price_decimals: 5, qty_decimals: 0, tick_size: 1, qty_step: 1000, min_qty: 1000, contract_size: '100000', lot_decimals: 2,
+      has_depth: false, has_trades: false, has_1s: false, session: FOREX_SESSION,
+      market: { status: 'closed', next_open: nextOpen, reason: 'weekend', tradable: false },
+      last: 108414, bid: 108412, ask: 108415, high: 108620, low: 108150, change: -0.12, volume: null, quote_volume: null,
+    }, o.eurusd || {}),
+    Object.assign({}, v2, {
+      id: 4, symbol: 'XAUUSD', canonical: 'XAUUSD', name: 'Gold / US Dollar', category: 'metals', base: 'XAU', quote: 'USD',
+      price_decimals: 2, qty_decimals: 2, tick_size: 1, qty_step: 100, min_qty: 100, contract_size: '100', lot_decimals: 2,
+      has_depth: false, has_trades: false, has_1s: false,
+      session: { timezone: 'America/New_York', weekly: [{ open: 'sun 18:00', close: 'fri 17:00' }], holidays: [] },
+      last: 265012, bid: 265000, ask: 265024, high: 266100, low: 263900, change: 0.48, volume: null, quote_volume: null,
+    }, o.xauusd || {}),
+    Object.assign({}, v2, {
+      id: 5, symbol: 'AAPL', canonical: 'AAPL', name: 'Apple Inc.', category: 'stocks', base: 'AAPL', quote: 'USD',
+      price_decimals: 2, qty_decimals: 0, tick_size: 1, qty_step: 1, min_qty: 1, contract_size: '1', lot_decimals: 0,
+      has_depth: false, has_trades: true, has_1s: false,
+      session: { timezone: 'America/New_York', weekly: ['mon', 'tue', 'wed', 'thu', 'fri'].map((d) => ({ open: `${d} 09:30`, close: `${d} 16:00` })), holidays: ['2026-11-26'] },
+      last: 22814, bid: 22813, ask: 22815, high: 22990, low: 22650, change: 0.87, volume: 5123400, quote_volume: 116800000000,
+    }, o.aapl || {}),
+    Object.assign({}, v2, {
+      id: 6, symbol: 'LTC-USDT', canonical: 'LTCUSD', name: 'Litecoin', category: 'crypto', base: 'LTC', quote: 'USDT',
+      price_decimals: 2, qty_decimals: 3, mode: 'closeOnly',
+      last: 8215, bid: 8214, ask: 8216, high: 8400, low: 8010, change: -1.2, volume: 9123000, quote_volume: 74900000,
+    }, o.ltc || {}),
+  ];
+}
+
+/** @param {Parameters<typeof wave2Instruments>[0]} [over] */
+function wave2Routes(over) {
+  const list = wave2Instruments(over);
+  /** @type {Record<string, Function>} */
+  const routes = { '/instruments': () => wave2Instruments(over) };
+  /** @type {Record<number, [number, number, boolean]>} */
+  const shapes = { 1: [6500000, 12000, true], 3: [108300, 30, false], 4: [264000, 120, false], 5: [22700, 15, true], 6: [8200, 12, true] };
+  for (const it of list) {
+    const [base, amp, vol] = shapes[it.id];
+    const candles = wave2Candles(base, amp, vol);
+    routes[`/candles/${it.id}`] = (/** @type {URL} */ u) => (u.searchParams.get('tf') === '1' && !it.has_1s ? { __status: 400, body: { error: 'interval_unsupported' } } : candles(u));
+    routes[`/depth/${it.id}`] = () => (it.has_depth ? Object.assign({}, DEPTH, { price_decimals: it.price_decimals, qty_decimals: it.qty_decimals }) : { __status: 404, body: { error: 'depth_unavailable' } });
+    routes[`/stats/${it.id}`] = () => STATS;
+  }
+  return routes;
+}
+
 /**
  * Поднимает статику терминала и заглушку шлюза на случайном порту.
  *
@@ -353,4 +438,4 @@ async function openTerminal(opts) {
   return { page, origin, errors, cleanup, browser, push, clients, seen };
 }
 
-module.exports = { openTerminal, startServer, findBrowser };
+module.exports = { openTerminal, startServer, findBrowser, wave2Routes, wave2Instruments };

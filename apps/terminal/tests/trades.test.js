@@ -311,3 +311,20 @@ test('инструмент с грубым шагом объёма не полу
 
   assert.equal(texts(env.root, 'market')[0][1], '1.50');
 });
+
+test('у инструмента нет ленты сделок — пустое состояние говорит почему', (t) => {
+  const env = setup();
+  t.after(env.cleanup);
+  const tr = mount(env, { feed: () => false });
+  assert.match(env.root.querySelector('[data-rows="market"]').textContent, /No trade feed/);
+  tr.pushMarket({ instrument: 1, price: 100, qty: 1, side: 'buy' });
+  assert.equal(rows(env.root, 'market').length, 0);
+});
+
+test('«мои сделки»: объём от хоста (лоты) вместо единиц', async (t) => {
+  const env = setup();
+  t.after(env.cleanup);
+  const tr = mount(env, { myTrades: async () => [myDeal({ qty: 1000, qty_decimals: 0 })], size: () => '0.01 lot' });
+  await tr.refreshMine();
+  assert.match(texts(env.root, 'mine')[0][0], /^BUY 0\.01 lot$/);
+});

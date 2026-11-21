@@ -73,6 +73,10 @@
 .watch__head, .irow { grid-template-columns: var(--watch-cols, 18px 1.55fr .82fr .85fr .85fr .7fr .85fr); }
 .watch.hide-last .c-last, .watch.hide-change .c-change, .watch.hide-sell .c-sell, .watch.hide-buy .c-buy,
 .watch.hide-spread .c-spread, .watch.hide-high .c-high { display: none; }
+.sym .symtxt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.wl-mk { flex: 0 0 auto; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9.5px; font-weight: 500; line-height: 1;
+  padding: 2px 4px; border-radius: 3px; color: var(--muted,#6b7688); border: 1px solid var(--border,#1f2735); }
+.wl-mk--closed, .wl-mk--halted { color: var(--down,#ef5350); border-color: currentColor; }
 `;
   if (!document.getElementById('watchlist-css')) {
     const s = document.createElement('style'); s.id = 'watchlist-css'; s.textContent = CSS;
@@ -193,7 +197,7 @@
     /** Фильтр поиска применяется к уже существующим строкам — без перестроения DOM. */
     function applyFilter() {
       Object.entries(rowEls).forEach(([id, el]) => {
-        const sym = (meta[id]?.symbol || '').toLowerCase();
+        const sym = `${meta[id]?.symbol || ''} ${meta[id]?.name || ''}`.toLowerCase();
         el.style.display = sym.includes(query) ? '' : 'none';
       });
     }
@@ -203,6 +207,19 @@
       return num(raw / 10 ** d, d);
     }
 
+    /** @param {any} it @returns {[string, string]} */
+    function pairOf(it) {
+      if (it.symbol.includes('-')) { const [b, q] = it.symbol.split('-'); return [b, q || 'USDT']; }
+      return [it.base || it.symbol, it.quote || ''];
+    }
+
+    /** @param {any} it */
+    function noteHtml(it) {
+      const n = cfg.note ? cfg.note(it) : null;
+      if (!n) return '';
+      return `<span class="wl-mk wl-mk--${n.kind}" title="${n.tip || n.text}">${n.text}</span>`;
+    }
+
     function renderRow(el, it) {
       // `change` обнуляемо так же, как `bid`/`ask`/`high`: `null` означает «тикера
       // нет, изменение неизвестно». Раньше шлюз отдавал в этом случае 0, и строка
@@ -210,10 +227,11 @@
       // четырьмя честными прочерками. Теперь шлюз говорит null, а прочерк здесь.
       const known = it.change != null;
       const up = known && it.change >= 0;
-      const [base, quote] = it.symbol.split('-');
+      const [base, quote] = pairOf(it);
+      el.title = it.name || '';
       el.innerHTML =
         `<span class="star ${favs.has(it.id) ? 'on' : ''}">${STAR}</span>` +
-        `<div class="sym">${coinHtml(base)}<span class="symtxt">${base}<small>/${quote || 'USDT'}</small></span></div>` +
+        `<div class="sym">${coinHtml(base)}<span class="symtxt">${base}${quote ? `<small>/${quote}</small>` : ''}</span>${noteHtml(it)}</div>` +
         `<div class="num c-last ${known ? (up ? 'up' : 'down') : ''}">${it.last != null ? fmtPrice(it, it.last) : '—'}</div>` +
         `<div class="num chg c-change ${known ? (up ? 'up' : 'down') : ''}">${known ? change(it.change) : '—'}</div>` +
         `<div class="num sell c-sell">${it.bid != null ? fmtPrice(it, it.bid) : '—'}</div>` +
@@ -245,7 +263,18 @@
       applyFilter();
       if (cfg.onData) cfg.onData(list);
       // Первый запуск: инструмент ещё не выбран — выбираем первый из списка.
-      if (current == null && firstId != null && cfg.onSelect) cfg.onSelect(firstId);
+      if (current == null && firstId != null && cfg.onSelect) {
+        const wanted = cfg.initial ? cfg.initial(list) : null;
+        cfg.onSelect(wanted != null && meta[wanted] ? wanted : firstId);
+      }
+    }
+
+    /** @param {number} id @param {object} patch */
+    function update(id, patch) {
+      const it = meta[id], el = rowEls[id];
+      if (!it || !el) return;
+      Object.assign(it, patch);
+      renderRow(el, it);
     }
 
     /** Подсветить выбранную строку (композитор зовёт при смене инструмента). */
@@ -288,6 +317,7 @@
     return {
       refresh,
       setActive,
+      update,
       /** Текущая видимость колонок (копия — внутреннее состояние не отдаём наружу). */
       columns: () => ({ ...cols }),
       setColumns(next) {

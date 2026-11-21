@@ -82,6 +82,7 @@
       <span class="ih-caret">▾</span>
     </button>
     <div class="ih-price"><span id="ihLast" class="ih-last">—</span><span id="ihMid" class="ih-sub muted"></span></div>
+    <span id="ihMarket" class="ih-market" role="status" hidden></span>
     <div class="ih-stats">
       <div class="ih-stat"><span class="ih-l" data-i18n="ih.change">24h change</span><span id="ihChg" class="ih-v">—</span></div>
       <div class="ih-stat"><span class="ih-l" data-i18n="ih.high">24h high</span><span id="ihHigh" class="ih-v">—</span></div>
@@ -272,6 +273,7 @@
         </div>
         <div class="deal__info">
           <div class="shares" id="shares" data-i18n-title="f.share.tip"><button data-share="10">10%</button><button data-share="25">25%</button><button data-share="50">50%</button></div>
+          <div id="sizeHint" class="muted small" hidden></div>
           <div id="sizeEq" class="muted small"></div>
           <div id="marginEq" class="muted small"></div>
           <div id="pipsInfo" class="muted small hidden"></div>
@@ -292,6 +294,7 @@
           <button id="btnBuy" class="orderbtn buy"><span class="orderbtn__t" data-i18n="f.buy">Buy / Long</span><span id="askPx">—</span></button>
           <button id="btnSell" class="orderbtn sell"><span class="orderbtn__t" data-i18n="f.sell">Sell / Short</span><span id="bidPx">—</span></button>
         </div>
+        <div id="dealGate" class="deal-gate" role="status" hidden></div>
         <div id="dealMsg" class="dealmsg" role="status"></div>
         <div class="deal__acct">
           <span><span class="muted" data-i18n="f.leverage">Leverage</span> <b id="fLev">—</b></span>
@@ -323,6 +326,8 @@
   <script src="/rejection.js"></script>
   <script src="/tariff.js"></script>
   <script src="/stops.js"></script>
+  <script src="/market.js"></script>
+  <script src="/sizing.js"></script>
   <script src="/levels.js"></script>
   <script src="/theming.js"></script>
   <script src="/sso.js"></script>

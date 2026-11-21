@@ -566,3 +566,22 @@ test('метка отказа — атрибут, а не отрисовка: CS
   // браузере — тем же, которого ждут `drawings` и postMessage-половина SSO.
   assert.ok(true);
 });
+
+test('стакана нет у инструмента — не запрашиваем, пишем почему', async (t) => {
+  const env = setup();
+  t.after(env.cleanup);
+  let off = true;
+  const { book, calls } = mount(env, { unavailable: () => (off ? 'No market depth for this instrument' : null) });
+  await settle();
+  assert.equal(calls.fetch.length, 0, 'запроса нет');
+  assert.ok(env.root.classList.contains('ob--off'));
+  assert.equal(env.root.querySelector('.ob__off').textContent, 'No market depth for this instrument');
+  assert.equal(env.root.querySelectorAll('.brow').length, 0);
+
+  off = false;
+  await book.refresh();
+  await settle();
+  assert.equal(calls.fetch.length, 1, 'вернулся стакан — снова читаем');
+  assert.ok(!env.root.classList.contains('ob--off'));
+  assert.ok(env.root.querySelectorAll('.brow').length > 0);
+});

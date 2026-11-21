@@ -367,3 +367,38 @@ test('история: комиссия сделки видна, у сделки 
   assert.equal(cells(r[1])[6], '', 'тарифа не было');
   assert.equal(cells(r[2])[6], '', 'старый шлюз без поля');
 });
+
+test('закрытый рынок: кнопка закрытия неактивна и объясняет почему', async (t) => {
+  const env = setup();
+  t.after(env.cleanup);
+  const { calls } = mount(env, { closeBlock: (d) => (d.id === 7 ? 'Market closed — the position can be closed after the open' : null) });
+  await settle();
+  const btn = /** @type {HTMLButtonElement} */ (env.root.querySelector('[data-rows="deals"] .closebtn'));
+  assert.equal(btn.disabled, true);
+  assert.match(btn.title, /Market closed/);
+  click(env.window, btn);
+  await settle();
+  assert.deepEqual(calls.closeDeal, []);
+});
+
+test('отказ закрытия уходит хосту со статусом и телом', async (t) => {
+  const env = setup();
+  t.after(env.cleanup);
+  const got = [];
+  mount(env, {
+    api: { closeDeal: async () => ({ ok: false, status: 409, data: { error: 'market_closed', next_open: 1795284000000 } }) },
+    onReject: (status, data) => got.push([status, data.error, data.next_open]),
+  });
+  await settle();
+  click(env.window, env.root.querySelector('[data-rows="deals"] .closebtn'));
+  await settle();
+  assert.deepEqual(got, [[409, 'market_closed', 1795284000000]]);
+});
+
+test('объём позиции от хоста (лоты), без него — единицы как раньше', async (t) => {
+  const env = setup();
+  t.after(env.cleanup);
+  mount(env, { size: (d) => (d.id === 7 ? '0.25 lot' : null) });
+  await settle();
+  assert.equal(rows(env.root, 'deals')[0].querySelector('.c-qty').textContent, '0.25 lot');
+});

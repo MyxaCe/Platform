@@ -219,3 +219,56 @@ test('destroy останавливает автообновление', async (t
   await new Promise((r) => env.window.setTimeout(r, 30));
   assert.equal(fetches, during, 'после destroy виджет не должен ходить в сеть');
 });
+
+test('инструмент платформы без дефиса: пара из base/quote, имя в подсказке', async (t) => {
+  const env = await mounted(t, {
+    fetch: async () => [
+      { id: 10, symbol: 'EURUSD', base: 'EUR', quote: 'USD', name: 'Euro / US Dollar', price_decimals: 5, change: null, bid: 108412, ask: 108415, high: null },
+      { id: 11, symbol: 'AAPL', price_decimals: 2, change: 0.5, bid: 22814, ask: 22816, high: 23000 },
+    ],
+  });
+  const eur = /** @type {HTMLElement} */ (env.root.querySelector('.irow[data-id="10"]'));
+  assert.equal(eur.querySelector('.symtxt').textContent, 'EUR/USD');
+  assert.equal(eur.title, 'Euro / US Dollar');
+  assert.equal(env.root.querySelector('.irow[data-id="11"] .symtxt').textContent, 'AAPL', 'без quote — без «/USDT»');
+  const q = /** @type {HTMLInputElement} */ (env.root.querySelector('.wl-search'));
+  q.value = 'euro';
+  q.dispatchEvent(new env.window.Event('input'));
+  assert.equal(eur.style.display, '', 'поиск находит и по имени');
+  assert.equal(/** @type {HTMLElement} */ (env.root.querySelector('.irow[data-id="11"]')).style.display, 'none');
+});
+
+test('пометка рынка от хоста видна в строке, update применяет смену статуса сразу', async (t) => {
+  const note = (it) => (it.market && it.market.status === 'closed' ? { kind: 'closed', text: 'Closed', tip: 'Market closed · opens 22:00' } : null);
+  const env = await mounted(t, {
+    fetch: async () => [{ id: 10, symbol: 'EURUSD', base: 'EUR', quote: 'USD', price_decimals: 5, change: null, bid: 1, ask: 2, high: null, market: { status: 'open' } }],
+    note,
+  });
+  const row = () => env.root.querySelector('.irow[data-id="10"]');
+  assert.equal(row().querySelector('.wl-mk'), null);
+  env.wl.update(10, { market: { status: 'closed' } });
+  const mk = /** @type {HTMLElement} */ (row().querySelector('.wl-mk'));
+  assert.equal(mk.textContent, 'Closed');
+  assert.equal(mk.title, 'Market closed · opens 22:00');
+  assert.ok(mk.classList.contains('wl-mk--closed'));
+  env.wl.update(999, { market: { status: 'closed' } });
+});
+
+test('крипто-строка без пометок выглядит как раньше', async (t) => {
+  const env = await mounted(t, { note: () => null });
+  const row = env.root.querySelector('.irow[data-id="1"]');
+  assert.equal(row.querySelector('.symtxt').textContent, 'BTC/USDT');
+  assert.equal(row.querySelector('.wl-mk'), null);
+});
+
+test('первый выбор берёт инструмент, который назвал хост; дальше опрос не перевыбирает', async (t) => {
+  const env = await mounted(t, { initial: () => 2 });
+  assert.deepEqual(env.calls.select, [2]);
+  await env.wl.refresh();
+  assert.deepEqual(env.calls.select, [2]);
+});
+
+test('хост назвал инструмент, которого нет в списке, — первый по порядку', async (t) => {
+  const env = await mounted(t, { initial: () => 99 });
+  assert.deepEqual(env.calls.select, [1]);
+});

@@ -163,6 +163,11 @@ html[lang="de"] .acct-warn, html[lang="de"] .volatile-warn, html[lang="de"] .acc
 .ih-l { color: var(--muted); font-size: 10.5px; }
 .ih-v { font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .ih-source { margin-left: auto; cursor: help; border: 0; padding: 0; font-weight: 400; letter-spacing: 0; }
+.ih-market { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; font-weight: 500;
+  color: var(--down); background: color-mix(in srgb, var(--down) 10%, transparent); border-radius: 4px; padding: 3px 8px; }
+.ih-market--only { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.ih-market[hidden] { display: none; }
+body.src-v2 .ih-source, body.src-v2 .ob__src, body.src-v2 .trades__src { display: none; }
 
 /* ============================ Сетка ============================ */
 /* Слева — рынок (глубина и под ней лента сделок), в центре — график, справа
@@ -207,6 +212,8 @@ html[lang="de"] .acct-warn, html[lang="de"] .volatile-warn, html[lang="de"] .acc
 .tfs button { flex: 0 0 auto; background: transparent; border: none; color: var(--muted); padding: 5px 8px; cursor: pointer; border-radius: 4px; font-weight: 500; font-size: 12px; }
 .tfs button:hover { color: var(--text); }
 .tfs button.active { color: var(--text); background: var(--field-hover); }
+.tfs button:disabled { opacity: .35; cursor: not-allowed; }
+.tfs button:disabled:hover { color: var(--muted); }
 .tb-sep { width: 1px; height: 16px; background: var(--hair); margin: 0 4px; }
 .tbbtn { background: transparent; border: 1px solid transparent; color: var(--muted); border-radius: 4px;
   padding: 5px 8px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
@@ -274,6 +281,7 @@ html[lang="de"] .acct-warn, html[lang="de"] .volatile-warn, html[lang="de"] .acc
     "info  info"
     "sl    tp"
     "hint  hint"
+    "gate  gate"
     "btns  btns"
     "msg   msg"
     "acct  acct"; align-items: end; }
@@ -291,6 +299,10 @@ html[lang="de"] .acct-warn, html[lang="de"] .volatile-warn, html[lang="de"] .acc
 .deal[data-side="buy"] #btnSell, .deal[data-side="sell"] #btnBuy { display: none; }
 .dealmsg { grid-area: msg; min-height: 0; font-size: 11.5px; line-height: 1.4; }
 .dealmsg:empty { display: none; }
+.deal-gate { grid-area: gate; font-size: 11.5px; line-height: 1.4; color: var(--down); padding: 6px 8px; border-radius: 4px;
+  background: color-mix(in srgb, var(--down) 10%, transparent); }
+.deal-gate--info { color: var(--muted); background: var(--field); }
+.deal-gate[hidden] { display: none; }
 .deal__acct { grid-area: acct; display: flex; justify-content: space-between; gap: 12px; font-size: 11.5px; font-variant-numeric: tabular-nums;
   padding-top: 10px; border-top: 1px solid var(--hair); }
 .deal__acct b { font-weight: 500; }
