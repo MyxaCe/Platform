@@ -81,6 +81,25 @@ pub struct LoadedState {
     pub journals: Vec<(UserId, Vec<AccountEvent>)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstrumentRow {
+    pub id: u32,
+    pub symbol: String,
+    pub source: String,
+    pub provider_symbol: String,
+    pub price_decimals: u8,
+    pub qty_decimals: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewInstrument {
+    pub symbol: String,
+    pub source: String,
+    pub provider_symbol: String,
+    pub price_decimals: u8,
+    pub qty_decimals: u8,
+}
+
 /// Запись исходящей очереди шины (TRM-40): готовый к отправке конверт.
 ///
 /// Конверт собран **до** записи и дальше не меняется: релей его только отправляет.
@@ -276,6 +295,18 @@ pub trait Persistence: Send + Sync {
         Err(StoreError("хранилище не держит настройки площадок".into()))
     }
 
+    async fn load_instruments(&self) -> Result<Vec<InstrumentRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn pin_instruments(&self, _rows: &[InstrumentRow]) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn register_instrument(&self, _new: &NewInstrument) -> Result<InstrumentRow, StoreError> {
+        Err(StoreError("хранилище не держит реестр инструментов".into()))
+    }
+
     /// Переживает ли состояние перезапуск процесса.
     ///
     /// Нужен не коду, а человеку: в памяти счёт после рестарта выглядит как настоящий
@@ -317,7 +348,10 @@ pub struct MemoryStore {
     next_outbox_id: std::sync::atomic::AtomicI64,
     /// Настройки площадок (минимум стопов). Как и всё здесь — не durable.
     site_min_stops: std::sync::Mutex<std::collections::BTreeMap<String, i64>>,
+    instruments: std::sync::Mutex<std::collections::BTreeMap<u32, InstrumentRow>>,
 }
+
+const MEMORY_FIRST_FREE_ID: u32 = 31;
 
 #[derive(Debug, Clone)]
 struct MemoryOutboxRow {
@@ -550,6 +584,55 @@ impl Persistence for MemoryStore {
             .map_err(|_| StoreError("память настроек испорчена".into()))?
             .insert(tenant.to_string(), bps);
         Ok(())
+    }
+
+    async fn load_instruments(&self) -> Result<Vec<InstrumentRow>, StoreError> {
+        let m = self
+            .instruments
+            .lock()
+            .map_err(|_| StoreError("память реестра инструментов испорчена".into()))?;
+        Ok(m.values().cloned().collect())
+    }
+
+    async fn pin_instruments(&self, rows: &[InstrumentRow]) -> Result<(), StoreError> {
+        let mut m = self
+            .instruments
+            .lock()
+            .map_err(|_| StoreError("память реестра инструментов испорчена".into()))?;
+        for r in rows {
+            if m.values().any(|x| x.symbol == r.symbol && x.id != r.id) {
+                continue;
+            }
+            m.entry(r.id).or_insert_with(|| r.clone());
+        }
+        Ok(())
+    }
+
+    async fn register_instrument(&self, new: &NewInstrument) -> Result<InstrumentRow, StoreError> {
+        let mut m = self
+            .instruments
+            .lock()
+            .map_err(|_| StoreError("память реестра инструментов испорчена".into()))?;
+        if let Some(found) = m.values().find(|x| x.symbol == new.symbol) {
+            return Ok(found.clone());
+        }
+        let id = m
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0)
+            .max(MEMORY_FIRST_FREE_ID - 1)
+            + 1;
+        let row = InstrumentRow {
+            id,
+            symbol: new.symbol.clone(),
+            source: new.source.clone(),
+            provider_symbol: new.provider_symbol.clone(),
+            price_decimals: new.price_decimals,
+            qty_decimals: new.qty_decimals,
+        };
+        m.insert(id, row.clone());
+        Ok(row)
     }
 
     /// Личностей здесь нет: `resolve_identity` у этого хранилища отказывает, а

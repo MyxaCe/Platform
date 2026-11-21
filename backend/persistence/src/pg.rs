@@ -16,7 +16,24 @@ use broker::{AccountSnapshot, ClosedDeal, PendingOrder, PosSide, Position};
 use domain::account::{AccountKind, UserId};
 
 use crate::money::{from_numeric, to_numeric};
-use crate::{LoadedState, OutboxClaim, OutboxRecord, Persistence, StoreError};
+use crate::{
+    InstrumentRow, LoadedState, NewInstrument, OutboxClaim, OutboxRecord, Persistence, StoreError,
+};
+
+fn instrument_from_row(r: &PgRow) -> Result<InstrumentRow, StoreError> {
+    let id: i32 = r.get("id");
+    let pd: i16 = r.get("price_decimals");
+    let qd: i16 = r.get("qty_decimals");
+    let bad = || StoreError(format!("инструмент {id}: строка реестра не читается"));
+    Ok(InstrumentRow {
+        id: u32::try_from(id).map_err(|_| bad())?,
+        symbol: r.get("symbol"),
+        source: r.get("source"),
+        provider_symbol: r.get("provider_symbol"),
+        price_decimals: u8::try_from(pd).map_err(|_| bad())?,
+        qty_decimals: u8::try_from(qd).map_err(|_| bad())?,
+    })
+}
 
 fn db(e: sqlx::Error) -> StoreError {
     StoreError(e.to_string())
@@ -333,6 +350,25 @@ CREATE TABLE IF NOT EXISTS bus_outbox (
 CREATE INDEX IF NOT EXISTS bus_outbox_unpublished_idx
   ON bus_outbox (next_attempt_at)
   WHERE published_at IS NULL;
+CREATE SEQUENCE IF NOT EXISTS instrument_id_seq START 31;
+CREATE TABLE IF NOT EXISTS instruments (
+  id              INTEGER PRIMARY KEY CHECK (id > 0),
+  symbol          TEXT NOT NULL UNIQUE,
+  source          TEXT NOT NULL CHECK (source IN ('v1', 'v2')),
+  provider_symbol TEXT NOT NULL,
+  price_decimals  SMALLINT NOT NULL CHECK (price_decimals BETWEEN 0 AND 12),
+  qty_decimals    SMALLINT NOT NULL CHECK (qty_decimals BETWEEN 0 AND 12),
+  registered_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE OR REPLACE FUNCTION instruments_are_immutable() RETURNS trigger AS $fn$
+BEGIN
+  RAISE EXCEPTION 'instruments is immutable: % denied', TG_OP;
+END;
+$fn$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS instruments_no_change ON instruments;
+CREATE TRIGGER instruments_no_change
+  BEFORE UPDATE OR DELETE ON instruments
+  FOR EACH ROW EXECUTE FUNCTION instruments_are_immutable();
 "#;
 
 /// Отпечаток ↔ БД: 32 hex-символа. Число в тексте, а не `NUMERIC`, потому что по нему
@@ -871,6 +907,62 @@ impl Persistence for PgStore {
         .await
         .map_err(db)?;
         Ok(())
+    }
+
+    async fn load_instruments(&self) -> Result<Vec<InstrumentRow>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, symbol, source, provider_symbol, price_decimals, qty_decimals
+               FROM instruments ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        rows.iter().map(instrument_from_row).collect()
+    }
+
+    async fn pin_instruments(&self, rows: &[InstrumentRow]) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        for r in rows {
+            sqlx::query(
+                "INSERT INTO instruments (id, symbol, source, provider_symbol, price_decimals, qty_decimals)
+                 VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+            )
+            .bind(r.id as i32)
+            .bind(&r.symbol)
+            .bind(&r.source)
+            .bind(&r.provider_symbol)
+            .bind(i16::from(r.price_decimals))
+            .bind(i16::from(r.qty_decimals))
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        }
+        tx.commit().await.map_err(db)?;
+        Ok(())
+    }
+
+    async fn register_instrument(&self, new: &NewInstrument) -> Result<InstrumentRow, StoreError> {
+        let row = sqlx::query(
+            "WITH ins AS (
+               INSERT INTO instruments (id, symbol, source, provider_symbol, price_decimals, qty_decimals)
+               VALUES (nextval('instrument_id_seq'), $1, $2, $3, $4, $5)
+               ON CONFLICT (symbol) DO NOTHING
+               RETURNING id, symbol, source, provider_symbol, price_decimals, qty_decimals)
+             SELECT id, symbol, source, provider_symbol, price_decimals, qty_decimals FROM ins
+             UNION ALL
+             SELECT id, symbol, source, provider_symbol, price_decimals, qty_decimals
+               FROM instruments WHERE symbol = $1
+             LIMIT 1",
+        )
+        .bind(&new.symbol)
+        .bind(&new.source)
+        .bind(&new.provider_symbol)
+        .bind(i16::from(new.price_decimals))
+        .bind(i16::from(new.qty_decimals))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(db)?;
+        instrument_from_row(&row)
     }
 
     fn durable(&self) -> bool {
