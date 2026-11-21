@@ -979,7 +979,6 @@ impl Account {
     /// запись: закрытие на разрыве должно быть отличимо в журнале, потому что
     /// спорят именно о нём.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn run_triggers(
         &mut self,
         t: Terms,
