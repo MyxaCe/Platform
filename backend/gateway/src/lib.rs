@@ -528,6 +528,7 @@ pub async fn restore_state(st: &AppState) -> Result<(), persistence::StoreError>
     if accounts_n > 0 {
         println!("[gateway] восстановлено из хранилища: счетов {accounts_n}");
     }
+    instruments::recompute_subscriptions(st).await;
     Ok(())
 }
 
@@ -2760,6 +2761,9 @@ async fn close_deal(
         market_gate(&st, inst)?;
     }
     let m = marks(&st).await;
+    if inst.is_some_and(|i| !m.contains_key(&i)) {
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "no price yet"));
+    }
     let (pnl, mark) = with_account(&st, user, Origin::Client, |b| {
         let inst = b
             .positions(user)

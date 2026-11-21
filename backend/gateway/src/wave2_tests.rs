@@ -1348,3 +1348,60 @@ async fn the_legacy_index_still_resolves_both_spellings() {
     assert_eq!(idx.get("BTCUSDT"), Some(&1));
     assert_eq!(idx.get("SHIBUSD"), Some(&28));
 }
+
+#[tokio::test]
+async fn closing_without_a_price_is_refused_instead_of_filled_at_zero() {
+    let st = build_state();
+    restore_state(&st).await.unwrap();
+    let app = router(st.clone());
+    crypto(&st, 2, 320_000, 320_010).await;
+    let (_, b) = send(
+        &app,
+        "POST",
+        "/deals",
+        Some(json!({"instrument": 2, "side": "buy", "qty": 1000})),
+        &[],
+    )
+    .await;
+    let id = b["id"].as_u64().unwrap();
+    st.tickers.lock().await.remove(&2);
+    let (s, _) = send(&app, "POST", &format!("/deals/{id}/close"), None, &[]).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+    let (_, open) = send(&app, "GET", "/deals", None, &[]).await;
+    assert_eq!(open.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn restored_exposure_is_subscribed_from_the_start() {
+    let (f, base) = fake().await;
+    *f.platform.lock().unwrap() = list(1, &[("BTCUSD", "trade"), ("ETHUSD", "trade")]);
+    let cache = cache_path("restart");
+    let store: Arc<dyn persistence::Persistence> = Arc::new(persistence::MemoryStore::new());
+    let st = state_on(
+        store.clone(),
+        platform_for(&base, true, Some(cache.clone()), false),
+    )
+    .await;
+    instruments::poll_once(&st).await.unwrap();
+    crypto(&st, 2, 320_000, 320_010).await;
+    send(
+        &router(st.clone()),
+        "POST",
+        "/deals",
+        Some(json!({"instrument": 2, "side": "buy", "qty": 1000})),
+        &[],
+    )
+    .await;
+    *f.platform.lock().unwrap() = list(2, &[("BTCUSD", "trade")]);
+    instruments::poll_once(&st).await.unwrap();
+    let again = state_on(
+        store,
+        platform_for("http://127.0.0.1:9", true, Some(cache), false),
+    )
+    .await;
+    let subs = again.platform.subscriptions_v1().borrow().clone();
+    assert!(
+        subs.contains("BTCUSDT") && subs.contains("ETHUSDT"),
+        "{subs:?}"
+    );
+}
