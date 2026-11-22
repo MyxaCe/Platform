@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use domain::account::UserId;
 pub use domain::account::{
@@ -233,6 +234,46 @@ struct Terms {
 
 pub const MAX_LEVERAGE: i128 = 1000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LevClass {
+    Crypto,
+    Forex,
+    Metals,
+    Stocks,
+    Energy,
+    Indices,
+}
+
+impl LevClass {
+    pub const ALL: [LevClass; 6] = [
+        LevClass::Crypto,
+        LevClass::Forex,
+        LevClass::Metals,
+        LevClass::Stocks,
+        LevClass::Energy,
+        LevClass::Indices,
+    ];
+
+    pub fn tag(self) -> &'static str {
+        match self {
+            LevClass::Crypto => "crypto",
+            LevClass::Forex => "forex",
+            LevClass::Metals => "metals",
+            LevClass::Stocks => "stocks",
+            LevClass::Energy => "energy",
+            LevClass::Indices => "indices",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.tag() == s)
+    }
+}
+
+pub type ClassLeverage = BTreeMap<LevClass, i128>;
+
+pub type InstrumentClassOf = Arc<dyn Fn(u32) -> Option<LevClass> + Send + Sync>;
+
 pub fn stop_loss_reached(side: PosSide, m: i64, sl: i64) -> bool {
     match side {
         PosSide::Long => m <= sl,
@@ -273,6 +314,7 @@ struct Account {
     model: PositionModel,
     margin_called: bool,
     leverage: Option<i128>,
+    class_leverage: ClassLeverage,
     fees: Fees,
     outbox: Vec<EventKind>,
 }
@@ -280,6 +322,12 @@ struct Account {
 impl Account {
     fn minor(&self) -> i128 {
         self.profile.currency.minor_per_unit()
+    }
+
+    fn lev_for(&self, base: i128, class: Option<LevClass>) -> i128 {
+        class
+            .and_then(|c| self.class_leverage.get(&c).copied())
+            .unwrap_or(base)
     }
 
     fn used_margin(&self) -> Cents {
@@ -643,6 +691,7 @@ impl Account {
         &mut self,
         t: Terms,
         mv: &MarketView<'_>,
+        class_of: &dyn Fn(u32) -> Option<LevClass>,
         user: UserId,
         across_gap: bool,
         stop_out_pct: Option<i128>,
@@ -701,8 +750,12 @@ impl Account {
                 exec: Some(exec),
                 across_gap: gap_of(p.instrument),
             });
+            let at = Terms {
+                lev: self.lev_for(t.lev, class_of(p.instrument)),
+                ..t
+            };
             let _ = self.try_open(
-                t,
+                at,
                 marks,
                 p.instrument,
                 p.side,
@@ -818,6 +871,7 @@ pub struct Broker {
     protect_negative_balance: bool,
     margin_call_pct: Option<i128>,
     margin_call_rearm_band_pct: i128,
+    class_of: Option<InstrumentClassOf>,
 }
 
 impl Broker {
@@ -830,7 +884,17 @@ impl Broker {
             margin_call_pct: None,
             margin_call_rearm_band_pct: 0,
             protect_negative_balance: false,
+            class_of: None,
         }
+    }
+
+    pub fn with_instrument_classes(mut self, class_of: InstrumentClassOf) -> Self {
+        self.class_of = Some(class_of);
+        self
+    }
+
+    pub fn instrument_class(&self, instrument: u32) -> Option<LevClass> {
+        self.class_of.as_ref().and_then(|f| f(instrument))
     }
 
     pub fn with_stop_out_pct(mut self, pct: Option<i128>) -> Self {
@@ -1022,9 +1086,10 @@ impl Broker {
     ) -> Result<u64, BrokerError> {
         let platform = self.leverage;
         let protect = self.protect_negative_balance;
+        let class = self.instrument_class(instrument);
         let a = self.acct(user);
         let t = Terms {
-            lev: a.leverage.unwrap_or(platform),
+            lev: a.lev_for(a.leverage.unwrap_or(platform), class),
             fees: a.fees,
             protect,
         };
@@ -1203,6 +1268,8 @@ impl Broker {
         let platform = self.leverage;
         let stop_out = self.stop_out_pct;
         let protect = self.protect_negative_balance;
+        let classes = self.class_of.clone();
+        let class_of = |id: u32| classes.as_ref().and_then(|f| f(id));
         let mut changed = Vec::new();
         for (user, a) in self.accounts.iter_mut() {
             let t = Terms {
@@ -1211,7 +1278,7 @@ impl Broker {
                 protect,
             };
             let is_frozen = frozen.contains(user);
-            if a.run_triggers(t, mv, *user, across_gap, stop_out, is_frozen) {
+            if a.run_triggers(t, mv, &class_of, *user, across_gap, stop_out, is_frozen) {
                 changed.push(*user);
             }
         }
@@ -1229,6 +1296,7 @@ impl Broker {
                 closed: a.closed.clone(),
                 model: a.model,
                 leverage: a.leverage,
+                class_leverage: a.class_leverage.clone(),
                 fees: a.fees,
             },
             None => AccountSnapshot {
@@ -1240,6 +1308,7 @@ impl Broker {
                 closed: vec![],
                 model: PositionModel::default(),
                 leverage: None,
+                class_leverage: ClassLeverage::new(),
                 fees: Fees::default(),
             },
         }
@@ -1255,6 +1324,7 @@ impl Broker {
             closed: snap.closed,
             model: snap.model,
             leverage: snap.leverage,
+            class_leverage: snap.class_leverage,
             fees: snap.fees,
             margin_called: false,
             outbox: Vec::new(),
@@ -1315,6 +1385,42 @@ impl Broker {
 
     pub fn assigned_leverage(&self, user: UserId) -> Option<i128> {
         self.accounts.get(&user).and_then(|a| a.leverage)
+    }
+
+    pub fn account_class_leverage(&self, user: UserId) -> ClassLeverage {
+        self.accounts
+            .get(&user)
+            .map(|a| a.class_leverage.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn instrument_leverage(&self, user: UserId, instrument: u32) -> i128 {
+        let base = self.account_leverage(user);
+        let class = self.instrument_class(instrument);
+        self.accounts
+            .get(&user)
+            .map(|a| a.lev_for(base, class))
+            .unwrap_or(base)
+    }
+
+    pub fn set_account_class_leverage(
+        &mut self,
+        user: UserId,
+        classes: ClassLeverage,
+    ) -> Result<bool, BrokerError> {
+        if classes.values().any(|l| !(1..=MAX_LEVERAGE).contains(l)) {
+            return Err(BrokerError::InvalidLeverage);
+        }
+        let a = self
+            .accounts
+            .get_mut(&user)
+            .ok_or(BrokerError::UnknownAccount)?;
+        if a.class_leverage == classes {
+            return Ok(false);
+        }
+        a.class_leverage = classes.clone();
+        a.log(EventKind::LeverageClassesSet { classes });
+        Ok(true)
     }
 
     pub fn set_account_leverage(&mut self, user: UserId, lev: i128) -> Result<bool, BrokerError> {
@@ -1381,6 +1487,7 @@ pub struct AccountSnapshot {
     pub closed: Vec<ClosedDeal>,
     pub model: PositionModel,
     pub leverage: Option<i128>,
+    pub class_leverage: ClassLeverage,
     pub fees: Fees,
 }
 
@@ -1542,6 +1649,7 @@ mod invariant_tests {
             closed: vec![],
             model: PositionModel::Hedging,
             leverage: None,
+            class_leverage: Default::default(),
             fees: Default::default(),
         }
     }
@@ -3345,5 +3453,219 @@ mod levels_tests {
         snap.pendings[0].sl = Some(1);
         let ds = journal::reconcile(&j.replay(), &snap);
         assert!(ds.iter().any(|d| d.0.contains("SL/TP")), "{ds:?}");
+    }
+}
+
+#[cfg(test)]
+mod class_leverage_tests {
+    use super::journal::{self, Journal, Origin};
+    use super::*;
+
+    const U: UserId = UserId(9);
+    const BTC: u32 = 1;
+    const EURUSD: u32 = 500;
+    const OTHER: u32 = 900;
+
+    fn classes() -> InstrumentClassOf {
+        Arc::new(|id| match id {
+            BTC => Some(LevClass::Crypto),
+            EURUSD => Some(LevClass::Forex),
+            _ => None,
+        })
+    }
+
+    fn table(pairs: &[(LevClass, i128)]) -> ClassLeverage {
+        pairs.iter().copied().collect()
+    }
+
+    fn setup() -> (Broker, Journal) {
+        let mut b = Broker::new(1_000_000_000, 20).with_instrument_classes(classes());
+        assert!(b.open_account(U));
+        let mut j = Journal::new(b.start_balance());
+        commit(&mut b, &mut j);
+        (b, j)
+    }
+
+    fn commit(b: &mut Broker, j: &mut Journal) {
+        let kinds = b.take_events(U);
+        let sealed = j.seal(1, &Origin::System, &kinds);
+        assert_eq!(
+            journal::reconcile(&j.preview(&sealed), &b.snapshot(U)),
+            vec![]
+        );
+        for e in sealed {
+            j.commit(e).expect("запись продолжает ленту");
+        }
+    }
+
+    fn marks() -> HashMap<u32, i64> {
+        HashMap::from([(BTC, 5_000_000), (EURUSD, 108_000), (OTHER, 10_000)])
+    }
+
+    fn open(b: &mut Broker, instrument: u32) -> u64 {
+        let px = marks()[&instrument];
+        b.open(
+            U,
+            &marks(),
+            instrument,
+            PosSide::Long,
+            100_000,
+            px,
+            5,
+            2,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn pos(b: &Broker, id: u64) -> Position {
+        b.positions(U).into_iter().find(|p| p.id == id).unwrap()
+    }
+
+    #[test]
+    fn forex_and_crypto_open_with_their_own_leverage_and_margin() {
+        let (mut b, mut j) = setup();
+        b.set_account_leverage(U, 30).unwrap();
+        assert_eq!(
+            b.set_account_class_leverage(
+                U,
+                table(&[(LevClass::Crypto, 5), (LevClass::Forex, 100)])
+            ),
+            Ok(true)
+        );
+        commit(&mut b, &mut j);
+
+        let btc = open(&mut b, BTC);
+        let fx = open(&mut b, EURUSD);
+        let other = open(&mut b, OTHER);
+        commit(&mut b, &mut j);
+
+        assert_eq!(pos(&b, btc).leverage, 5);
+        assert_eq!(pos(&b, fx).leverage, 100);
+        assert_eq!(pos(&b, other).leverage, 30, "без категории — базовое");
+        for (id, lev) in [(btc, 5), (fx, 100), (other, 30)] {
+            let p = pos(&b, id);
+            assert_eq!(p.margin, margin_for(p.entry, p.qty, p.pd, p.qd, lev, 100));
+        }
+        assert_eq!(b.instrument_leverage(U, BTC), 5);
+        assert_eq!(b.instrument_leverage(U, EURUSD), 100);
+        assert_eq!(b.instrument_leverage(U, OTHER), 30);
+    }
+
+    #[test]
+    fn a_table_change_leaves_open_positions_alone_and_survives_restart() {
+        let (mut b, mut j) = setup();
+        b.set_account_class_leverage(U, table(&[(LevClass::Forex, 50)]))
+            .unwrap();
+        commit(&mut b, &mut j);
+        let old = open(&mut b, EURUSD);
+        commit(&mut b, &mut j);
+        let old_margin = pos(&b, old).margin;
+
+        b.set_account_class_leverage(U, table(&[(LevClass::Forex, 200)]))
+            .unwrap();
+        commit(&mut b, &mut j);
+        assert_eq!(pos(&b, old).leverage, 50);
+        assert_eq!(pos(&b, old).margin, old_margin);
+        let new = open(&mut b, EURUSD);
+        commit(&mut b, &mut j);
+        assert_eq!(pos(&b, new).leverage, 200);
+
+        let reloaded = Journal::load(b.start_balance(), j.events().to_vec()).expect("лента цела");
+        assert_eq!(
+            reloaded.state().class_leverage,
+            table(&[(LevClass::Forex, 200)])
+        );
+        let replayed: Vec<i128> = {
+            let mut v: Vec<_> = reloaded
+                .state()
+                .positions
+                .iter()
+                .map(|p| (p.id, p.leverage))
+                .collect();
+            v.sort();
+            v.into_iter().map(|(_, l)| l).collect()
+        };
+        assert_eq!(
+            replayed,
+            vec![50, 200],
+            "свёртка берёт плечо из записи открытия"
+        );
+        let snap = b.snapshot(U);
+        assert!(journal::audit(&reloaded, &snap).ok());
+        let mut b2 = Broker::new(b.start_balance(), 20).with_instrument_classes(classes());
+        b2.restore(U, snap);
+        assert_eq!(b2.instrument_leverage(U, EURUSD), 200);
+        assert_eq!(b2.instrument_leverage(U, BTC), 20);
+    }
+
+    #[test]
+    fn a_pending_order_fires_at_the_leverage_of_its_category() {
+        let (mut b, mut j) = setup();
+        b.set_account_class_leverage(U, table(&[(LevClass::Forex, 100)]))
+            .unwrap();
+        b.place_pending(U, EURUSD, PosSide::Long, 100_000, 108_000, 5, 2, None, None)
+            .unwrap();
+        commit(&mut b, &mut j);
+        b.check(&marks(), false);
+        commit(&mut b, &mut j);
+        let p = b.positions(U);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].leverage, 100);
+    }
+
+    #[test]
+    fn without_a_table_every_category_trades_at_the_account_leverage() {
+        let (mut b, mut j) = setup();
+        let btc = open(&mut b, BTC);
+        let fx = open(&mut b, EURUSD);
+        commit(&mut b, &mut j);
+        assert_eq!(pos(&b, btc).leverage, 20);
+        assert_eq!(pos(&b, fx).leverage, 20);
+        assert_eq!(
+            b.set_account_class_leverage(U, ClassLeverage::new()),
+            Ok(false),
+            "пустая таблица поверх пустой — без записи"
+        );
+    }
+
+    #[test]
+    fn the_table_is_validated_and_a_repeat_writes_nothing() {
+        let (mut b, mut j) = setup();
+        for bad in [0, MAX_LEVERAGE + 1] {
+            assert_eq!(
+                b.set_account_class_leverage(U, table(&[(LevClass::Crypto, bad)])),
+                Err(BrokerError::InvalidLeverage)
+            );
+        }
+        let t = table(&[(LevClass::Metals, 40)]);
+        assert_eq!(b.set_account_class_leverage(U, t.clone()), Ok(true));
+        commit(&mut b, &mut j);
+        assert_eq!(b.set_account_class_leverage(U, t), Ok(false));
+        assert_eq!(b.pending_events(U), 0);
+        assert_eq!(
+            b.set_account_class_leverage(UserId(999), ClassLeverage::new()),
+            Err(BrokerError::UnknownAccount)
+        );
+    }
+
+    #[test]
+    fn a_table_without_a_journal_entry_is_a_divergence() {
+        let (mut b, j) = setup();
+        b.set_account_class_leverage(U, table(&[(LevClass::Forex, 50)]))
+            .unwrap();
+        let _ = b.take_events(U);
+        let ds = journal::reconcile(j.state(), &b.snapshot(U));
+        assert!(ds.iter().any(|d| d.0.contains("по категориям")), "{ds:?}");
+    }
+
+    #[test]
+    fn categories_parse_only_from_their_tags() {
+        for c in LevClass::ALL {
+            assert_eq!(LevClass::parse(c.tag()), Some(c));
+        }
+        assert_eq!(LevClass::parse("fx"), None);
+        assert_eq!(LevClass::parse("other"), None);
     }
 }

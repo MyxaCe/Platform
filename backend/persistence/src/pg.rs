@@ -140,6 +140,7 @@ ALTER TABLE accounts ADD COLUMN IF NOT EXISTS currency_minor_units SMALLINT NOT 
 -- торговать так же, как торговал. Источник истины — запись `leverage_set`
 -- журнала; столбец — слепок, сверяемый с ней на старте.
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS leverage BIGINT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS leverage_classes TEXT;
 -- Тариф СЧЁТА для новых позиций (решение владельца 10.11): наценка на спред и
 -- комиссия за сделку, в базисных пунктах. DEFAULT 0 — «без тарифа», и это
 -- факт истории: до столбцов наценки и комиссии не было. Источник истины —
@@ -394,7 +395,7 @@ impl Persistence for PgStore {
 
     async fn load_all(&self) -> Result<LoadedState, StoreError> {
         let acc_rows = sqlx::query(
-            "SELECT user_id, balance, next_id, model, leverage, markup_bps, commission_bps, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units
+            "SELECT user_id, balance, next_id, model, leverage, leverage_classes, markup_bps, commission_bps, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units
                FROM accounts ORDER BY user_id",
         )
                 .fetch_all(&self.pool)
@@ -410,6 +411,12 @@ impl Persistence for PgStore {
 
             let model = model_from_db(acc.get::<i16, _>("model"));
             let leverage = acc.get::<Option<i64>, _>("leverage").map(i128::from);
+            let class_leverage = match acc.get::<Option<String>, _>("leverage_classes") {
+                None => broker::ClassLeverage::new(),
+                Some(s) => broker::journal::class_leverage_from_text(&s).map_err(|e| {
+                    StoreError(format!("счёт {}: плечо по категориям «{s}»: {e}", uid.0))
+                })?,
+            };
             let fees = broker::Fees {
                 markup_bps: acc.get::<i64, _>("markup_bps"),
                 commission_bps: acc.get::<i64, _>("commission_bps"),
@@ -535,6 +542,7 @@ impl Persistence for PgStore {
                     closed,
                     model,
                     leverage,
+                    class_leverage,
                     fees,
                 },
             ));
@@ -574,9 +582,9 @@ impl Persistence for PgStore {
         let mut tx = self.pool.begin().await.map_err(db)?;
 
         sqlx::query(
-            "INSERT INTO accounts (user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units, leverage, markup_bps, commission_bps)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-             ON CONFLICT (user_id) DO UPDATE SET balance = EXCLUDED.balance, next_id = EXCLUDED.next_id, model = EXCLUDED.model, leverage = EXCLUDED.leverage, markup_bps = EXCLUDED.markup_bps, commission_bps = EXCLUDED.commission_bps",
+            "INSERT INTO accounts (user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units, leverage, markup_bps, commission_bps, leverage_classes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+             ON CONFLICT (user_id) DO UPDATE SET balance = EXCLUDED.balance, next_id = EXCLUDED.next_id, model = EXCLUDED.model, leverage = EXCLUDED.leverage, markup_bps = EXCLUDED.markup_bps, commission_bps = EXCLUDED.commission_bps, leverage_classes = EXCLUDED.leverage_classes",
         )
         .bind(id_db)
         .bind(to_numeric(snap.balance))
@@ -591,6 +599,10 @@ impl Persistence for PgStore {
         .bind(snap.leverage.map(|l| l as i64))
         .bind(snap.fees.markup_bps)
         .bind(snap.fees.commission_bps)
+        .bind(
+            (!snap.class_leverage.is_empty())
+                .then(|| broker::journal::class_leverage_text(&snap.class_leverage)),
+        )
         .execute(&mut *tx)
         .await
         .map_err(db)?;

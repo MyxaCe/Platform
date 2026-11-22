@@ -45,5 +45,18 @@
     return `Commission ≈ ${(minor / 100).toFixed(2)} USD`;
   }
 
-  window.Tariff = { execPrice, commissionMinor, commissionText };
+  /**
+   * @param {any} account
+   * @param {any} it
+   * @returns {number|null}
+   */
+  function leverageFor(account, it) {
+    if (!account || !Number.isInteger(account.leverage) || account.leverage < 1) return null;
+    const table = account.leverage_classes;
+    const cat = it && typeof it.category === 'string' ? it.category : null;
+    const lev = table && cat && Object.prototype.hasOwnProperty.call(table, cat) ? table[cat] : account.leverage;
+    return Number.isInteger(lev) && lev >= 1 ? lev : account.leverage;
+  }
+
+  window.Tariff = { execPrice, commissionMinor, commissionText, leverageFor };
 })();

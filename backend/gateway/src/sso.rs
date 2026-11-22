@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
@@ -21,6 +21,10 @@ pub struct Claims {
     pub account_kind: Option<String>,
     #[serde(default)]
     pub leverage: Option<i64>,
+    #[serde(default)]
+    pub leverage_base: Option<i64>,
+    #[serde(default)]
+    pub leverage_classes: Option<BTreeMap<String, i64>>,
     #[serde(default)]
     pub markup_bps: Option<i64>,
     #[serde(default)]

@@ -5,8 +5,8 @@ use domain::account::{
 };
 
 use crate::{
-    margin_for, merged_entry, realized_on_close, AccountSnapshot, Cents, ClosedDeal, DealFees,
-    Fees, PendingOrder, PosSide, Position, PositionFees, PositionModel,
+    margin_for, merged_entry, realized_on_close, AccountSnapshot, Cents, ClassLeverage, ClosedDeal,
+    DealFees, Fees, LevClass, PendingOrder, PosSide, Position, PositionFees, PositionModel,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +168,9 @@ pub enum EventKind {
     LeverageSet {
         lev: i128,
     },
+    LeverageClassesSet {
+        classes: ClassLeverage,
+    },
     PendingRejected {
         id: u64,
         exec: Option<i64>,
@@ -233,6 +236,7 @@ impl EventKind {
             | EventKind::DemoAccountReset { .. }
             | EventKind::TradingFreezeSet { .. }
             | EventKind::LeverageSet { .. }
+            | EventKind::LeverageClassesSet { .. }
             | EventKind::PendingRejected { .. }
             | EventKind::FeesSet { .. }
             | EventKind::MarkupApplied { .. }
@@ -372,6 +376,36 @@ fn side_of(fs: &[(&str, &str)], key: &str) -> Result<PosSide, BadRecord> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BadRecord(pub &'static str);
 
+pub fn class_leverage_text(classes: &ClassLeverage) -> String {
+    let mut s = String::new();
+    for (c, l) in classes {
+        if !s.is_empty() {
+            s.push(' ');
+        }
+        let _ = write!(s, "{}={l}", c.tag());
+    }
+    s
+}
+
+fn class_leverage_of(fs: &[(&str, &str)]) -> Result<ClassLeverage, BadRecord> {
+    let mut classes = ClassLeverage::new();
+    for (k, v) in fs {
+        let class = LevClass::parse(k).ok_or(BadRecord("неизвестная категория плеча"))?;
+        let lev = match v.parse::<i128>() {
+            Ok(l) if (1..=crate::MAX_LEVERAGE).contains(&l) => l,
+            _ => return Err(BadRecord("плечо категории вне 1..=1000")),
+        };
+        if classes.insert(class, lev).is_some() {
+            return Err(BadRecord("категория плеча записана дважды"));
+        }
+    }
+    Ok(classes)
+}
+
+pub fn class_leverage_from_text(s: &str) -> Result<ClassLeverage, BadRecord> {
+    class_leverage_of(&fields(s)?)
+}
+
 impl std::fmt::Display for BadRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.0)
@@ -443,6 +477,12 @@ impl EventKind {
                 format!("trading_freeze_set frozen={}", flag(*frozen))
             }
             EventKind::LeverageSet { lev } => format!("leverage_set lev={lev}"),
+            EventKind::LeverageClassesSet { classes } if classes.is_empty() => {
+                "leverage_classes_set".to_string()
+            }
+            EventKind::LeverageClassesSet { classes } => {
+                format!("leverage_classes_set {}", class_leverage_text(classes))
+            }
             EventKind::PendingRejected { id, exec, reason } => {
                 format!("pending_rejected id={id} exec={} reason={}", opt(*exec), reason.tag())
             }
@@ -571,6 +611,9 @@ impl EventKind {
                     l if (1..=crate::MAX_LEVERAGE).contains(&l) => l,
                     _ => return Err(BadRecord("плечо записи вне 1..=1000")),
                 },
+            },
+            "leverage_classes_set" => EventKind::LeverageClassesSet {
+                classes: class_leverage_of(&f)?,
             },
             "pending_rejected" => EventKind::PendingRejected {
                 id: num(&f, "id")?,
@@ -752,6 +795,7 @@ pub struct ReplayState {
     pub excluded_from_reporting_through: Option<u64>,
     pub trading_frozen: bool,
     pub leverage: Option<i128>,
+    pub class_leverage: ClassLeverage,
     pub fees: Fees,
     last_mkt: Option<(u64, i64)>,
 }
@@ -771,6 +815,7 @@ impl ReplayState {
             excluded_from_reporting_through: None,
             trading_frozen: false,
             leverage: None,
+            class_leverage: ClassLeverage::new(),
             fees: Fees::default(),
             last_mkt: None,
         }
@@ -804,6 +849,7 @@ impl ReplayState {
             EventKind::DemoAccountReset { adjustment } => self.balance += *adjustment,
             EventKind::TradingFreezeSet { frozen } => self.trading_frozen = *frozen,
             EventKind::LeverageSet { lev } => self.leverage = Some(*lev),
+            EventKind::LeverageClassesSet { classes } => self.class_leverage = classes.clone(),
             EventKind::FeesSet {
                 markup_bps,
                 commission_bps,
@@ -1248,6 +1294,12 @@ pub fn reconcile(state: &ReplayState, snap: &AccountSnapshot) -> Vec<Divergence>
             state.leverage, snap.leverage
         ));
     }
+    if state.class_leverage != snap.class_leverage {
+        d(format!(
+            "плечо по категориям: по журналу {:?}, в слепке {:?}",
+            state.class_leverage, snap.class_leverage
+        ));
+    }
     if state.fees != snap.fees {
         d(format!(
             "тариф счёта: по журналу {:?}, в слепке {:?}",
@@ -1369,6 +1421,7 @@ pub fn audit(journal: &Journal, snap: &AccountSnapshot) -> JournalStatus {
             && snap.closed.is_empty()
             && snap.next_id == 0
             && snap.leverage.is_none()
+            && snap.class_leverage.is_empty()
             && snap.fees.is_zero();
         return if fresh {
             JournalStatus::Reconciled
@@ -1823,6 +1876,31 @@ mod tests {
     }
 
     #[test]
+    fn the_category_leverage_record_round_trips_and_is_strict() {
+        let t: ClassLeverage = [(LevClass::Forex, 100), (LevClass::Crypto, 5)]
+            .into_iter()
+            .collect();
+        let k = EventKind::LeverageClassesSet { classes: t.clone() };
+        assert_eq!(k.encode(), "leverage_classes_set crypto=5 forex=100");
+        assert_eq!(EventKind::decode(&k.encode()), Ok(k));
+        let empty = EventKind::LeverageClassesSet {
+            classes: ClassLeverage::new(),
+        };
+        assert_eq!(empty.encode(), "leverage_classes_set");
+        assert_eq!(EventKind::decode("leverage_classes_set"), Ok(empty));
+        for bad in [
+            "leverage_classes_set fx=10",
+            "leverage_classes_set forex=0",
+            "leverage_classes_set forex=1001",
+            "leverage_classes_set forex=10 forex=20",
+            "leverage_classes_set forex",
+        ] {
+            assert!(EventKind::decode(bad).is_err(), "{bad}");
+        }
+        assert_eq!(class_leverage_from_text(&class_leverage_text(&t)), Ok(t));
+    }
+
+    #[test]
     fn unknown_record_is_refused_not_guessed() {
         assert!(EventKind::decode("teleported amount=1").is_err());
         assert!(
@@ -2070,6 +2148,7 @@ mod tests {
             closed: s.closed.clone(),
             model: s.model,
             leverage: s.leverage,
+            class_leverage: s.class_leverage.clone(),
             fees: s.fees,
         }
     }
@@ -2135,6 +2214,7 @@ mod tests {
             closed: vec![],
             model: PositionModel::Hedging,
             leverage: None,
+            class_leverage: Default::default(),
             fees: Default::default(),
         };
         assert_eq!(audit(&j, &live), JournalStatus::NoEntries);

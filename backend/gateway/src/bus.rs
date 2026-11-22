@@ -602,6 +602,7 @@ mod tests {
             closed: Vec::new(),
             model: PositionModel::Hedging,
             leverage: None,
+            class_leverage: Default::default(),
             fees: Default::default(),
         }
     }

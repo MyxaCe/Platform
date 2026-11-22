@@ -78,6 +78,7 @@ pub struct AppState {
     money_lock: Arc<Mutex<()>>,
     real_trading_enabled: bool,
     sltp_edit_enabled: bool,
+    leverage_classes_enabled: bool,
     bus_real_events: bool,
     stops: Arc<stops::StopSettings>,
 }
@@ -162,6 +163,14 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         println!("[gateway] изменение SL/TP: выключено (SLTP_EDIT_ENABLED не 1) — ручки отвечают 409 sltp_edit_disabled; записи этого вида при этом читаются");
     }
     let bus_real_events = env_flag("BUS_REAL_ACCOUNT_EVENTS");
+    let leverage_classes_enabled = env_flag("LEVERAGE_CLASSES_ENABLED");
+    if leverage_classes_enabled {
+        println!(
+            "[gateway] плечо по категориям инструментов: ВКЛЮЧЕНО (LEVERAGE_CLASSES_ENABLED=1)"
+        );
+    } else {
+        println!("[gateway] плечо по категориям: выключено (LEVERAGE_CLASSES_ENABLED не 1) — одно плечо счёта на все инструменты; запись leverage_classes_set при этом читается");
+    }
     if real_trading_enabled {
         println!("[gateway] торговля на реальных счетах: РАЗРЕШЕНА (проверку личности обеспечивает кабинет)");
     } else {
@@ -172,9 +181,10 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
     }
     let catalog = instruments::Catalog::legacy();
     let tenant_instruments = TenantSource::from_env(&catalog.index());
+    let catalog = Arc::new(std::sync::RwLock::new(catalog));
     AppState {
         events_tx,
-        catalog: Arc::new(std::sync::RwLock::new(catalog)),
+        catalog: catalog.clone(),
         markets: Arc::new(std::sync::Mutex::new(HashMap::new())),
         platform: Arc::new(instruments::Platform::from_env()),
         v2_last_msg: Arc::new(std::sync::atomic::AtomicI64::new(0)),
@@ -188,6 +198,7 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         tenant_instruments: Arc::new(tenant_instruments),
         broker: Arc::new(Mutex::new(
             Broker::new(start_cents, leverage)
+                .with_instrument_classes(instrument_classes(catalog))
                 .with_stop_out_pct(stop_out_pct)
                 .with_margin_call_pct(margin_call_pct)
                 .with_margin_call_rearm_band_pct(rearm_band_pct)
@@ -205,9 +216,26 @@ pub fn build_state_with(store: Arc<dyn Persistence>) -> AppState {
         money_lock: Arc::new(Mutex::new(())),
         real_trading_enabled,
         sltp_edit_enabled,
+        leverage_classes_enabled,
         bus_real_events,
         stops: stops::from_env(),
     }
+}
+
+fn instrument_classes(
+    catalog: Arc<std::sync::RwLock<instruments::Catalog>>,
+) -> broker::InstrumentClassOf {
+    Arc::new(move |id| {
+        catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .and_then(|f| broker::LevClass::parse(&f.category))
+    })
+}
+
+fn classes_dto(classes: &broker::ClassLeverage) -> std::collections::BTreeMap<&'static str, i128> {
+    classes.iter().map(|(c, l)| (c.tag(), *l)).collect()
 }
 
 fn leverage_from_env(raw: Option<&str>) -> i128 {
@@ -1381,6 +1409,7 @@ struct AccountDto {
     negative_balance_protection: bool,
     open_pnl: Option<i128>,
     leverage: i128,
+    leverage_classes: std::collections::BTreeMap<&'static str, i128>,
     markup_bps: i64,
     commission_bps: i64,
     trading_frozen: bool,
@@ -2121,6 +2150,7 @@ async fn account(
             negative_balance_protection: b.negative_balance_protection(),
             open_pnl: None,
             leverage: b.account_leverage(user),
+            leverage_classes: classes_dto(&b.account_class_leverage(user)),
             markup_bps: 0,
             commission_bps: 0,
             trading_frozen: false,
@@ -2153,6 +2183,7 @@ async fn account(
         negative_balance_protection: b.negative_balance_protection(),
         open_pnl: Some(open_pnl),
         leverage: b.account_leverage(user),
+        leverage_classes: classes_dto(&b.account_class_leverage(user)),
         markup_bps: b.account_fees(user).markup_bps,
         commission_bps: b.account_fees(user).commission_bps,
         trading_frozen: frozen,
@@ -2283,7 +2314,14 @@ async fn session_create(
                 "identity store unavailable",
             )
         })?;
-    sync_leverage_claim(&st, user, claims.leverage).await?;
+    sync_leverage_claim(
+        &st,
+        user,
+        claims.leverage,
+        claims.leverage_base,
+        claims.leverage_classes.as_ref(),
+    )
+    .await?;
     sync_fees_claim(&st, user, claims.markup_bps, claims.commission_bps).await?;
     let expires_in = st
         .sso
@@ -2299,6 +2337,8 @@ async fn sync_leverage_claim(
     st: &AppState,
     user: UserId,
     claim: Option<i64>,
+    base: Option<i64>,
+    classes: Option<&std::collections::BTreeMap<String, i64>>,
 ) -> Result<(), ApiErr> {
     let Some(lev) = claim else {
         return Ok(());
@@ -2307,6 +2347,11 @@ async fn sync_leverage_claim(
     if !(1..=broker::MAX_LEVERAGE).contains(&lev) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid_leverage"));
     }
+    let table = if st.leverage_classes_enabled {
+        money::leverage_table(base, classes).map_err(|code| err(StatusCode::BAD_REQUEST, code))?
+    } else {
+        None
+    };
     if st.quarantined.lock().await.contains(&user) {
         return Ok(());
     }
@@ -2316,7 +2361,7 @@ async fn sync_leverage_claim(
         "sso-login",
     )
     .expect("поля заданы константами");
-    if let Err(e) = money::apply_leverage(st, user, lev, op).await {
+    if let Err(e) = money::apply_leverage(st, user, lev, table, op).await {
         eprintln!(
             "[sso] плечо счёта {} из токена не применено ({}): вход отклонён",
             user.0, e.1 .0.error
@@ -2976,6 +3021,7 @@ mod invariant_wiring_tests {
             closed: vec![],
             model: broker::PositionModel::Hedging,
             leverage: None,
+            class_leverage: Default::default(),
             fees: Default::default(),
         }
     }

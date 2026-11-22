@@ -328,6 +328,7 @@ function updateDealPanel() {
   document.getElementById('askPx').textContent = it.ask != null ? fmtP(it.id, Tariff.execPrice(true, it.ask, mk)) : '—';
   document.getElementById('bidPx').textContent = it.bid != null ? fmtP(it.id, Tariff.execPrice(false, it.bid, mk)) : '—';
   updateFeeInfo();
+  showDealLeverage();
   document.getElementById('watermark').textContent = it.symbol;
   const pips = document.getElementById('pipsInfo');
   if (showPips && it.bid != null && it.ask != null) { pips.classList.remove('hidden'); pips.textContent = tv('f.spread', { n: I18N.num(it.ask - it.bid) }); } else pips.classList.add('hidden');
@@ -810,10 +811,11 @@ document.getElementById('shares').addEventListener('click', (e) => {
   const b = /** @type {HTMLElement} */ (/** @type {Element} */ (e.target).closest('[data-share]'));
   const it = META[selected];
   const a = lastAccount;
-  if (!b || !it || !a || !(a.free_margin > 0) || !(a.leverage >= 1)) return;
+  const lev = Tariff.leverageFor(a, it);
+  if (!b || !it || !a || !(a.free_margin > 0) || !lev) return;
   const p = priceOrNull(it);
   if (p === null) return;
-  const usdAmount = (a.free_margin / 100) * a.leverage * (+b.dataset.share / 100);
+  const usdAmount = (a.free_margin / 100) * lev * (+b.dataset.share / 100);
   const inp = /** @type {HTMLInputElement} */ (document.getElementById('lot'));
   if (sizeUnit === 'usd') inp.value = usdAmount.toFixed(0);
   else if (Sizing.contract(it)) inp.value = Sizing.toLots(it, Sizing.fromUnits(it, usdAmount / p)).toFixed(Sizing.lotDecimals(it));
@@ -947,7 +949,7 @@ function updateSizeEq() {
   el.textContent = sizeUnit === 'usd'
     ? `≈ ${cs ? I18N.num(v / p / cs, Sizing.lotDecimals(it)) : I18N.num(v / p, qdec(it.id))} ${base}`
     : `${T('f.notional')} ≈ ${usd(Math.round((cs ? Sizing.toUnits(it, sizeRaw(it.id)) : v) * p * 100))}`;
-  const lev = lastAccount && Number.isInteger(lastAccount.leverage) && lastAccount.leverage >= 1 ? lastAccount.leverage : null;
+  const lev = Tariff.leverageFor(lastAccount, it);
   const notional = sizeUnit === 'usd' ? v : (cs ? Sizing.toUnits(it, sizeRaw(it.id)) : v) * p;
   mEl.textContent = lev && notional > 0 ? `${T('f.marginReq')} ≈ ${usd(Math.round((notional / lev) * 100))}` : '';
 }
@@ -1103,7 +1105,7 @@ function balanceRows() {
   out.push(
     [T('b.callAt'), pct(a.margin_call_level_pct)],
     [T('b.stopAt'), pct(a.stop_out_level_pct)],
-    [T('acct.leverage'), Number.isInteger(a.leverage) && a.leverage >= 1 ? `1:${a.leverage}` : '—'],
+    [T('acct.leverage'), [levText(a.leverage), ...Object.entries(a.leverage_classes || {}).map(([c, l]) => `${c} ${levText(l)}`)].join(' · ')],
     [T('b.model'), a.model === 'netting' ? T('model.netting') : a.model === 'hedging' ? T('model.hedging') : '—'],
     [T('b.nbp'), a.negative_balance_protection ? T('b.on') : T('b.off')],
     [T('b.markup'), bps(a.markup_bps)],
@@ -1113,11 +1115,16 @@ function balanceRows() {
   return out;
 }
 
+const levText = (/** @type {number|null} */ lev) => (Number.isInteger(lev) && lev >= 1 ? `1:${lev}` : '—');
+function showDealLeverage() {
+  const el = document.getElementById('fLev');
+  if (el) el.textContent = levText(Tariff.leverageFor(lastAccount, META[selected]));
+}
 function showLeverage(lev) {
   const el = document.getElementById('mLev');
   if (!el) return;
-  el.textContent = Number.isInteger(lev) && lev >= 1 ? `1:${lev}` : '—';
-  document.getElementById('fLev').textContent = el.textContent;
+  el.textContent = levText(lev);
+  showDealLeverage();
 }
 
 function blankMetrics() {

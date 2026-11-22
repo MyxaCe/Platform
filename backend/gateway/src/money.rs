@@ -544,6 +544,10 @@ async fn trading_freeze(
 #[derive(Deserialize)]
 struct LeverageReq {
     leverage: i64,
+    #[serde(default)]
+    leverage_base: Option<i64>,
+    #[serde(default)]
+    leverage_classes: Option<std::collections::BTreeMap<String, i64>>,
     reason: String,
     #[serde(alias = "initiator")]
     operator: String,
@@ -551,17 +555,68 @@ struct LeverageReq {
     external_ref: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LeverageTable {
+    pub base: i128,
+    pub classes: broker::ClassLeverage,
+}
+
+pub(crate) fn leverage_table(
+    base: Option<i64>,
+    classes: Option<&std::collections::BTreeMap<String, i64>>,
+) -> Result<Option<LeverageTable>, &'static str> {
+    let (Some(base), Some(classes)) = (base, classes) else {
+        return Ok(None);
+    };
+    let in_range = |l: i64| (1..=broker::MAX_LEVERAGE).contains(&i128::from(l));
+    if !in_range(base) {
+        return Err("invalid_leverage");
+    }
+    let mut out = broker::ClassLeverage::new();
+    for (k, v) in classes {
+        let class = broker::LevClass::parse(k.trim()).ok_or("invalid_leverage_class")?;
+        if !in_range(*v) {
+            return Err("invalid_leverage");
+        }
+        out.insert(class, i128::from(*v));
+    }
+    Ok(Some(LeverageTable {
+        base: i128::from(base),
+        classes: out,
+    }))
+}
+
+pub(crate) struct LeverageApplied {
+    pub previous: i128,
+    pub previous_classes: broker::ClassLeverage,
+    pub changed: bool,
+}
+
 pub(crate) async fn apply_leverage(
     st: &AppState,
     user: UserId,
     lev: i128,
+    table: Option<LeverageTable>,
     operator: Operator,
-) -> Result<(i128, bool), super::ApiErr> {
+) -> Result<LeverageApplied, super::ApiErr> {
+    let (base, classes) = match table.filter(|_| st.leverage_classes_enabled) {
+        Some(t) => (t.base, t.classes),
+        None => (lev, broker::ClassLeverage::new()),
+    };
     with_account(st, user, Origin::Operator(operator), |b| {
-        let before = b.account_leverage(user);
-        b.set_account_leverage(user, lev)
-            .map(|changed| (before, changed))
-            .map_err(super::deal_error)
+        let previous = b.account_leverage(user);
+        let previous_classes = b.account_class_leverage(user);
+        let base_changed = b
+            .set_account_leverage(user, base)
+            .map_err(super::deal_error)?;
+        let classes_changed = b
+            .set_account_class_leverage(user, classes)
+            .map_err(super::deal_error)?;
+        Ok(LeverageApplied {
+            previous,
+            previous_classes,
+            changed: base_changed || classes_changed,
+        })
     })
     .await
 }
@@ -596,6 +651,14 @@ async fn set_leverage(
             Some(format!("leverage — целое от 1 до {}", broker::MAX_LEVERAGE)),
         );
     }
+    let table = if st.leverage_classes_enabled {
+        match leverage_table(req.leverage_base, req.leverage_classes.as_ref()) {
+            Ok(t) => t,
+            Err(code) => return fail(StatusCode::BAD_REQUEST, code, None),
+        }
+    } else {
+        None
+    };
     if req.operator.trim().is_empty() {
         return fail(StatusCode::BAD_REQUEST, "missing_operator", None);
     }
@@ -633,10 +696,11 @@ async fn set_leverage(
         }
     };
 
-    let (previous, changed) = match apply_leverage(&st, user, lev, operator).await {
+    let applied = match apply_leverage(&st, user, lev, table, operator).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
+    let (previous, changed) = (applied.previous, applied.changed);
     let seq = st
         .journals
         .lock()
@@ -645,25 +709,33 @@ async fn set_leverage(
         .and_then(|j| j.events().last())
         .map(|e| e.seq())
         .unwrap_or(0);
+    let (now, now_classes) = {
+        let b = st.broker.lock().await;
+        (b.account_leverage(user), b.account_class_leverage(user))
+    };
     if changed {
         println!(
-            "[money] плечо счёта {} ({tenant}/{sub}/{}) 1:{previous} → 1:{lev} оператором {}: {}",
+            "[money] плечо счёта {} ({tenant}/{sub}/{}) 1:{previous} → 1:{now} {:?} оператором {}: {}",
             user.0,
             kind.tag(),
+            super::classes_dto(&now_classes),
             req.operator.trim(),
             req.reason.trim()
         );
     }
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "tenant": tenant, "sub": sub, "account_kind": kind.tag(),
-            "account_id": bus::account_uuid(&tenant, &sub, kind),
-            "leverage": lev, "previous_leverage": previous,
-            "changed": changed, "seq": seq,
-        })),
-    )
-        .into_response()
+    let mut body = serde_json::json!({
+        "tenant": tenant, "sub": sub, "account_kind": kind.tag(),
+        "account_id": bus::account_uuid(&tenant, &sub, kind),
+        "leverage": lev, "previous_leverage": previous,
+        "changed": changed, "seq": seq,
+    });
+    if st.leverage_classes_enabled {
+        body["leverage_base"] = serde_json::json!(now);
+        body["leverage_classes"] = serde_json::json!(super::classes_dto(&now_classes));
+        body["previous_leverage_classes"] =
+            serde_json::json!(super::classes_dto(&applied.previous_classes));
+    }
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -843,6 +915,7 @@ async fn accounts(
             "trading_frozen": frozen,
             "leverage": b.account_leverage(user),
             "leverage_assigned": b.assigned_leverage(user).is_some(),
+            "leverage_classes": super::classes_dto(&b.account_class_leverage(user)),
             "markup_bps": b.account_fees(user).markup_bps,
             "commission_bps": b.account_fees(user).commission_bps,
         }));
@@ -1972,6 +2045,174 @@ mod tests {
         assert_eq!(real["leverage_assigned"], true);
     }
 
+    fn table_body(legacy: i64, base: i64, classes: serde_json::Value) -> serde_json::Value {
+        let mut b = lev_body(legacy.into());
+        b["leverage_base"] = base.into();
+        b["leverage_classes"] = classes;
+        b
+    }
+
+    async fn seeded(store: Arc<Linked>, classes_on: bool) -> (AppState, Router) {
+        let mut st = state_with(store, Some(TOKEN));
+        st.leverage_classes_enabled = classes_on;
+        restore_state(&st).await.unwrap();
+        let app = router(st.clone());
+        price(&st, 1, 5_000_000).await;
+        let (s, _) = call(
+            &app,
+            &uri("deposit"),
+            Some(TOKEN),
+            body(100_000_000, "seed-lc"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        (st, app)
+    }
+
+    fn has_class_record(st_journal: &journal::Journal) -> bool {
+        st_journal
+            .events()
+            .iter()
+            .any(|e| matches!(e.kind(), journal::EventKind::LeverageClassesSet { .. }))
+    }
+
+    #[tokio::test]
+    async fn the_category_table_reaches_new_positions_and_survives_a_restart() {
+        let store = linked();
+        let (st, app) = seeded(store.clone(), true).await;
+
+        for (bad, code) in [
+            (serde_json::json!({"fx": 10}), "invalid_leverage_class"),
+            (serde_json::json!({"crypto": 0}), "invalid_leverage"),
+        ] {
+            let (s, v) = call(&app, &lev_uri("real"), Some(TOKEN), table_body(10, 50, bad)).await;
+            assert_eq!(
+                (s, v["error"].as_str()),
+                (StatusCode::BAD_REQUEST, Some(code))
+            );
+        }
+
+        let (s, v) = call(
+            &app,
+            &lev_uri("real"),
+            Some(TOKEN),
+            table_body(10, 50, serde_json::json!({"crypto": 5, "forex": 100})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["changed"], true);
+        assert_eq!(v["leverage_base"], 50);
+        assert_eq!(
+            v["leverage_classes"],
+            serde_json::json!({"crypto": 5, "forex": 100})
+        );
+        assert_eq!(v["previous_leverage_classes"], serde_json::json!({}));
+
+        let (s, v) = send(&app, "POST", "/deals", deal(None)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let (_, acc) = send(&app, "GET", "/account", serde_json::Value::Null).await;
+        assert_eq!(acc["leverage"], 50);
+        assert_eq!(
+            acc["leverage_classes"],
+            serde_json::json!({"crypto": 5, "forex": 100})
+        );
+        assert!(has_class_record(&st.journals.lock().await[&DEFAULT_USER]));
+
+        let (s, v) = call(&app, &lev_uri("real"), Some(TOKEN), lev_body(20.into())).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(
+            v["leverage_classes"],
+            serde_json::json!({}),
+            "число без таблицы — одно плечо"
+        );
+        assert_eq!(
+            v["previous_leverage_classes"],
+            serde_json::json!({"crypto": 5, "forex": 100})
+        );
+        let (s, v) = send(&app, "POST", "/deals", deal(None)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(position_levs(&st).await, vec![5, 20]);
+
+        let (s, v) = call(
+            &app,
+            &lev_uri("real"),
+            Some(TOKEN),
+            table_body(10, 50, serde_json::json!({"crypto": 7})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+
+        let st2 = state_with(store, Some(TOKEN));
+        restore_state(&st2).await.unwrap();
+        assert!(st2.quarantined.lock().await.is_empty(), "сверка сошлась");
+        assert_eq!(
+            position_levs(&st2).await,
+            vec![5, 20],
+            "открытые позиции не пересчитаны"
+        );
+        let b = st2.broker.lock().await;
+        assert_eq!(b.account_leverage(DEFAULT_USER), 50);
+        assert_eq!(b.instrument_leverage(DEFAULT_USER, 1), 7);
+    }
+
+    #[tokio::test]
+    async fn with_the_flag_off_the_table_is_ignored_and_nothing_new_is_written() {
+        let (st, app) = seeded(linked(), false).await;
+        let (s, v) = call(
+            &app,
+            &lev_uri("real"),
+            Some(TOKEN),
+            table_body(10, 50, serde_json::json!({"crypto": 5, "nope": 1})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["leverage"], 10);
+        assert!(v.get("leverage_classes").is_none(), "{v}");
+        let (s, v) = send(&app, "POST", "/deals", deal(None)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(
+            position_levs(&st).await,
+            vec![10],
+            "как раньше — одно число"
+        );
+        assert!(!has_class_record(&st.journals.lock().await[&DEFAULT_USER]));
+        let (_, acc) = send(&app, "GET", "/account", serde_json::Value::Null).await;
+        assert_eq!(acc["leverage_classes"], serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn the_sso_claim_carries_the_table_only_with_the_flag_on() {
+        for on in [false, true] {
+            let mut st = state(Some(TOKEN));
+            st.leverage_classes_enabled = on;
+            let user = st
+                .store
+                .resolve_account(TENANT, SUB, AccountKind::Demo)
+                .await
+                .unwrap();
+            let classes = std::collections::BTreeMap::from([("forex".to_string(), 100i64)]);
+            sync_leverage_claim(&st, user, Some(10), Some(30), Some(&classes))
+                .await
+                .unwrap();
+            let b = st.broker.lock().await;
+            if on {
+                assert_eq!(b.account_leverage(user), 30);
+                assert_eq!(b.account_class_leverage(user).len(), 1);
+            } else {
+                assert_eq!(b.account_leverage(user), 10);
+                assert!(b.account_class_leverage(user).is_empty());
+            }
+            drop(b);
+            if on {
+                let bad = std::collections::BTreeMap::from([("fx".to_string(), 100i64)]);
+                let e = sync_leverage_claim(&st, user, Some(10), Some(30), Some(&bad))
+                    .await
+                    .unwrap_err();
+                assert_eq!(e.0, StatusCode::BAD_REQUEST);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn a_pending_order_placed_before_a_freeze_is_rejected_when_it_fires() {
         let st = state(Some(TOKEN));
@@ -2047,20 +2288,28 @@ mod tests {
             .resolve_account(TENANT, SUB, AccountKind::Demo)
             .await
             .unwrap();
-        sync_leverage_claim(&st, user, None).await.unwrap();
+        sync_leverage_claim(&st, user, None, None, None)
+            .await
+            .unwrap();
         assert!(
             !st.broker.lock().await.has_account(user),
             "без claim-а ничего"
         );
 
-        sync_leverage_claim(&st, user, Some(10)).await.unwrap();
+        sync_leverage_claim(&st, user, Some(10), None, None)
+            .await
+            .unwrap();
         assert_eq!(st.broker.lock().await.assigned_leverage(user), Some(10));
         let n = st.journals.lock().await[&user].len();
-        sync_leverage_claim(&st, user, Some(10)).await.unwrap();
+        sync_leverage_claim(&st, user, Some(10), None, None)
+            .await
+            .unwrap();
         assert_eq!(st.journals.lock().await[&user].len(), n, "повтор не пишет");
 
         for bad in [0, 1001] {
-            let e = sync_leverage_claim(&st, user, Some(bad)).await.unwrap_err();
+            let e = sync_leverage_claim(&st, user, Some(bad), None, None)
+                .await
+                .unwrap_err();
             assert_eq!(e.0, StatusCode::BAD_REQUEST);
         }
         assert_eq!(st.broker.lock().await.assigned_leverage(user), Some(10));

@@ -1405,3 +1405,90 @@ async fn restored_exposure_is_subscribed_from_the_start() {
         "{subs:?}"
     );
 }
+
+#[tokio::test]
+async fn forex_and_crypto_open_at_their_category_leverage_and_keep_it_across_a_restart() {
+    let (f, base) = fake().await;
+    *f.platform.lock().unwrap() = list(1, &[("ETHUSD", "trade"), ("EURUSD", "trade")]);
+    let store: Arc<dyn persistence::Persistence> = Arc::new(persistence::MemoryStore::new());
+    let cache = cache_path("levcls");
+    let mut st = state_on(
+        store.clone(),
+        platform_for(&base, true, Some(cache.clone()), false),
+    )
+    .await;
+    st.leverage_classes_enabled = true;
+    instruments::poll_once(&st).await.unwrap();
+    let eur = id_of(&st, "EURUSD");
+    let app = router(st.clone());
+    let classes = std::collections::BTreeMap::from([
+        ("crypto".to_string(), 5i64),
+        ("forex".to_string(), 100i64),
+    ]);
+    crate::sync_leverage_claim(&st, DEFAULT_USER, Some(5), Some(20), Some(&classes))
+        .await
+        .unwrap();
+
+    crypto(&st, 2, 320_000, 320_010).await;
+    quote(&st, "EURUSD", "1.08400", "1.08410").await;
+    let (_, acc) = send(&app, "GET", "/account", None, &[]).await;
+    assert_eq!(acc["leverage"], 20);
+    assert_eq!(acc["leverage_classes"], json!({"crypto": 5, "forex": 100}));
+    for instrument in [2, eur] {
+        let (s, b) = send(
+            &app,
+            "POST",
+            "/deals",
+            Some(json!({"instrument": instrument, "side": "buy", "qty": 1000})),
+            &[],
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+    }
+    let levs = |b: &broker::Broker| -> HashMap<u32, (i128, i128)> {
+        b.positions(DEFAULT_USER)
+            .into_iter()
+            .map(|p| {
+                let full = p.margin * p.leverage;
+                (p.instrument, (p.leverage, full))
+            })
+            .collect()
+    };
+    let before = levs(&*st.broker.lock().await);
+    assert_eq!(before[&2].0, 5);
+    assert_eq!(before[&eur].0, 100);
+    {
+        let b = st.broker.lock().await;
+        for p in b.positions(DEFAULT_USER) {
+            assert_eq!(
+                p.margin,
+                broker::margin_for(p.entry, p.qty, p.pd, p.qd, p.leverage, 100),
+                "маржа по плечу категории"
+            );
+        }
+    }
+
+    let tighter = std::collections::BTreeMap::from([("forex".to_string(), 30i64)]);
+    crate::sync_leverage_claim(&st, DEFAULT_USER, Some(20), Some(20), Some(&tighter))
+        .await
+        .unwrap();
+    assert_eq!(
+        levs(&*st.broker.lock().await),
+        before,
+        "открытые не пересчитаны"
+    );
+
+    let st2 = state_on(store, platform_for(&base, true, Some(cache), false)).await;
+    assert!(
+        !st2.leverage_classes_enabled,
+        "подъём сборкой с выключенным флагом"
+    );
+    assert!(
+        st2.quarantined.lock().await.is_empty(),
+        "лента с новой записью читается"
+    );
+    let b = st2.broker.lock().await;
+    assert_eq!(levs(&b), before);
+    assert_eq!(b.instrument_leverage(DEFAULT_USER, eur), 30);
+    assert_eq!(b.instrument_leverage(DEFAULT_USER, 2), 20);
+}

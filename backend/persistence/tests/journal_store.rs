@@ -523,6 +523,12 @@ async fn postgres_round_trips_the_account_leverage() {
 
     const W: UserId = UserId(79);
     const N: UserId = UserId(80);
+    let classes: broker::ClassLeverage = [
+        (broker::LevClass::Crypto, 5),
+        (broker::LevClass::Forex, 100),
+    ]
+    .into_iter()
+    .collect();
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(&url)
@@ -565,6 +571,9 @@ async fn postgres_round_trips_the_account_leverage() {
         &op,
         &[
             EventKind::LeverageSet { lev: 50 },
+            EventKind::LeverageClassesSet {
+                classes: classes.clone(),
+            },
             EventKind::PendingPlaced {
                 id: 1,
                 instrument: 1,
@@ -588,6 +597,7 @@ async fn postgres_round_trips_the_account_leverage() {
         balance: 10_000_000,
         next_id: 1,
         leverage: Some(50),
+        class_leverage: classes.clone(),
         ..Default::default()
     };
     store
@@ -614,6 +624,8 @@ async fn postgres_round_trips_the_account_leverage() {
             .clone()
     };
     assert_eq!(back(W).leverage, Some(50), "плечо счёта пережило хранилище");
+    assert_eq!(back(W).class_leverage, classes, "плечо по категориям тоже");
+    assert!(back(N).class_leverage.is_empty());
     assert_eq!(
         back(N).leverage,
         None,
@@ -628,6 +640,7 @@ async fn postgres_round_trips_the_account_leverage() {
         .1;
     let journal = Journal::load(10_000_000, lane).expect("цепочка цела");
     assert_eq!(journal.state().leverage, Some(50));
+    assert_eq!(journal.state().class_leverage, classes);
     assert!(
         broker::journal::audit(&journal, &back(W)).ok(),
         "лента и слепок сходятся после подъёма"

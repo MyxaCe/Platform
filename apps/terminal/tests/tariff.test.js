@@ -26,3 +26,15 @@ test('строка тикета: есть комиссия — сумма; не�
   assert.equal(Tariff.commissionText(0, 0), '');
   assert.equal(Tariff.commissionText(NaN, 10), 'Commission ≈ — USD', 'цены нет — прочерк, не ноль');
 });
+
+test('плечо сделки — по категории инструмента, без таблицы — плечо счёта', () => {
+  const acc = { leverage: 20, leverage_classes: { crypto: 5, forex: 100 } };
+  assert.equal(Tariff.leverageFor(acc, { category: 'forex' }), 100);
+  assert.equal(Tariff.leverageFor(acc, { category: 'crypto' }), 5);
+  assert.equal(Tariff.leverageFor(acc, { category: 'metals' }), 20, 'категории нет в таблице — базовое');
+  assert.equal(Tariff.leverageFor(acc, {}), 20);
+  assert.equal(Tariff.leverageFor({ leverage: 20 }, { category: 'forex' }), 20, 'старый шлюз без таблицы');
+  assert.equal(Tariff.leverageFor({ leverage: 20, leverage_classes: { forex: 0 } }, { category: 'forex' }), 20);
+  assert.equal(Tariff.leverageFor(null, { category: 'forex' }), null);
+  assert.equal(Tariff.leverageFor({ leverage: 0 }, { category: 'forex' }), null);
+});

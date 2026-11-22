@@ -350,3 +350,27 @@ test('?symbol переживает вход по handoff: фрагмент ст�
   assert.equal(loc.hash, '');
   assert.equal((await chosen(term.page)).row, '2');
 });
+
+test('плечо в панели сделки — по категории выбранного инструмента', async (t) => {
+  const term = await open(t, {
+    tag: '-lev',
+    routes: {
+      '/account': () => ({
+        opened: true, balance: 1000000, equity: 1000000, used_margin: 0, free_margin: 1000000, open_pnl: 0,
+        model: 'hedging', leverage: 10, leverage_classes: { crypto: 5, forex: 100 }, kind: 'demo', min_stop_bps: 0,
+      }),
+    },
+  });
+  const lev = () => term.page.evaluate(() => ({
+    deal: document.getElementById('fLev').textContent,
+    acct: document.getElementById('mLev').textContent,
+  }));
+  const btc = await lev();
+  assert.equal(btc.deal, '1:5', 'крипто — своё плечо');
+  assert.equal(btc.acct, '1:10', 'в шапке — базовое плечо счёта');
+  await pick(term, 3);
+  assert.equal((await lev()).deal, '1:100', 'форекс — своё плечо');
+  await pick(term, 4);
+  assert.equal((await lev()).deal, '1:10', 'категории нет в таблице — базовое');
+  assert.deepEqual(term.errors, []);
+});
