@@ -7,7 +7,10 @@ const settle = (/** @type {any} */ page, /** @type {number} */ ms) => page.evalu
 
 const ALL = ['ru', 'en', 'de', 'fr', 'es'];
 
-/** @param {string[]} languages @param {string} defaultLanguage */
+/**
+ * @param {string[]} languages
+ * @param {string} defaultLanguage
+ */
 const brandRoutes = (languages, defaultLanguage) => ({
   '/v1/cms/brand': () => ({ name: 'Apex', primaryColor: '#d4a437', languages, defaultLanguage }),
   '/account': () => ({
@@ -21,9 +24,11 @@ const brandRoutes = (languages, defaultLanguage) => ({
 });
 
 /**
- * @param {any} t @param {string} lang
+ * @param {any} t
+ * @param {string} lang
  * @param {{ width: number, height: number, isMobile?: boolean, hasTouch?: boolean }} viewport
- * @param {string[]} [languages] @param {string} [def]
+ * @param {string[]} [languages]
+ * @param {string} [def]
  */
 async function open(t, lang, viewport, languages, def) {
   const query = `?site=apex-ru&lang=${lang}#handoff=h-i18n&account=real`;
@@ -42,7 +47,11 @@ async function open(t, lang, viewport, languages, def) {
   return { ...term, page };
 }
 
-/** @param {any} page @param {string[]} selectors @param {boolean} [inViewport] */
+/**
+ * @param {any} page
+ * @param {string[]} selectors
+ * @param {boolean} [inViewport]
+ */
 function overflow(page, selectors, inViewport) {
   return page.evaluate((/** @type {string[]} */ sels, /** @type {boolean} */ vp) => {
     const out = [];

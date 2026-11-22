@@ -1,40 +1,31 @@
 'use strict';
 
-// ============================ State ========================================
 let META = {}, selected = null, tf = 3600, orderMode = 'market', orderSide = 'buy';
 let chartType = 'candles', priceType = 'mid', showPips = false, showSLTP = true, sizeUnit = 'lot';
-// MA 7/25/99 включены по умолчанию — привычная раскладка профессионального
-// терминала; остальное включает человек.
 const overlays = { ma: 1, sma: 0, ema: 0, wma: 0, supertrend: 0, psar: 0, ichimoku: 0, alligator: 0, boll: 0, keltner: 0, donchian: 0, vwap: 0 };
 let oscillator = '';
 let rawCandles = [], currentDeals = [];
 
-// Единственная точка доступа к REST (ADR-015). Терминал автономный: без логина,
-// один демо-счёт по умолчанию (пивот 2026-07-25).
 const api = Api.create();
-// Локализация (i18n.js, без внешних библиотек): T — текст терминала,
-// wT — перевод для виджетов с их собственным английским по умолчанию.
 const I18N = window.I18n;
 const T = (/** @type {string} */ k) => I18N.t(k);
 const tv = (/** @type {string} */ k, /** @type {Record<string, any>} */ v) => I18N.t(k, v);
 const wT = (/** @type {string} */ k, /** @type {string} */ en, /** @type {any} */ v) => I18N.widgetT(k, en, v);
-/** Последний ответ /account: из него собраны шапка, тикет и вкладка «Баланс». */
 let lastAccount = null;
 const pdec = (id) => (META[id]?.price_decimals ?? 2);
 const qdec = (id) => (META[id]?.qty_decimals ?? 3);
 const pscale = (id) => 10 ** pdec(id);
 const qscale = (id) => 10 ** qdec(id);
-/** @param {any} it @returns {[string, string]} */
+/**
+ * @param {any} it
+ * @returns {[string, string]}
+ */
 const pairOf = (it) => Market.pair(it);
 /** @param {number} id */
 const quoteDriven = (id) => { const it = META[id]; return !!it && typeof it.category === 'string' && it.category !== 'crypto'; };
 /** @param {any} c */
 const volPoint = (c) => (c.volume == null ? { time: c.time } : { time: c.time, value: c.volume, color: volColor(c) });
 
-// Цвета графика берём из CSS-токенов платформы (theming-pack, ADR-023), чтобы график
-// следовал теме и бренду. Токены — RGB-каналы ("212 164 55"), см. tokens.v1.css.
-// Lightweight Charts не понимает современный синтаксис rgb(r g b / a) — собираем
-// легаси rgb()/rgba() с запятыми из каналов.
 const cssChan = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const rgbT = (n) => { const [r, g, b] = cssChan(n).split(/\s+/); return `rgb(${r}, ${g}, ${b})`; };
 const rgbaT = (n, a) => { const [r, g, b] = cssChan(n).split(/\s+/); return `rgba(${r}, ${g}, ${b}, ${a})`; };
@@ -42,7 +33,6 @@ const fmtP = (id, raw) => I18N.num(raw / pscale(id), pdec(id));
 const fmtQ = (id, raw) => (raw / qscale(id)).toFixed(qdec(id));
 const fmtN = (/** @type {number} */ v, /** @type {number} */ d) => I18N.num(v, d);
 const fmtChange = (/** @type {number} */ v) => I18N.change(v);
-// Знак перед валютой: «$-0.06» читается как опечатка, правильно «-$0.06».
 const usd = (c) => I18N.money(c);
 const TFN = { 1: '1s', 60: '1m', 300: '5m', 900: '15m', 1800: '30m', 3600: '1h', 14400: '4h', 86400: '1d', 604800: '1w' };
 const settings = Object.assign(
@@ -51,7 +41,6 @@ const settings = Object.assign(
 );
 const saveSettings = () => localStorage.setItem('settings', JSON.stringify(settings));
 
-// ---- Icons (inline SVG, currentColor) -------------------------------------
 const ICONS = {
   candles: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M5 2v3M5 11v3M11 3v3M11 10v3"/><rect x="3.3" y="5" width="3.4" height="6" fill="currentColor" stroke="none"/><rect x="9.3" y="6" width="3.4" height="4" fill="currentColor" stroke="none"/></svg>',
   hollow: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M5 2v3M5 11v3M11 3v3M11 10v3"/><rect x="3.3" y="5" width="3.4" height="6"/><rect x="9.3" y="6" width="3.4" height="4"/></svg>',
@@ -68,16 +57,12 @@ const ICONS = {
 };
 function renderIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { const n = /** @type {HTMLElement} */ (el).dataset.icon; if (ICONS[n]) el.innerHTML = ICONS[n]; }); }
 
-// ---- Legend (chart info card) ---------------------------------------------
 function fmtDT(t) { return new Date(t * 1000).toLocaleString(I18N.locale(), { timeZone: 'UTC', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) + ' UTC'; }
 /**
- * @param {number} id @param {number} t @param {any} c
- * @param {boolean} [forming] бар ещё не закрыт — и обязан сказать это сам.
- *
- * Это условие решения по TRM-33, а не украшение. Гистограмма объёма теперь
- * живая, а индикаторы считаются по закрытым барам; без пометки расхождение
- * «индикатор отстаёт на один бар» читалось бы как поломка — ровно та
- * необъяснимость, которую мы только что нашли у объёма.
+ * @param {number} id
+ * @param {number} t
+ * @param {any} c
+ * @param {boolean} [forming]
  */
 function updateLegend(id, t, c, forming) {
   const rf = (x) => I18N.num(x, pdec(id));
@@ -85,7 +70,6 @@ function updateLegend(id, t, c, forming) {
   document.getElementById('lgTf').textContent = TFN[tf] || '';
   document.getElementById('lgTime').textContent = fmtDT(t) + (forming ? ` · ${T('legend.forming')}` : '');
   document.getElementById('lgOhlc').innerHTML = `O <b>${rf(c.open)}</b>  H <b>${rf(c.high)}</b>  L <b>${rf(c.low)}</b>  C <b class="${c.close >= c.open ? 'up' : 'down'}">${rf(c.close)}</b>`;
-  // Значения MA 7/25/99 на том же баре.
   const ma = document.getElementById('lgMa');
   if (ma) {
     if (!overlays.ma || !maLegend.arrays.length) ma.innerHTML = '';
@@ -99,23 +83,11 @@ function updateLegend(id, t, c, forming) {
     }
   }
 }
-/**
- * Формирующийся бар В ТОМ ВИДЕ, В КАКОМ ОН НАРИСОВАН (TRM-34).
- *
- * Хейкин-аши — не настройка показа, а ДРУГОЙ РАСЧЁТ: его свеча выводится из
- * всей цепочки предыдущих. Поэтому формирующийся бар нельзя просто поделить
- * на масштаб и отдать — его надо пересчитать тем же способом, каким посчитан
- * остальной ряд, иначе последняя свеча жила бы по другим правилам, чем те,
- * рядом с которыми она стоит.
- *
- * @param {any} b формирующийся бар в raw-единицах
- */
+/** @param {any} b */
 function formingDisplayBar(b) {
   const s = pscale(selected), v = qscale(selected);
   const real = { time: b.time, open: b.open / s, high: b.high / s, low: b.low / s, close: b.close / s, volume: b.volume / v };
   if (chartType !== 'heikin') return real;
-  // Цепочку берём ту же, что у нарисованного ряда. Последний бар REST — это и
-  // есть формирующийся, поэтому он ЗАМЕЩАЕТСЯ, а не добавляется вторым.
   const n = rawCandles.length;
   const src = n && rawCandles[n - 1].time === real.time ? rawCandles.slice(0, n - 1).concat([real]) : rawCandles.concat([real]);
   const ha = heikin(src);
@@ -123,15 +95,10 @@ function formingDisplayBar(b) {
 }
 function refreshLegend() { if (selected == null) return; let c, forming = false; const f = priceSeries.forming(); if (f) { c = formingDisplayBar(f); forming = true; } else if (rawCandles.length) { const n = rawCandles.length; c = chartType === 'heikin' ? heikin(rawCandles)[n - 1] : rawCandles[n - 1]; } if (c) updateLegend(selected, c.time, c, forming); }
 
-// ===== Indicators — вынесены в модуль indicators.js (ADR-015), подключается до app.js =====
-// toSeries — чартовый глюкод (значения → {time,value} для Lightweight Charts), остаётся здесь.
 const { HL2, HLC3, sma, ema, wma, smma, stdev, trueRange, atr, rsi, highest, lowest, stoch, cci, momentum, roc, williams, ao, acOsc, obv, adLine, cmf, mfi, forceIndex, macdFull, adxDI, bollinger, keltner, donchian, superTrend, psar, ichimoku, vwap, alligator, heikin } = window.Indicators;
 const toSeries = (arr, t) => arr.map((v, i) => (v == null || !isFinite(v) ? null : { time: t[i], value: v })).filter(Boolean);
 
-
-/** MA 7/25/99: периоды и цвета. Цвета свои, не биржевые; на тёмном фоне ≥ 4.5:1. */
 const MA_SPEC = [[7, '#f4a261'], [25, '#c77dde'], [99, '#4fa8e8']];
-/** Ряды MA для легенды: время бара → индекс. */
 let maLegend = { index: new Map(), arrays: [] };
 const OVERLAYS = {
   ma: (cs) => MA_SPEC.map(([n, color]) => ({ color, values: sma(cs.map((c) => c.close), n) })),
@@ -161,12 +128,9 @@ const OSC = {
   gator: (cs) => { const [j, t, l] = alligator(cs).map((x) => x.values); return [{ color: '#26a69a', values: j.map((v, i) => (v != null && t[i] != null ? Math.abs(v - t[i]) : null)) }, { color: '#ef5350', values: t.map((v, i) => (v != null && l[i] != null ? -Math.abs(v - l[i]) : null)) }]; },
 };
 
-// ============================ Chart ========================================
 const chartEl = document.getElementById('chart');
 const chart = LightweightCharts.createChart(chartEl, {
   layout: { background: { color: rgbT('--bg-base') }, textColor: rgbT('--text-secondary'), attributionLogo: false },
-  // Локаль задаём явно: иначе библиотека берёт navigator.language, и подписи оси времени
-  // зависят от настроек ОС клиента (а в окружении без локали — падают с RangeError). BUG-008.
   localization: { locale: I18N.locale() },
   grid: { vertLines: { color: rgbaT('--text-secondary', '.10') }, horzLines: { color: rgbaT('--text-secondary', '.10') } },
   rightPriceScale: { borderColor: rgbaT('--text-secondary', '.25') },
@@ -175,8 +139,6 @@ const chart = LightweightCharts.createChart(chartEl, {
 });
 const volume = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: '', color: rgbaT('--text-secondary', '.30') });
 volume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
-// Хуки для модуля рисования (drawings.js подключается после app.js).
-// Инструменты рисования — виджет по ADR-015: сам создаёт canvas и панель внутри .chartwrap.
 const draw = Drawings.mount(chartEl.parentElement, { chart, series: () => mainSeries });
 
 let mainSeries = null, overlaySeries = [], oscSeriesList = [], priceLines = [];
@@ -187,9 +149,6 @@ let indTimer = null;
 /** @type {number | null} */
 let indFrom = null;
 const IND_EVERY_MS = 250;
-// Формирующаяся свеча и её РАЗРЫВ живут в `series.js` (TRM-19, Р-073). Здесь
-// лежала пара модульных переменных, которую правили из четырёх мест, — и
-// именно поэтому бар переживал обрыв связи: сбрасывать его было некому.
 const priceSeries = window.Series.create();
 const volColor = (c) => (c.close >= c.open ? rgbaT('--positive', '.4') : rgbaT('--negative', '.4'));
 const isLineType = () => (chartType === 'line' || chartType === 'area');
@@ -287,9 +246,6 @@ async function loadCandles(id, timeframe) {
     const fetched = await api.candles(id, timeframe, 300);
     markMarketData('candles', fetched !== null);
     if (fetched === null) {
-      // Сервер не смог отдать свечи (503) — оставляем прежний график и говорим об
-      // этом. Пустой массив стёр бы график, а пустой график читается как «рынка
-      // нет», хотя означает «мы не получили данные» (BUG-011).
       load.classList.add('hidden');
       return;
     }
@@ -300,22 +256,13 @@ async function loadCandles(id, timeframe) {
     mainSeries.setData(mainData());
     volume.setData(rawCandles.map(volPoint));
     applyIndicators(); redrawPriceLines(); panel.refreshSignals();
-    // Загрузка с сервера — авторитетный пересев ряда: ответ REST видел и дыру
-    // тоже, поэтому он же снимает разрыв.
     priceSeries.seed(rawCandles.length ? raw[raw.length - 1] : null);
     if (rawCandles.length) { const n = rawCandles.length; chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 }); }
     refreshLegend();
-    draw.clear(); // logical-якоря объектов рисования после setData невалидны
+    draw.clear();
   } finally { load.classList.add('hidden'); }
 }
-/**
- * @param {any} [bar] свеча к отрисовке; без неё — текущая формирующаяся.
- *
- * Объём обновляется ЖИВЬЁМ (TRM-33). Раньше серия объёма менялась только
- * полной загрузкой: цена рисовала новые свечи, а столбцов под ними не
- * появлялось — гистограмма обрывалась на моменте выбора инструмента, и ничто
- * на экране об этом не говорило.
- */
+/** @param {any} [bar] */
 function drawForming(bar) {
   const b = bar || priceSeries.forming();
   if (!b) return;
@@ -326,21 +273,12 @@ function drawForming(bar) {
   const kind = LiveBars.upsert(rawCandles, { time: b.time, open: b.open / s, high: b.high / s, low: b.low / s, close: b.close / s, volume: vol });
   if (kind === 'old') return;
   queueLiveIndicators(kind === 'new' ? prev : b.time);
-  // Объём от типа графика не зависит: хейкин-аши пересчитывает цену, а сделки
-  // остаются теми же.
   volume.update(volPoint({ time: b.time, open: b.open, close: b.close, volume: vol }));
   if (!mainSeries) return;
-  // Здесь стоял выход для хейкин-аши (TRM-34): в этом режиме график не
-  // обновлялся живьём ВООБЩЕ — ни свеча, ни легенда, — и пометка «бар не
-  // закрыт» не появлялась никогда. Условие решения выполнялось не во всех
-  // режимах, то есть не выполнялось. Режим переключает пользователь, и это
-  // отдельный путь данных, а не настройка показа.
   const d = formingDisplayBar(b);
   mainSeries.update(isLineType() ? { time: d.time, value: d.close } : { time: d.time, open: d.open, high: d.high, low: d.low, close: d.close });
   refreshLegend();
 }
-// Агрегация живой сделки в свечу — в `series.js`. Отрисовка остаётся здесь:
-// пока ряд разорван, модуль не возвращает ничего, и рисовать нечего.
 let quoteRedraw = null;
 /** @param {{ instrument: number, bid: number|null, ask: number|null, price: number, time: number|null }} q */
 function onLiveQuote(q) {
@@ -369,38 +307,23 @@ function onMarketStatus(m) {
 function onLiveTrade(id, price, qty, timeMs) { if (id !== selected) return; const now = Number.isFinite(timeMs) ? Math.floor(timeMs / 1000) : Math.floor(Date.now() / 1000); const b = priceSeries.onTrade({ now, tf, price, qty }); if (b) drawForming(b); }
 async function syncLast() {
   const id = selected; if (id == null) return;
-  // Разорванный ряд возвращается ПОЛНОЙ перезагрузкой, а не заплаткой на два
-  // бара. Заплатка здесь опасна: после разрыва авторитетный бар может
-  // оказаться СТАРШЕ уже нарисованного (наши часы открыли новый интервал, а
-  // биржа ещё нет), а график назад не обновляется — он на это падает.
-  // Перезагрузка кладёт ряд целиком и такого порядка не знает.
   if (priceSeries.isBroken()) { await loadCandles(id, tf); return; }
   const raw = (await api.candles(id, tf, 2)) || []; if (!raw.length) return;
   const last = raw[raw.length - 1];
   if (last.time >= priceSeries.lastBarTime()) { priceSeries.seed(last); drawForming(); }
 }
 
-// ============================ Instruments ==================================
 function refPrice(it) { if (!it || it.bid == null || it.ask == null) return it?.last; if (priceType === 'ask') return it.ask; if (priceType === 'bid') return it.bid; return Math.round((it.bid + it.ask) / 2); }
 function updateDealPanel() {
   const it = META[selected]; if (!it) return;
   document.getElementById('dealSym').textContent = it.symbol;
   const ref = refPrice(it);
   document.getElementById('dealSub').textContent = `${priceType.toUpperCase()} ${ref != null ? fmtP(it.id, ref) : '—'}`;
-  // `change` обнуляемо, как и остальные поля котировки. Здесь стоял
-  // незащищённый `it.change.toFixed(2)` — и когда шлюз начал честно отдавать
-  // null, панель сделки **падала целиком**, обрывая `selectInstrument`.
-  // Это второй потребитель поля; первый (витрина инструментов) был поправлен
-  // сразу, а этот пропущен — правку границы данных надо проводить по ВСЕМ
-  // потребителям, а не по тому, который попался первым.
   const chg = document.getElementById('dealChange');
   const chgKnown = it.change != null;
   const chgUp = chgKnown && it.change >= 0;
   chg.textContent = chgKnown ? I18N.change(it.change) : '—';
   chg.className = `deal__change${chgKnown ? (chgUp ? ' up' : ' down') : ''}`;
-  // Цена на кнопках — цена ИСПОЛНЕНИЯ: рынок плюс наценка тарифа счёта
-  // (10.11). Её и получит человек; показывать голый ask значило бы обещать
-  // цену, по которой шлюз не исполнит.
   const mk = tariff.markup_bps;
   document.getElementById('askPx').textContent = it.ask != null ? fmtP(it.id, Tariff.execPrice(true, it.ask, mk)) : '—';
   document.getElementById('bidPx').textContent = it.bid != null ? fmtP(it.id, Tariff.execPrice(false, it.bid, mk)) : '—';
@@ -416,7 +339,6 @@ function updateDealPanel() {
   renderInstrumentHeader(it);
 }
 
-/** Компактная запись большого числа: 915 234 567 → 915.23M. */
 const compactNum = (/** @type {number} */ v) => {
   const a = Math.abs(v);
   if (a >= 1e9) return I18N.num(v / 1e9, 2) + 'B';
@@ -424,14 +346,8 @@ const compactNum = (/** @type {number} */ v) => {
   if (a >= 1e3) return I18N.num(v / 1e3, 2) + 'K';
   return I18N.num(v, 2);
 };
-/** Направление последней цены в шапке инструмента — «липкое», как в стакане. */
 let ihPrev = { id: null, last: null, dir: '' };
-/**
- * Шапка инструмента: пара, последняя цена, 24ч изменение/макс/мин/объёмы,
- * спред. Каждое поле — из ответа шлюза; нет поля — прочерк, а не ноль
- * (BUG-011). 24ч мин/объёмы приходят от шлюза с тикера Binance.
- * @param {any} it
- */
+/** @param {any} it */
 function renderInstrumentHeader(it) {
   const [base, quote] = pairOf(it);
   const $ = (/** @type {string} */ id) => document.getElementById(id);
@@ -470,7 +386,10 @@ function renderInstrumentHeader(it) {
   document.body.classList.toggle('src-v2', quoteDriven(it.id));
 }
 
-/** @param {any} it @returns {string|null} */
+/**
+ * @param {any} it
+ * @returns {string|null}
+ */
 function marketText(it) {
   const st = Market.state(it).status;
   if (st === 'halted') return T('mk.halted');
@@ -488,7 +407,10 @@ function marketNote(it) {
   }
   return only ? { kind: 'closeOnly', text: T('mk.closeOnly.short'), tip: T('gate.closeOnly') } : null;
 }
-/** @param {any} it @param {number} raw */
+/**
+ * @param {any} it
+ * @param {number} raw
+ */
 const sizeLabel = (it, raw) => `${Sizing.format(it, raw, fmtN)} ${Sizing.contract(it) ? T('sz.lot') : pairOf(it)[0]}`;
 /** @param {any} d */
 function dealSize(d) {
@@ -497,17 +419,16 @@ function dealSize(d) {
   const spec = Object.assign({}, it, Number.isInteger(d.qty_decimals) ? { qty_decimals: d.qty_decimals } : {});
   return sizeLabel(spec, d.qty);
 }
-/** @param {number} status @param {any} data */
+/**
+ * @param {number} status
+ * @param {any} data
+ */
 function refusal(status, data) {
   const at = data && Number.isFinite(data.next_open) && data.next_open > 0 ? data.next_open : null;
   return rejectionText(status, data?.error) + (at ? ' ' + tv('mk.opens', { when: Market.when(at, I18N.locale(), Date.now()) }) : '');
 }
 
-/**
- * Бегущая строка тикеров. Содержимое удваивается: дорожка едет на половину
- * своей длины и встаёт ровно туда, откуда начала, — шва не видно.
- * @param {any[]} list
- */
+/** @param {any[]} list */
 function renderTape(list) {
   const track = document.getElementById('tapeTrack');
   if (!track || !list.length) return;
@@ -522,24 +443,18 @@ function renderTape(list) {
   track.style.animationDuration = `${Math.max(30, list.length * 5)}s`;
 }
 
-// ---- Виджеты (ADR-015): страница даёт контейнер, зависимости идут через ctx --
-// Режим хранилища объявляется в интерфейсе, а не только в логе gateway. Пометка
-// постоянная: закрыть её нельзя, потому что забытая пометка — это снова тишина.
-// Проверяется один раз на старте: режим не меняется без перезапуска сервиса.
 async function showStorageMode() {
   const h = await api.health();
   const el = document.getElementById('volatileWarn');
-  if (!el || !h) return; // health недоступен — не выдумываем режим, молчим
+  if (!el || !h) return;
   el.hidden = h.durable !== false;
   el.textContent = T('state.volatile');
   el.title = `storage: ${h.storage}`;
 }
 
-// Рыночные данные: отказ показываем отказом. Бейдж гаснет, когда все источники
-// снова отвечают (BUG-011).
 const marketDown = { candles: false, depth: false, stats: false, instruments: false };
 function markMarketData(kind, ok) {
-  if (marketDown[kind] === !ok) return; // ничего не изменилось — не дёргаем DOM
+  if (marketDown[kind] === !ok) return;
   marketDown[kind] = !ok;
   renderMarketWarn();
 }
@@ -555,14 +470,11 @@ const book = OrderBook.mount(document.getElementById('book'), {
   instrument: () => selected,
   fetch: async (id, limit) => { const r = await api.depthDetailed(id, limit); markMarketData('depth', r.reason === null); return r; },
   onPick: (price) => { setMode('limit'); const inp = /** @type {HTMLInputElement} */ (document.getElementById('price')); inp.value = price; inp.classList.add('flash'); setTimeout(() => inp.classList.remove('flash'), 400); },
-  // Подписи колонок и марк-цена — из данных инструмента, которыми владеет хост.
   symbols: (id) => { const [base, quote] = pairOf(META[id]); return { base, quote }; },
   unavailable: (id) => (META[id]?.has_depth === false ? T('ob.unavailable') : null),
   markPrice: (id) => (META[id]?.last != null ? META[id].last / pscale(id) : null),
   interval: 700,
   storagePrefix: 'ob',
-  // У брокера своего стакана нет (B-book): это глубина рынка-источника, и
-  // виджет обязан это сказать в шапке.
   source: 'Binance',
   t: wT,
   num: fmtN,
@@ -578,11 +490,8 @@ const panel = Positions.mount(document.getElementById('bottom'), {
   api,
   fmtUsd: usd,
   pips: () => showPips,
-  // Позиции нужны графику для линий SL/TP — виджет отдаёт их хосту, а не лезет в график сам.
   onDeals: (list) => { currentDeals = list.filter((d) => d.instrument === selected); redrawPriceLines(); },
   onChange: () => pollAccount(),
-  // Изменение SL/TP (17.11): ячейки уровней — кнопки, только если шлюз
-  // разрешил запись (`/account.sltp_edit`) и счёт не заморожен.
   levels: { enabled: () => sltpEdit && !(lastAccount && lastAccount.trading_frozen), edit: openLevels },
   size: dealSize,
   closeBlock: (d) => { const why = Market.blockClose(META[d.instrument]); return why ? T('gate.close.' + why) : null; },
@@ -596,9 +505,6 @@ const panel = Positions.mount(document.getElementById('bottom'), {
 const trades = Trades.mount(document.getElementById('trades'), {
   instrument: () => selected,
   decimals: (id) => ({ pd: pdec(id), qd: qdec(id) }),
-  // «Мои сделки» — по выбранному инструменту; общая история живёт в нижней панели.
-  // `null` пропускаем как есть: виджет обязан отличить «не прочитали» от
-  // «сделок нет». Прежнее `|| []` превращало отказ в утверждение о счёте.
   myTrades: async (id) => {
     const all = await api.closedDeals();
     return all === null ? null : all.filter((d) => d.instrument === id);
@@ -611,17 +517,11 @@ const trades = Trades.mount(document.getElementById('trades'), {
   num: fmtN,
   interval: 2500,
 });
-// Монтируется последним: его первый refresh выбирает инструмент, а selectInstrument
-// обращается к book/stats/panel/trades — они должны уже существовать.
-// Сайт (тенант) — из своего URL. Для витрины это фильтр по allow-list; настоящая
-// граница стоит на сервере, на пути открытия сделки: `?site=` подставит кто угодно.
 const SITE = new URLSearchParams(location.search).get('site') || '';
 const WANT_SYMBOL = new URLSearchParams(location.search).get('symbol') || '';
 const watchlist = Watchlist.mount(document.querySelector('.watch'), {
   fetch: async () => {
     const list = await api.instruments(SITE);
-    // null здесь — «список не отдали» (например, конфиг сайта не доехал). Пустой
-    // список читался бы как «сайту нечем торговать» — другое утверждение (BUG-011).
     markMarketData('instruments', list !== null);
     return list;
   },
@@ -629,9 +529,6 @@ const watchlist = Watchlist.mount(document.querySelector('.watch'), {
   onData: (list) => { list.forEach((it) => (META[it.id] = it)); updateDealPanel(); renderTape(list); },
   onSelect: (id) => { document.body.classList.remove('m-watch'); selectInstrument(id); },
   interval: 1000,
-  // Колонки по умолчанию — цена и изменение, как в списке пар любого
-  // терминала; остальные включаются в настройках. Ключ новый: старый хранил
-  // «всё включено», и в узкой колонке цены резались многоточием (BUG-009).
   colsKey: 'watch.cols.v2',
   columnsDefault: { last: 1, change: 1, sell: 0, buy: 0, spread: 0, high: 0 },
   title: '',
@@ -656,7 +553,6 @@ function syncTimeframes(it) {
 async function selectInstrument(id) { selected = id; watchlist.setActive(id); syncTimeframes(META[id]); syncLotStep(); /** @type {HTMLInputElement} */ (document.getElementById('price')).value = ''; resetStops(); await loadCandles(id, tf); updateDealPanel(); pollAccount(); panel.refreshDeals(); book.reset(); book.refresh(); stats.refresh(); trades.clearTape(); trades.refreshMine(); }
 document.getElementById('tfs').addEventListener('click', (e) => { const btn = /** @type {Element} */ (e.target).closest('button'); if (!btn || btn.disabled) return; tf = +btn.dataset.tf; chart.applyOptions({ timeScale: { secondsVisible: tf < 60 } }); document.querySelectorAll('#tfs button').forEach((b) => b.classList.toggle('active', b === btn)); if (selected != null) loadCandles(selected, tf); });
 
-// ============================ Toolbar (dropdowns) ==========================
 function closeDD() { document.querySelectorAll('.dd').forEach((d) => d.classList.add('hidden')); }
 function toggleDD(id) { const m = document.getElementById(id); const wasHidden = m.classList.contains('hidden'); closeDD(); if (wasHidden) m.classList.remove('hidden'); }
 document.addEventListener('click', (e) => { if (!/** @type {Element} */ (e.target).closest('.tb-dd')) closeDD(); });
@@ -678,7 +574,6 @@ document.getElementById('ptMenu').addEventListener('click', (e) => { const it = 
 document.getElementById('sltpBtn').addEventListener('click', () => { showSLTP = !showSLTP; document.getElementById('sltpBtn').classList.toggle('on', showSLTP); redrawPriceLines(); });
 document.getElementById('pipsBtn').addEventListener('click', () => { showPips = !showPips; document.getElementById('pipsBtn').classList.toggle('on', showPips); updateDealPanel(); panel.refreshDeals(); });
 
-// Reset (full) / Fullscreen / Settings
 function resetChart() {
   chartType = 'candles';
   Object.keys(overlays).forEach((k) => (overlays[k] = 0));
@@ -692,17 +587,6 @@ function resetChart() {
   const n = rawCandles.length; if (n) chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 });
 }
 document.getElementById('resetBtn').addEventListener('click', resetChart);
-// ---- График на весь экран ---------------------------------------------------
-// Разворачивается ВСЯ секция графика (тулбар + график + статистика), а не одна
-// область рисования: прежде во весь экран уходил только `.chartwrap`, и кнопки
-// выхода на экране не оставалось.
-//
-// Почему «не открывался». Терминал встраивается в кабинет фреймом с другого
-// origin, а там Fullscreen API закрыт, пока родитель не дал `allow="fullscreen"`:
-// `document.fullscreenEnabled === false`, `requestFullscreen()` отказывает — и
-// прежний обработчик молча глотал отказ (`?.()` без `catch`). Теперь при
-// закрытом API график разворачивается на всё окно терминала (фиксированный
-// слой поверх раскладки); выход — той же кнопкой или Esc в обоих режимах.
 const chartSection = /** @type {HTMLElement} */ (document.querySelector('.center'));
 const isChartMax = () => document.fullscreenElement === chartSection || chartSection.classList.contains('is-max');
 function syncFullBtn() {
@@ -715,8 +599,6 @@ function syncFullBtn() {
   const ic = /** @type {HTMLElement} */ (b.querySelector('.ic'));
   if (ic) { ic.dataset.icon = on ? 'fullscreenExit' : 'fullscreen'; ic.innerHTML = ICONS[ic.dataset.icon]; }
   document.body.classList.toggle('chart-max', on);
-  // Размер графика подхватит ResizeObserver; явный вызов — на случай, если
-  // браузер сменил размер без события на самом узле.
   requestAnimationFrame(() => chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight }));
 }
 /** @param {boolean} on */
@@ -735,8 +617,6 @@ function setChartMax(on) {
 }
 document.getElementById('fullBtn').addEventListener('click', () => setChartMax(!isChartMax()));
 document.addEventListener('fullscreenchange', syncFullBtn);
-// Esc в настоящем полноэкранном режиме закрывает его сам браузер (и шлёт
-// fullscreenchange); в запасном режиме Esc — наш. Он же закрывает список пар.
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (chartSection.classList.contains('is-max')) { chartSection.classList.remove('is-max'); syncFullBtn(); }
@@ -751,18 +631,10 @@ function bindSetting(id, key, kind) {
 bindSetting('sHollow', 'hollowColor', 'str'); bindSetting('sShadows', 'shadows', 'bool'); bindSetting('sShadowCustom', 'shadowCustom', 'bool'); bindSetting('sShadowColor', 'shadowColor', 'str');
 bindSetting('sPlw', 'priceLineWidth', 'num'); bindSetting('sAddLine', 'addLine', 'bool'); bindSetting('sAlw', 'addLineWidth', 'num'); bindSetting('sMinChange', 'minChange', 'str');
 
-// Видимость колонок списка: состояние и отрисовка — внутри виджета, страница лишь
-// связывает свои чекбоксы с его публичным API.
 function bindCol(id, key) { const el = document.getElementById(id); if (!el) return; /** @type {HTMLInputElement} */ (el).checked = !!watchlist.columns()[key]; el.addEventListener('change', () => watchlist.setColumns({ [key]: /** @type {HTMLInputElement} */ (el).checked ? 1 : 0 })); }
 bindCol('cLast', 'last'); bindCol('cChange', 'change'); bindCol('cSell', 'sell'); bindCol('cBuy', 'buy'); bindCol('cSpread', 'spread'); bindCol('cHigh', 'high');
 
-// Ширины колонок и высота нижней панели — переменные сетки (style.css), их
-// двигают ресайзеры. Ключ хранилища новый: прежняя раскладка (форма с
-// фиксированной высотой, тулбар с ручной высотой) к этой сетке не подходит.
-// Сохранённый пользователем размер имеет приоритет над умолчанием.
 const wide = window.innerWidth >= 1800, tall = window.innerHeight >= 1000;
-// Ключ v3: колонки поменялись ролями (справа теперь тикет, лента сделок —
-// под стаканом), и размеры прежней раскладки к новой не подходят.
 const layout = Object.assign({ leftW: wide ? 320 : 280, rightW: wide ? 340 : 312, bottomH: tall ? 240 : 196, tradesH: tall ? 300 : 230 },
   JSON.parse(localStorage.getItem('layout.v3') || '{}'));
 function applyLayout() {
@@ -789,48 +661,18 @@ function initResizers() {
   }));
 }
 
-// ============================ Tooltip ======================================
 const tip = document.getElementById('tip');
 document.addEventListener('mouseover', (e) => { const t = /** @type {Element} */ (e.target).closest('[data-tip]'); if (!t) return; tip.textContent = /** @type {HTMLElement} */ (t).dataset.tip; tip.classList.remove('hidden'); const r = t.getBoundingClientRect(); tip.style.left = r.left + r.width / 2 + 'px'; tip.style.top = r.bottom + 7 + 'px'; });
 document.addEventListener('mouseout', (e) => { if (/** @type {Element} */ (e.target).closest('[data-tip]')) tip.classList.add('hidden'); });
 
-// ============================ WebSocket ====================================
-// Индикатор живости горит по ПРИХОДУ ДАННЫХ, а не по открытому сокету. Открытый
-// сокет, по которому ничего не идёт, — это молчащий фид: если Binance отвалится,
-// соединение браузер→gateway останется целым, и зелёная точка врала бы (BUG-011).
 const FEED_STALE_MS = 20000;
 let lastFeedMsgAt = 0;
 let wsOpen = false;
-/** Было ли живо на прошлой перерисовке — чтобы рвать ряд на переходе, а не постоянно. */
 let wasFeedLive = false;
-/**
- * Сколько сообщений фида не разобралось **за сессию**. Ноль — не «всё хорошо»,
- * а «пока ни одного»: различать их помогает возраст последнего сообщения.
- *
- * Счётчик НЕ взят из общего помощника сознательно, и это не недосмотр.
- * Помощник считает отказы **подряд** и обнуляет их при восстановлении — это
- * верно для опроса, где важно «источник лежит сейчас». Здесь же величина
- * другая: сколько сообщений **потеряно** за сессию. Обнулять её на первом
- * здоровом сообщении значило бы стирать след ровно тогда, когда он нужен.
- *
- * Политику ВЫВОДА при этом берём общую (TRM-17), с явно заданной частотой:
- * поток сообщений фида на порядок чаще опроса, и «на смене состояния» здесь
- * означало бы одну строку за всю сессию.
- */
 let feedDropped = 0;
 const feedDiag = window.Diag.reporter({ subject: 'feed', every: 50 });
 
-/**
- * Разрыв ряда цены (TRM-19, Р-073): свеча закрывается, живые сделки до
- * пересева с сервера не принимаются.
- *
- * Непрерывность ломает не только свечу: направление в стакане считается от
- * предыдущей середины, и через дыру это сравнение с ценой из другого времени.
- * Ленту сделок НЕ чистим — она не ряд, а список произошедшего, и стирать
- * наблюдённое из-за обрыва связи нельзя.
- *
- * @param {string} reason одна из `Series.BREAK_REASONS`
- */
+/** @param {string} reason */
 function breakPriceSeries(reason) {
   if (priceSeries.isBroken()) return;
   priceSeries.markBreak(reason);
@@ -841,18 +683,8 @@ function renderFeedStatus() {
   const st = document.getElementById('status');
   const age = lastFeedMsgAt ? Date.now() - lastFeedMsgAt : Infinity;
   const live = wsOpen && age < FEED_STALE_MS;
-  // Молчание дольше порога — такой же разрыв, как обрыв сокета: сокет цел, а
-  // данных нет, и следующая сделка пришла бы в свечу из прошлого.
-  //
-  // Рвём НА ПЕРЕХОДЕ «было живо → стало молчать», а не всё время, пока молчит.
-  // Разрыв снимается пересевом, и без перехода мы рвали бы ряд заново каждые
-  // две секунды простоя, а каждое возвращение тянет полную перезагрузку свечей:
-  // получился бы опрос тем чаще, чем хуже связь. Условие `lastFeedMsgAt`
-  // отсекает старт страницы: там ряд ещё не начинался.
   if (lastFeedMsgAt && wasFeedLive && !live) breakPriceSeries('feed-stale');
   wasFeedLive = live;
-  // Транспорт и данные — разные вопросы, и подсказка их различает: «сокет молчит»
-  // и «шлюза нет» лечатся по-разному, хотя оба гасят точку.
   const why = !wsOpen
     ? T('feed.gw')
     : live
@@ -860,12 +692,8 @@ function renderFeedStatus() {
       : tv('feed.silent', { age: lastFeedMsgAt ? Math.round(age / 1000) + 's' : T('feed.session') });
   if (st) {
     st.className = 'status ' + (live ? 'status--on' : 'status--off');
-    // Неразобранные сообщения приписываем к подсказке, а не прячем: зелёная
-    // точка при сыплющемся разборе — ровно то «правильное на вид состояние»,
-    // которое мы ловим.
     st.title = feedDropped ? `${why}; не разобрано сообщений: ${feedDropped}` : why;
   }
-  // Слово рядом с названием биржи — тоже утверждение о состоянии, а не украшение.
   const label = document.getElementById('feedLabel');
   if (label) {
     label.textContent = live ? T('feed.live') : T('feed.nodata');
@@ -883,11 +711,6 @@ function connectWS() {
     try {
       e = JSON.parse(ev.data);
     } catch (err) {
-      // Мягкий разбор означает «не падает», а не «исчезает без следа»
-      // (TRM-16). Сообщение, которое не разобралось, — это либо наш сломанный
-      // шлюз, либо чужой формат; без счётчика и строки в логе они неотличимы
-      // друг от друга и от «биржа молчит». Счёт виден в подсказке индикатора
-      // фида, так что след остаётся и в интерфейсе, а не только в консоли.
       feedDropped += 1;
       feedDiag.fail('malformed', String(ev.data).slice(0, 200));
       renderFeedStatus();
@@ -902,16 +725,11 @@ function connectWS() {
     }
   };
 }
-// Точка обязана гаснуть сама: без этого «живо» осталось бы висеть с последнего тика.
 setInterval(renderFeedStatus, 2000);
 
-// ============================ Order form ===================================
 document.getElementById('tabDeal').addEventListener('click', () => setMode('market'));
 document.getElementById('tabLimit').addEventListener('click', () => setMode('limit'));
-// Режим формы виден атрибутом на самой форме: CSS прячет поле цены в «Рынке»
-// и надпись «По рынку» в «Лимите» — одно состояние, одно место.
 function setMode(m) { orderMode = m; document.getElementById('tabDeal').classList.toggle('active', m === 'market'); document.getElementById('tabLimit').classList.toggle('active', m === 'limit'); document.getElementById('deal').dataset.mode = m; updateDealPanel(); }
-/** Сторона заявки: от неё зависят уровни SL/TP и то, какая кнопка видна. */
 function setSide(/** @type {'buy'|'sell'} */ side) {
   if (orderSide !== side) { orderSide = side; resetStops(); }
   document.getElementById('deal').dataset.side = side;
@@ -923,15 +741,9 @@ document.querySelector('.side').addEventListener('click', (e) => {
   if (b) setSide(/** @type {'buy'|'sell'} */ (b.dataset.side));
 });
 
-// ---- Минимальное расстояние SL/TP (stops.js) ------------------------------
-// Минимум задаёт сайт; шлюз отдаёт его в `/account` (`min_stop_bps`) и
-// отказывает в более близких уровнях. Тикет подставляет уровни сам и держит
-// их у минимума, пока человек их не тронул; тронутое поле больше не
-// переписывается, а проверяется.
 let minStopBps = 0;
 const stopAuto = { sl: true, tp: true };
 const stopInput = (/** @type {'sl'|'tp'} */ k) => /** @type {HTMLInputElement} */ (document.getElementById(k));
-/** Цена отсчёта — та же, что у шлюза: рынок стороны или цена лимитного ордера. */
 function stopRef(it) {
   if (!it) return null;
   if (orderMode === 'limit') {
@@ -943,14 +755,11 @@ function stopRef(it) {
 }
 function resetStops() { stopAuto.sl = true; stopAuto.tp = true; }
 
-// ---- Изменение SL/TP открытой позиции и ордера (levels.js, 17.11) ---------
-// Запись включает шлюз флагом (`SLTP_EDIT_ENABLED`) и сообщает о нём в
-// `/account.sltp_edit`. Пока флаг выключен, ячейки SL/TP — просто текст.
 let sltpEdit = false;
 /**
- * Окно изменения уровней. Цена отсчёта — та же, что у шлюза: у позиции цена
- * закрытия (bid покупки, ask продажи), у ордера — его цена.
- * @param {'deal'|'pending'} kind @param {any} row @param {'sl'|'tp'} field
+ * @param {'deal'|'pending'} kind
+ * @param {any} row
+ * @param {'sl'|'tp'} field
  */
 function openLevels(kind, row, field) {
   Levels.open({
@@ -964,7 +773,6 @@ function openLevels(kind, row, field) {
     bps: () => minStopBps,
     submit: (/** @type {any} */ body) => (kind === 'deal' ? api.editDealLevels(row.id, body) : api.editPendingLevels(row.id, body)),
     rejection: rejectionText,
-    // Таблица и линии SL/TP графика перерисовываются из ответа /deals.
     onDone: () => { panel.refresh(); pollAccount(); },
   });
 }
@@ -984,7 +792,6 @@ function refreshStops() {
   } else hint.textContent = tv('f.stops.hint', { p: I18N.num(Stops.HINT_BPS / 100) });
   validateStops();
 }
-/** Проблема с уровнями сейчас, или `null`. Красит поле, но ничего не отправляет. */
 function validateStops() {
   const it = META[selected];
   const ref = stopRef(it);
@@ -999,8 +806,6 @@ for (const k of /** @type {Array<'sl'|'tp'>} */ (['sl', 'tp'])) {
 }
 document.getElementById('stopsReset').addEventListener('click', () => { resetStops(); refreshStops(); });
 document.getElementById('price').addEventListener('input', () => refreshStops());
-// Доля свободной маржи: объём, на который хватит N% свободных средств с
-// плечом счёта. Цены или счёта нет — кнопки ничего не делают (а не ставят 0).
 document.getElementById('shares').addEventListener('click', (e) => {
   const b = /** @type {HTMLElement} */ (/** @type {Element} */ (e.target).closest('[data-share]'));
   const it = META[selected];
@@ -1039,30 +844,12 @@ function syncLotStep() {
   inp.step = sizeUnit === 'usd' ? '1' : Sizing.contract(it) ? String(Sizing.toLots(it, Sizing.step(it))) : '0.001';
 }
 function readSlTp(id) { const sl = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('sl')).value), tp = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('tp')).value); return { sl: sl > 0 ? Math.round(sl * pscale(id)) : null, tp: tp > 0 ? Math.round(tp * pscale(id)) : null }; }
-// Размер сделки в базовых единицах (учитывает выбор LOT/USD).
 function sizeBaseQty(id) { const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('lot')).value) || 0; if (v <= 0) return 0; if (sizeUnit === 'usd') { const p = refPrice(META[id]) / pscale(id); return p > 0 ? v / p : 0; } return v * (Sizing.contract(META[id]) || 1); }
 /** @param {number} id */
 const sizeRaw = (id) => Sizing.fromUnits(META[id], sizeBaseQty(id));
-/**
- * Эквивалент размера: сколько это в другой валюте (TRM-24).
- *
- * Цена может быть НЕИЗВЕСТНА — тикера по инструменту ещё нет. Раньше в этом
- * случае печаталось «≈ 0»: ноль читается как «ноль объёма», а не «цены не
- * знаем», и стоит это в панели ввода ордера, где человек принимает решение о
- * деньгах. Та же семья, что `change` с нулём вместо прочерка.
- */
-/**
- * Тариф счёта для новых сделок (10.11), из `/account`. Нули — без тарифа:
- * так и ведёт себя шлюз, пока сайт тариф не назначил.
- * @type {{ markup_bps: number, commission_bps: number }}
- */
+/** @type {{ markup_bps: number, commission_bps: number }} */
 let tariff = { markup_bps: 0, commission_bps: 0 };
 
-/**
- * «Commission ≈ X USD» в тикете — ДО подтверждения. Считается по цене
- * исполнения покупки (ask с наценкой; у лимитного — по цене ордера) и
- * текущему объёму. Цены нет — прочерк, а не ноль.
- */
 function updateFeeInfo() {
   const el = document.getElementById('feeInfo');
   if (!el) return;
@@ -1084,7 +871,10 @@ function updateFeeInfo() {
 }
 
 let tradingFrozen = false;
-/** @param {any} it @returns {string|null} */
+/**
+ * @param {any} it
+ * @returns {string|null}
+ */
 function gateBlock(it) {
   if (!it) return null;
   const why = orderMode === 'limit' ? Market.blockPending(it) : Market.blockOpen(it);
@@ -1093,7 +883,10 @@ function gateBlock(it) {
   if (why === 'untradable') return T('gate.untradable');
   return `${marketText(it)}. ${T(why === 'closed' ? 'gate.closed' : 'gate.halted')}`;
 }
-/** @param {any} it @returns {string|null} */
+/**
+ * @param {any} it
+ * @returns {string|null}
+ */
 function sizeBlock(it) {
   if (!it) return null;
   const v = parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('lot')).value) || 0;
@@ -1154,28 +947,17 @@ function updateSizeEq() {
   el.textContent = sizeUnit === 'usd'
     ? `≈ ${cs ? I18N.num(v / p / cs, Sizing.lotDecimals(it)) : I18N.num(v / p, qdec(it.id))} ${base}`
     : `${T('f.notional')} ≈ ${usd(Math.round((cs ? Sizing.toUnits(it, sizeRaw(it.id)) : v) * p * 100))}`;
-  // Маржа под позицию — стоимость / плечо счёта. Плеча не знаем — строки нет:
-  // догадка про деньги хуже её отсутствия.
   const lev = lastAccount && Number.isInteger(lastAccount.leverage) && lastAccount.leverage >= 1 ? lastAccount.leverage : null;
   const notional = sizeUnit === 'usd' ? v : (cs ? Sizing.toUnits(it, sizeRaw(it.id)) : v) * p;
   mEl.textContent = lev && notional > 0 ? `${T('f.marginReq')} ≈ ${usd(Math.round((notional / lev) * 100))}` : '';
 }
 
-/** Цена инструмента в единицах отображения или `null`, если её нет. */
 function priceOrNull(it) {
   const raw = refPrice(it);
   if (raw == null) return null;
   const p = raw / pscale(it.id);
   return Number.isFinite(p) && p > 0 ? p : null;
 }
-/**
- * Смена единицы ввода. При неизвестной цене пересчитать нечем — и тогда мы
- * **не трогаем введённое число** (TRM-24).
- *
- * Раньше пересчёт шёл через `p = 0`, и поле молча становилось нулём: человек
- * набрал объём, переключил единицу и потерял его без единого сообщения. Это
- * хуже неверной подписи — это правка того, что ввёл человек.
- */
 function setUnit(u) {
   if (sizeUnit === u) return;
   const it = META[selected];
@@ -1197,18 +979,12 @@ function setUnit(u) {
 document.getElementById('unitLot').addEventListener('click', () => setUnit('lot'));
 document.getElementById('unitUsd').addEventListener('click', () => setUnit('usd'));
 document.getElementById('lot').addEventListener('input', updateSizeEq);
-// Отказ границы объясняется словами, а не кодом (КОНТРАКТЫ §4б). Таблица
-// переехала в `rejection.js`: здесь её было нечем проверить, и недостающую
-// строку нашёл пользователь — `tenant_instruments_unreadable` показывался сырым
-// кодом (TRM-43).
 const rejectionText = (/** @type {number} */ status, /** @type {string} */ code) => I18N.rejection(status, code);
 
 async function submit(side) {
   const id = selected; if (id == null) return; const msg = document.getElementById('dealMsg');
   const baseQty = sizeBaseQty(id);
   if (!(baseQty > 0)) { msg.textContent = T('f.enterSize'); msg.style.color = 'var(--down)'; return; }
-  // Уровни, которые тикет держит сам, пересчитываются от цены этой секунды:
-  // между опросом и нажатием рынок успевает сдвинуться.
   if (side !== orderSide) setSide(side);
   refreshStops();
   const bad = validateStops();
@@ -1227,7 +1003,6 @@ async function submit(side) {
   const { ok, status, data } = isLimit ? await api.placePending(body) : await api.openDeal(body);
   if (ok) { msg.textContent = isLimit ? tv('f.limitPlaced', { id: data.id }) : tv('f.opened', { id: data.id, side: side.toUpperCase(), px: fmtP(id, data.entry) }); msg.style.color = 'var(--up)'; panel.show(isLimit ? 'pending' : 'deals'); pollAccount(); panel.refresh(); resetStops(); refreshStops(); }
   else {
-    // Шлюз называет ближайший допустимый уровень — его и показываем.
     const near = Number.isInteger(data?.limit) ? ' ' + tv('f.nearest', { px: fmtP(id, data.limit) }) : '';
     msg.textContent = refusal(status, data) + near; msg.style.color = 'var(--down)';
   }
@@ -1235,14 +1010,6 @@ async function submit(side) {
 document.getElementById('btnBuy').addEventListener('click', () => submit('buy'));
 document.getElementById('btnSell').addEventListener('click', () => submit('sell'));
 
-// ============================ Account / positions / history ================
-// Метрики счёта. Отказ показывается отказом, а не нулём: ноль — правдоподобный
-// баланс, по нему принимают решение, а по прочерку с причиной идут разбираться
-// (BUG-011). 'unreachable' оставляет прежние цифры: связь могла моргнуть, и
-// затирать верные значения на каждый блип — хуже, чем показать их с оговоркой.
-// Счёт заводится первой сделкой, а не регистрацией (TRM-58). До неё цифр
-// нет — и голый прочерк читается как поломка, поэтому состояние НАЗВАНО
-// (`acct.not-opened` в словаре i18n.js).
 const ACCT_KEYS = ['no-session', 'unreachable', 'unknown', 'not-opened'];
 const acctMsg = (/** @type {string} */ status) => T('acct.' + (ACCT_KEYS.includes(status) ? status : 'unknown'));
 function showAcctWarn(status) {
@@ -1252,9 +1019,6 @@ function showAcctWarn(status) {
   el.hidden = !msg;
   el.textContent = msg || '';
 }
-// Модель ведения позиций счёта. В хеджировании встречная сделка открывает вторую
-// позицию, в неттинге — сворачивает существующую: разница видна на деньгах, поэтому
-// подпись стоит в шапке, а не в настройках (ADR-025).
 function showPositionModel(model) {
   const el = document.getElementById('modelBadge');
   if (!el) return;
@@ -1266,11 +1030,8 @@ function showPositionModel(model) {
 }
 
 /**
- * Бейдж рода счёта и заморозки (demo-money). Род известен и у незаведённого
- * счёта — его называет вход, а не первая сделка, — поэтому показывается всегда,
- * когда ответ счёта есть.
- * @param {string | undefined} kind `demo` | `real`
- * @param {boolean | undefined} frozen торговля заморожена оператором
+ * @param {string | undefined} kind
+ * @param {boolean | undefined} frozen
  */
 function showAccountKind(kind, frozen) {
   const el = document.getElementById('kindBadge');
@@ -1287,8 +1048,6 @@ function showAccountKind(kind, frozen) {
     f.textContent = T('frozen.badge');
     f.title = T('frozen.tip');
   }
-  // Заморозка видна трижды, и это не перебор: бейдж в шапке — состояние,
-  // баннер — объяснение, плашка на тикете — почему кнопки не работают.
   const banner = document.getElementById('frozenBanner');
   if (banner) { banner.hidden = !frozen; banner.textContent = T('frozen.banner'); }
   const form = document.getElementById('dealFrozen');
@@ -1297,11 +1056,7 @@ function showAccountKind(kind, frozen) {
   applyGate();
 }
 
-/**
- * Уровень маржи и маржин-колл (TRM-49/50). Пороги — площадки, из `/account`.
- * Уровня нет (позиций нет) — прочерк с объяснением, а не «∞» и не «0%».
- * @param {any} a ответ /account
- */
+/** @param {any} a */
 function showMarginLevel(a) {
   const el = document.getElementById('mLevel');
   const banner = document.getElementById('mcBanner');
@@ -1322,10 +1077,7 @@ function showMarginLevel(a) {
   banner.textContent = text || '';
 }
 
-/**
- * Сводка счёта для вкладки «Баланс». `null` — ответа счёта ещё не было.
- * @returns {Array<[string, string, string?]> | null}
- */
+/** @returns {Array<[string, string, string?]> | null} */
 function balanceRows() {
   const a = lastAccount;
   if (!a) return null;
@@ -1361,7 +1113,6 @@ function balanceRows() {
   return out;
 }
 
-/** Плечо счёта для новых позиций: `1:N`. Не число — прочерк, а не выдумка. */
 function showLeverage(lev) {
   const el = document.getElementById('mLev');
   if (!el) return;
@@ -1380,33 +1131,22 @@ async function pollAccount() {
     const st = api.tradingStatus();
     showAcctWarn(st);
     if (!a) {
-      // Сессии нет — цифр нет и быть не может: показываем прочерки, а не последнее
-      // известное значение (оно было бы от чужого/прошлого счёта).
       if (st === 'no-session' || st === 'unknown') { blankMetrics(); lastAccount = null; showMarginLevel(null); }
       return;
     }
     lastAccount = a;
     showAccountKind(a.kind, a.trading_frozen);
     showLeverage(a.leverage);
-    // Тариф для следующей сделки — в тикет (10.11). Поля нет (старый шлюз) —
-    // нули: так он и исполняет.
     tariff = {
       markup_bps: Number.isInteger(a.markup_bps) ? a.markup_bps : 0,
       commission_bps: Number.isInteger(a.commission_bps) ? a.commission_bps : 0,
     };
-    // Минимум стопов площадки. Поля нет (прежний шлюз) — 0: так он и проверяет.
     minStopBps = Number.isInteger(a.min_stop_bps) && a.min_stop_bps > 0 ? a.min_stop_bps : 0;
-    // Изменение SL/TP: поля нет (прежний шлюз) или `false` (флаг выключен) —
-    // кнопок нет. Сменилось — перерисовать строки сразу, а не через опрос.
     const edit = a.sltp_edit === true;
     if (edit !== sltpEdit) { sltpEdit = edit; panel.refresh(); }
     if (!edit) Levels.close();
     updateDealPanel();
     if (a.opened === false) {
-      // Счёта ещё нет: шлюз отдаёт `null` вместо цифр, и подставлять сюда ноль
-      // нельзя — ноль правдоподобен, по нему принимают решение (BUG-011).
-      // Показываем прочерки И называем причину: прочерк без слов неотличим от
-      // сбоя связи, у которого прочерки те же.
       blankMetrics();
       showLeverage(a.leverage);
       showPositionModel(null);
@@ -1426,14 +1166,9 @@ async function pollAccount() {
     p.textContent = usd(a.open_pnl);
     p.style.color = a.open_pnl > 0 ? 'var(--up)' : a.open_pnl < 0 ? 'var(--down)' : '';
   } catch (e) {
-    // Было `catch (e) { }` — глушилось всё, включая ошибку формы ответа счёта
-    // (TRM-16). `api.account()` сеть уже проглатывает сам и возвращает `null`,
-    // поэтому сюда долетает не блип, а дефект: отсутствующий узел разметки или
-    // поле не того типа. Такое не проходит само и обязано быть громким.
     console.error('[account] метрики счёта не отрисованы', e);
   }
 }
-// Сигналы считаются из свечей графика (данные хоста); показывает их виджет positions.js.
 function computeSignals() {
   const it = META[selected];
   if (!it || rawCandles.length < 30) return [];
@@ -1448,11 +1183,7 @@ function computeSignals() {
   }
   return out.map(([name, dir]) => ({ symbol: it.symbol, name, tf: TFN[tf], dir }));
 }
-// Поиск, сортировка, избранное и клик по строке — внутри watchlist.js (ADR-015).
 
-// Перетемизация графика при смене темы/бренда (theming-pack, ADR-023): структурные
-// цвета + пересбор серии (её цвета читаются из токенов при создании) + перекраска
-// объёмов. Тема-каналы уже применены на :root к моменту события.
 function applyChartTheme() {
   chart.applyOptions({
     layout: { background: { color: rgbT('--bg-base') }, textColor: rgbT('--text-secondary') },
@@ -1471,7 +1202,6 @@ function applyChartTheme() {
 }
 document.addEventListener('themechange', applyChartTheme);
 
-// ============================ Язык, мобильные вкладки, вход =================
 function renderLangButtons() {
   const box = /** @type {HTMLElement} */ (document.querySelector('.lang'));
   /** @type {string[]} */
@@ -1488,8 +1218,6 @@ document.querySelector('.lang').addEventListener('click', (e) => {
   const b = /** @type {HTMLElement} */ (/** @type {Element} */ (e.target).closest('[data-lang]'));
   if (b) I18N.setLang(b.dataset.lang);
 });
-// Смена языка: статичные подписи переводит I18n.apply, динамические —
-// перерисовка тех, кто держит текст у себя. Сессия и состояние не трогаются.
 I18N.onChange(() => {
   renderLangButtons();
   chart.applyOptions({ localization: { locale: I18N.locale() } });
@@ -1497,7 +1225,6 @@ I18N.onChange(() => {
   pollAccount(); panel.refresh(); panel.refreshSignals(); trades.refreshMine(); book.refresh(); stats.refresh(); watchlist.refresh(); renderSsoUi();
 });
 
-/** Мобильная раскладка: одна панель на экран (style.css, `body[data-mtab]`). */
 function setMTab(/** @type {string} */ m) {
   document.body.dataset.mtab = m;
   document.querySelectorAll('#mtabs [data-m]').forEach((b) => b.classList.toggle('active', /** @type {HTMLElement} */ (b).dataset.m === m));
@@ -1506,9 +1233,6 @@ document.getElementById('mtabs').addEventListener('click', (e) => {
   const b = /** @type {HTMLElement} */ (/** @type {Element} */ (e.target).closest('[data-m]'));
   if (b) setMTab(b.dataset.m);
 });
-// Кнопка пары в шапке инструмента: на телефоне открывает список пар поверх.
-// На телефоне кнопка пары открывает список на весь экран; на десктопе список
-// и так виден под заявкой — кнопка ставит курсор в его поиск.
 const phone = window.matchMedia('(max-width: 860px)');
 document.getElementById('ihPair').addEventListener('click', () => {
   if (phone.matches) { document.body.classList.toggle('m-watch'); return; }
@@ -1521,8 +1245,6 @@ document.getElementById('tapeTrack').addEventListener('click', (e) => {
   if (it) selectInstrument(+it.dataset.id);
 });
 
-// Вход верхним уровнем (sso.js): «В кабинет», «Выйти» и баннер сессии.
-// Во фрейме кабинета ничего этого не видно — кабинет и так вокруг.
 function renderSsoUi() {
   const S = window.Sso;
   const top = S.mode() === 'top';
@@ -1548,8 +1270,6 @@ function renderSsoUi() {
 document.getElementById('ssoBannerBtn').addEventListener('click', () => window.Sso.relaunch(true));
 document.getElementById('logoutBtn').addEventListener('click', () => window.Sso.logout({ redirect: true }));
 
-// ============================ Start ========================================
-// Терминал автономный: без логина и общей шапки — открывается и работает сразу.
 I18N.apply();
 renderLangButtons();
 renderIcons();
@@ -1558,13 +1278,8 @@ initResizers();
 setMode('market');
 setSide('buy');
 document.querySelectorAll('#indMenu [data-ov]').forEach((x) => x.classList.toggle('on', !!overlays[/** @type {HTMLElement} */ (x).dataset.ov]));
-// Тема и бренд сайта (theming-pack v1, ADR-023 фаза Т1). Без CMS остаёмся на палитре
-// платформы; кнопка ◐ переключает тёмную/светлую.
 document.getElementById('themeToggle')?.addEventListener('click', () => window.Theming.toggleTheme());
 window.Theming.init();
-// Вход по handoff-токену платформы (ADR-023 фаза Т2). Без родителя-кабинета токен не
-// придёт — терминал работает на счёте по умолчанию (dev/standalone). При смене сессии
-// сразу обновляем сводку счёта.
 window.Sso.init().onChange(() => { pollAccount(); renderSsoUi(); });
 renderSsoUi();
 setInterval(renderSsoUi, 1000);

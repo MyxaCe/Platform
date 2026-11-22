@@ -14,7 +14,10 @@ const ACCOUNT = {
   }),
 };
 
-/** @param {any} t @param {{ tag?: string, over?: any, routes?: Record<string, Function>, lang?: string }} [opts] */
+/**
+ * @param {any} t
+ * @param {{ tag?: string, over?: any, routes?: Record<string, Function>, lang?: string }} [opts]
+ */
 async function open(t, opts) {
   const o = opts || {};
   const term = await openTerminal({
@@ -26,7 +29,10 @@ async function open(t, opts) {
   return term;
 }
 
-/** @param {any} term @param {number} id */
+/**
+ * @param {any} term
+ * @param {number} id
+ */
 async function pick(term, id) {
   await term.page.click(`.irow[data-id="${id}"]`);
   await settle(term.page, 1200);
@@ -57,13 +63,20 @@ const ui = (page) => page.evaluate(() => {
   };
 });
 
-/** @param {any} page @param {number} id */
+/**
+ * @param {any} page
+ * @param {number} id
+ */
 const badge = (page, id) => page.evaluate((i) => {
   const el = document.querySelector(`.irow[data-id="${i}"] .wl-mk`);
   return el ? { text: el.textContent, tip: /** @type {HTMLElement} */ (el).title } : null;
 }, id);
 
-/** @param {any[]} seen @param {string} p @param {string} [method] */
+/**
+ * @param {any[]} seen
+ * @param {string} p
+ * @param {string} [method]
+ */
 const hits = (seen, p, method) => seen.filter((r) => r.path === p && (!method || r.method === method));
 
 test('волна 2: терминал открывается, список из CMS с пометками рынка, крипто как раньше', async (t) => {
@@ -299,7 +312,10 @@ test('скрины волны 2 (только при TERMINAL_SHOTS_DIR)', { ski
   fs.writeFileSync(path.join(dir, 'eurusd-closed-limit.png'), await term.page.screenshot());
 });
 
-/** @param {any} t @param {string} query */
+/**
+ * @param {any} t
+ * @param {string} query
+ */
 async function openWith(t, query) {
   const term = await openTerminal({ query });
   t.after(term.cleanup);

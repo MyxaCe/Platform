@@ -9,7 +9,10 @@ const I = loadModule('indicators.js', 'Indicators');
 /** @param {any} x */
 const plain = (x) => JSON.parse(JSON.stringify(x));
 
-/** @param {number} time @param {number} close */
+/**
+ * @param {number} time
+ * @param {number} close
+ */
 function bar(time, close) {
   return { time, open: close - 1, high: close + 2, low: close - 2, close, volume: 3 };
 }

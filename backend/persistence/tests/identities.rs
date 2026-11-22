@@ -1,13 +1,6 @@
-//! Демо и реальный счёт одного человека (demo-money): маппинг личностей по
-//! `(tenant, sub, kind)` — живой прогон против PostgreSQL.
-//!
-//! Запуск, как у остальных живых: `TEST_DATABASE_URL=postgres://... cargo test
-//! -p persistence -- --ignored --test-threads=1` на ЧИСТОЙ базе.
-
 use domain::account::AccountKind;
 use persistence::{MemoryStore, Persistence};
 
-/// Без базы реального счёта не бывает: отказ, а не подмена демо-счётом.
 #[tokio::test]
 async fn without_a_database_there_is_no_real_account() {
     let store = MemoryStore::new();
@@ -35,8 +28,6 @@ async fn postgres_keeps_demo_and_real_apart_and_migrates_old_rows() {
         .await
         .unwrap();
 
-    // Таблица в СТАРОЙ форме, со строкой — как на стенде до разделения:
-    // уникальность по (tenant, sub), колонки рода нет.
     sqlx::raw_sql(
         "DROP TABLE IF EXISTS identities;
          CREATE SEQUENCE IF NOT EXISTS identity_seq START 1000;
@@ -55,10 +46,8 @@ async fn postgres_keeps_demo_and_real_apart_and_migrates_old_rows() {
         .await
         .expect("подключение");
     store.init().await.expect("DDL поверх старой формы");
-    // Повторный init — идемпотентен.
     store.init().await.expect("DDL повторно");
 
-    // Старая строка стала демо-счётом, номер сохранён — данные не потеряны.
     let old_demo = store
         .resolve_account("apex-ru", "old-user", AccountKind::Demo)
         .await
@@ -74,7 +63,6 @@ async fn postgres_keeps_demo_and_real_apart_and_migrates_old_rows() {
         AccountKind::Demo
     );
 
-    // Реальный счёт того же человека — другой номер; повтор — тот же.
     assert_eq!(
         store
             .find_account("apex-ru", "old-user", AccountKind::Real)

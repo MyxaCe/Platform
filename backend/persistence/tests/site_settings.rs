@@ -1,9 +1,3 @@
-//! Настройки площадки (минимальное расстояние стопов): отдельная таблица, а не
-//! журнал счёта — условие отката на прежний образ.
-//!
-//! Живой прогон, как у остальных: `TEST_DATABASE_URL=postgres://... cargo test
-//! -p persistence -- --ignored --test-threads=1`.
-
 use persistence::{MemoryStore, Persistence};
 
 #[tokio::test]
@@ -43,7 +37,6 @@ async fn postgres_upserts_site_stops_and_survives_a_reconnect() {
     store.save_site_min_stop("stops-test-a", 120).await.unwrap();
     store.save_site_min_stop("stops-test-b", 0).await.unwrap();
 
-    // Новое подключение — то, что увидит процесс после рестарта.
     let again = persistence::PgStore::connect(&url).await.unwrap();
     let got: Vec<_> = again
         .load_site_min_stops()
@@ -60,7 +53,6 @@ async fn postgres_upserts_site_stops_and_survives_a_reconnect() {
         ]
     );
 
-    // Граница значений держится и самой таблицей, а не только ручкой.
     assert!(again
         .save_site_min_stop("stops-test-a", 10_001)
         .await

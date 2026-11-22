@@ -1,48 +1,3 @@
-//! # levels — изменение SL/TP у открытой позиции и отложенного ордера (17.11)
-//!
-//! * `PUT /deals/{id}/levels`   — уровни открытой позиции;
-//! * `PUT /pending/{id}/levels` — уровни отложенного ордера.
-//!
-//! Тело: `{"sl": число | null, "tp": число | null}` в сырых единицах цены
-//! инструмента. Число — поставить или сдвинуть, `null` — снять, поля нет —
-//! оставить как есть. Хотя бы одно поле обязано быть.
-//!
-//! Ответ `200 {"id", "sl", "tp", "changed"}` — какими уровни стали; `changed:
-//! false` — они уже были такими, записи в журнале нет (повтор безопасен).
-//!
-//! ## Отказы
-//!
-//! | код | `error` | когда |
-//! |---|---|---|
-//! | 409 | `sltp_edit_disabled` | запись выключена флагом (`SLTP_EDIT_ENABLED` не `1`) |
-//! | 400 | `bad_request` / `levels_required` / `invalid_level` | тело не разобрано / нет ни одного поля / уровень не положительный |
-//! | 404 | `unknown_position` / `unknown_pending` | нет такой позиции/ордера на СВОЁМ счёте (в т.ч. уже закрыта стопом) |
-//! | 422 | `stop_loss_too_close` / `take_profit_too_close` | ближе минимума площадки; `limit`, `min_distance`, `reference`, `min_stop_bps` — как у `POST /deals` |
-//! | 409 | `stop_loss_already_reached` / `take_profit_already_reached` | уровень уже «пробит» — сработал бы на ближайшем тике |
-//! | 403 | `account_frozen` | торговля заморожена оператором |
-//! | 423 | `account_quarantined` | счёт в карантине |
-//! | 403 | `identity_not_verified` | реальный счёт при закрытой торговле на реальных |
-//! | 503 | `no price yet` | у инструмента позиции ещё нет котировки |
-//!
-//! ## Цена отсчёта
-//!
-//! У позиции — **рыночная цена закрытия**: bid для покупки, ask для продажи.
-//! От неё считается минимум площадки, и уровень не должен быть уже пробит ни
-//! ею, ни марк-ценой, по которой идёт прогон триггеров. У ордера — его
-//! собственная цена (позиция родится там), как при постановке.
-//!
-//! Проверяется только **изменённый** уровень: оставленный как был человек не
-//! ставит заново.
-//!
-//! ## Выкат в два шага
-//!
-//! Запись нового вида (`position_levels_changed`, `pending_levels_changed`)
-//! прежний образ не разберёт. Поэтому **чтение** (свёртка) в этой сборке есть
-//! всегда, а **запись** — только под `SLTP_EDIT_ENABLED=1`. Шаг 1: выкатить с
-//! флагом 0 — откат на прежний образ ещё свободен, записей нового вида нет.
-//! Шаг 2: включить флаг. С первой записи откат возможен только на сборку не
-//! старше этой (с любым значением флага).
-
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -58,13 +13,10 @@ use super::{
     ErrResp, Gate,
 };
 
-/// Флаг записи из окружения: `1` или `true` — включено, всё прочее — нет.
 pub(crate) fn enabled_from_env(raw: Option<&str>) -> bool {
     matches!(raw.map(str::trim), Some("1") | Some("true"))
 }
 
-/// Поле, которое могло не прийти вовсе: `None` — не пришло (оставить),
-/// `Some(None)` — пришёл `null` (снять), `Some(Some(v))` — поставить.
 fn present<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -100,7 +52,6 @@ fn disabled() -> ApiErr {
     )
 }
 
-/// Общее начало обеих ручек: личность, флаг, тело, ворота реального счёта.
 async fn prologue(
     st: &AppState,
     headers: &HeaderMap,
@@ -125,8 +76,6 @@ async fn prologue(
     if !positive(req.sl) || !positive(req.tp) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid_level"));
     }
-    // Те же ворота, что у открытия: реальными средствами не торгуют, пока
-    // личность не проверена (TRM-44).
     if st.broker.lock().await.snapshot(who.user).profile.kind == AccountKind::Real
         && !st.real_trading_enabled
     {
@@ -135,7 +84,6 @@ async fn prologue(
     Ok((who, req))
 }
 
-/// Уровень, который проверяется: только изменённый и только поставленный.
 fn changed_level(new: Option<i64>, cur: Option<i64>) -> Option<i64> {
     if new != cur {
         new
@@ -144,7 +92,6 @@ fn changed_level(new: Option<i64>, cur: Option<i64>) -> Option<i64> {
     }
 }
 
-/// `PUT /deals/{id}/levels`.
 pub(crate) async fn edit_deal_levels(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -153,8 +100,6 @@ pub(crate) async fn edit_deal_levels(
 ) -> Result<Json<LevelsDto>, ApiErr> {
     let (who, req) = prologue(&st, &headers, body).await?;
     let user = who.user;
-    // Позиция ищется ДО операции: правка несуществующей позиции не должна
-    // заводить счёт (`with_account_gated` заводит его первым делом).
     let instrument = st
         .broker
         .lock()
@@ -164,7 +109,6 @@ pub(crate) async fn edit_deal_levels(
         .find(|p| p.id == id)
         .map(|p| p.instrument)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown_position"))?;
-    // Цены — до лока счёта, как у открытия: тикеры под своим локом.
     let (bid, ask, mark) = {
         let tickers = st.tickers.lock().await;
         let t = tickers
@@ -175,8 +119,6 @@ pub(crate) async fn edit_deal_levels(
     };
     let min_bps = st.stops.for_tenant(who.tenant.as_deref()).await;
     let (sl, tp, changed) = with_account_gated(&st, user, Origin::Client, Gate::NotFrozen, |b| {
-        // Под локом — заново: между поиском и этим местом позицию мог
-        // закрыть стоп. Тогда это «нет такой позиции», а не правка закрытой.
         let cur = b
             .positions(user)
             .into_iter()
@@ -184,7 +126,6 @@ pub(crate) async fn edit_deal_levels(
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown_position"))?;
         let sl = req.sl.unwrap_or(cur.sl);
         let tp = req.tp.unwrap_or(cur.tp);
-        // Цена закрытия стороны: покупку закрывают по bid, продажу — по ask.
         let quote = match cur.side {
             PosSide::Long => bid,
             PosSide::Short => ask,
@@ -212,7 +153,6 @@ pub(crate) async fn edit_deal_levels(
     }))
 }
 
-/// `PUT /pending/{id}/levels`.
 pub(crate) async fn edit_pending_levels(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -240,7 +180,6 @@ pub(crate) async fn edit_pending_levels(
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown_pending"))?;
         let sl = req.sl.unwrap_or(cur.sl);
         let tp = req.tp.unwrap_or(cur.tp);
-        // У ордера отсчёт — от его цены, как при постановке.
         stops::check(
             cur.side,
             cur.price,
@@ -285,7 +224,6 @@ mod unit {
     }
 }
 
-// ============ Проводка: через роутер, монитор и хранилище ===================
 #[cfg(test)]
 mod wiring {
     use std::sync::Arc;
@@ -329,8 +267,6 @@ mod wiring {
         (status, v)
     }
 
-    /// Котировка инструмента 1: bid / ask / last раздельно — отсчёт у позиции
-    /// от цены ЗАКРЫТИЯ стороны, и проверка обязана это различать.
     pub(crate) async fn quote(st: &AppState, bid: i64, ask: i64, last: i64) {
         st.tickers.lock().await.insert(
             1,
@@ -392,8 +328,6 @@ mod wiring {
         (r.0, r.1["error"].as_str())
     }
 
-    // ---- Флаг ---------------------------------------------------------------
-
     #[tokio::test]
     async fn with_the_flag_off_the_edit_is_refused_and_nothing_is_written() {
         let st = build_state();
@@ -427,8 +361,6 @@ mod wiring {
         assert_eq!(acct["sltp_edit"], true);
     }
 
-    // ---- Позиция: поставить, сдвинуть, снять --------------------------------
-
     #[tokio::test]
     async fn set_move_and_remove_on_an_open_position() {
         let st = on(build_state());
@@ -451,7 +383,6 @@ mod wiring {
         );
         assert_eq!(deal(&app, id).await["sl"], PX - 50_000);
 
-        // Сдвинуть только стоп: тейк остаётся.
         let (s, b) = send(&app, "PUT", &uri, Some(json!({"sl": PX - 20_000}))).await;
         assert_eq!(s, StatusCode::OK, "{b}");
         assert_eq!(
@@ -459,13 +390,11 @@ mod wiring {
             (Some(PX - 20_000), Some(PX + 80_000))
         );
 
-        // Повтор — 200 без записи.
         let n = kinds(&st).await.len();
         let (s, b) = send(&app, "PUT", &uri, Some(json!({"sl": PX - 20_000}))).await;
         assert_eq!((s, b["changed"].as_bool()), (StatusCode::OK, Some(false)));
         assert_eq!(kinds(&st).await.len(), n, "повтор не пишет");
 
-        // Снять тейк.
         let (s, b) = send(&app, "PUT", &uri, Some(json!({"tp": null}))).await;
         assert_eq!(s, StatusCode::OK, "{b}");
         assert_eq!(deal(&app, id).await["tp"], Value::Null);
@@ -520,19 +449,15 @@ mod wiring {
         }
     }
 
-    // ---- Проверки: минимум площадки и «уже пробит» --------------------------
-
     #[tokio::test]
     async fn the_minimum_is_measured_from_the_closing_quote() {
         let mut st = on(build_state());
-        st.stops = Arc::new(stops::StopSettings::new(50)); // 0.5 %
-                                                           // bid 49 900.00, ask 50 100.00, last 50 000.00.
+        st.stops = Arc::new(stops::StopSettings::new(50));
         quote(&st, PX - 10_000, PX + 10_000, PX).await;
         let app = router(st.clone());
         let long = open(&app, "buy").await;
         let short = open(&app, "sell").await;
 
-        // Покупку закрывают по bid: 0.5 % от 49 900.00 = 249.50 → SL ≤ 49 650.50.
         let (s, b) = send(
             &app,
             "PUT",
@@ -555,7 +480,6 @@ mod wiring {
         .await;
         assert_eq!(s, StatusCode::OK, "ровно на границе — можно");
 
-        // Продажу закрывают по ask: TP ≤ ask − d.
         let (s, b) = send(
             &app,
             "PUT",
@@ -566,7 +490,6 @@ mod wiring {
         assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{b}");
         assert_eq!(b["error"], "take_profit_too_close");
         assert_eq!(b["reference"], PX + 10_000, "от ask");
-        // Снять — всегда можно: проверять нечего.
         let (s, _) = send(
             &app,
             "PUT",
@@ -610,8 +533,6 @@ mod wiring {
         assert_eq!(kinds(&st).await, before);
     }
 
-    // ---- Ворота счёта -------------------------------------------------------
-
     #[tokio::test]
     async fn frozen_quarantined_and_foreign_are_refused() {
         let st = on(build_state());
@@ -620,13 +541,11 @@ mod wiring {
         let id = open(&app, "buy").await;
         let uri = format!("/deals/{id}/levels");
 
-        // Чужая или несуществующая позиция.
         let r = send(&app, "PUT", "/deals/999/levels", Some(json!({"sl": 1}))).await;
         assert_eq!(code(&r), (StatusCode::NOT_FOUND, Some("unknown_position")));
         let r = send(&app, "PUT", "/pending/999/levels", Some(json!({"sl": 1}))).await;
         assert_eq!(code(&r), (StatusCode::NOT_FOUND, Some("unknown_pending")));
 
-        // Заморозка оператором — запись в ленте, как в бою.
         {
             let mut js = st.journals.lock().await;
             let j = js.get_mut(&DEFAULT_USER).unwrap();
@@ -659,15 +578,13 @@ mod wiring {
         assert!(kinds(&st).await.is_empty());
     }
 
-    // ---- Отложенный ордер ---------------------------------------------------
-
     #[tokio::test]
     async fn pending_levels_measure_from_the_order_price_and_ride_into_the_fill() {
         let mut st = on(build_state());
-        st.stops = Arc::new(stops::StopSettings::new(100)); // 1 %
+        st.stops = Arc::new(stops::StopSettings::new(100));
         quote(&st, PX, PX, PX).await;
         let app = router(st.clone());
-        let price = PX - 100_000; // лимит на покупку 49 000.00
+        let price = PX - 100_000;
         let (s, o) = send(
             &app,
             "POST",
@@ -679,7 +596,6 @@ mod wiring {
         let id = o["id"].as_u64().unwrap();
         let uri = format!("/pending/{id}/levels");
 
-        // 1 % от цены ордера (не от рынка) = 490.00.
         let (s, b) = send(&app, "PUT", &uri, Some(json!({"sl": price - 48_999}))).await;
         assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{b}");
         assert_eq!(
@@ -709,7 +625,6 @@ mod wiring {
             price + 60_000
         )));
 
-        // Рынок дошёл до ордера — позиция рождается с новыми уровнями.
         quote(&st, price, price, price).await;
         monitor_tick(&st).await;
         let (_, deals) = send(&app, "GET", "/deals", None).await;
@@ -717,8 +632,6 @@ mod wiring {
         assert_eq!(deals[0]["tp"], price + 60_000);
         reconciled(&app).await;
     }
-
-    // ---- Движок стопов и гонка с закрытием ----------------------------------
 
     #[tokio::test]
     async fn the_monitor_fires_on_the_new_level_immediately() {
@@ -740,7 +653,6 @@ mod wiring {
         assert_eq!(closed[0]["level"], PX - 1_000, "закрыта по новому уровню");
         let ks = kinds(&st).await;
         assert!(ks.last().unwrap().contains("cause=stop_loss"), "{ks:?}");
-        // Правка уже закрытой позиции — «нет такой», а не правка.
         let r = send(
             &app,
             "PUT",
@@ -752,9 +664,6 @@ mod wiring {
         reconciled(&app).await;
     }
 
-    /// Правки и прогон триггеров наперегонки: каждая правка либо применилась
-    /// до закрытия, либо получила отказ — и лента в конце сходится, счёт не в
-    /// карантине, правки после закрытия в ленте нет.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn edits_racing_a_stop_out_leave_a_consistent_journal() {
         for round in 0..20 {
@@ -792,8 +701,6 @@ mod wiring {
             });
             for t in tasks {
                 let s = t.await.unwrap();
-                // OK — успела до закрытия; 404 — позиция уже закрыта;
-                // 409 — цена уже ушла за уровень (уровень «пробит»).
                 assert!(
                     [StatusCode::OK, StatusCode::NOT_FOUND, StatusCode::CONFLICT].contains(&s),
                     "раунд {round}: {s}"
@@ -824,8 +731,6 @@ mod wiring {
         }
     }
 
-    /// Та же гонка у закрытия по команде: она существовала до правки SL/TP
-    /// (17.11) и чинится тем же местом — операция не сливает чужую очередь.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_close_racing_a_stop_out_does_not_quarantine_the_account() {
         for round in 0..20 {
@@ -869,19 +774,12 @@ mod wiring {
         }
     }
 
-    // ---- Откат: лента с записью нового вида читается при выключенном флаге --
-
-    /// **Доказательство условия отката.** Шаг 2 (флаг 1) пишет записи нового
-    /// вида; откат после этого — на ЭТУ сборку с флагом 0. Она обязана
-    /// поднять такую ленту без карантина и с теми же уровнями, а движок —
-    /// работать по ним. Запись при этом выключена.
     #[tokio::test]
     async fn a_journal_with_level_records_restores_with_the_flag_off() {
         let store = Arc::new(persistence::MemoryStore::new());
         rollback_scenario(store).await;
     }
 
-    /// Сценарий отката — общий для хранилища в памяти и живого PostgreSQL.
     pub(crate) async fn rollback_scenario(store: Arc<dyn persistence::Persistence>) {
         let (deal_id, order_id) = {
             let st = on(build_state_with(store.clone()));
@@ -916,7 +814,6 @@ mod wiring {
             (id, oid)
         };
 
-        // Перезапуск: то же хранилище, ФЛАГ ВЫКЛЮЧЕН.
         let st = build_state_with(store.clone());
         assert!(!st.sltp_edit_enabled, "предпосылка: флаг 0");
         restore_state(&st).await.expect("подъём обязан пройти");
@@ -944,7 +841,6 @@ mod wiring {
         assert_eq!(list[0]["id"], order_id);
         assert_eq!(list[0]["sl"], PX + 60_000);
 
-        // Запись выключена, торговля — нет.
         let r = send(
             &app,
             "PUT",
@@ -953,7 +849,6 @@ mod wiring {
         )
         .await;
         assert_eq!(code(&r), (StatusCode::CONFLICT, Some("sltp_edit_disabled")));
-        // Движок стопов работает по поднятым уровням.
         quote(&st, PX - 3_000, PX - 3_000, PX - 3_000).await;
         monitor_tick(&st).await;
         let (_, closed) = send(&app, "GET", "/deals/closed", None).await;
@@ -961,15 +856,11 @@ mod wiring {
         reconciled(&app).await;
         assert!(!st.quarantined.lock().await.contains(&DEFAULT_USER));
 
-        // И третий подъём — после закрытия по поднятому уровню.
         let st3 = build_state_with(store);
         restore_state(&st3).await.expect("подъём");
         assert!(!st3.quarantined.lock().await.contains(&DEFAULT_USER));
     }
 
-    /// То же на живом PostgreSQL: запись нового вида проходит через настоящий
-    /// SQL (канон, отпечаток, триггер неизменяемости) и поднимается сборкой
-    /// с выключенным флагом без карантина.
     #[tokio::test]
     #[ignore = "нужна живая БД: TEST_DATABASE_URL=postgres://... cargo test -p gateway -- --ignored"]
     async fn postgres_journal_with_level_records_restores_with_the_flag_off() {
@@ -979,8 +870,6 @@ mod wiring {
             .await
             .expect("подключение");
         persistence::Persistence::init(&store).await.expect("DDL");
-        // Счёт автономного терминала один (`DEFAULT_USER`): чистим его строки,
-        // иначе подъём прочитал бы чужую историю прошлого прогона.
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect(&url)

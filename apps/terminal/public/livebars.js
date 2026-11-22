@@ -1,9 +1,7 @@
 'use strict';
 
 (function () {
-  /**
-   * @typedef {{ time: number, open: number, high: number, low: number, close: number, volume: number }} Bar
-   */
+  /** @typedef {{ time: number, open: number, high: number, low: number, close: number, volume: number }} Bar */
 
   var CAP = 2000;
 

@@ -1,24 +1,13 @@
-//! Конверсия денег между `i128` (домен) и `NUMERIC(38,0)` (БД).
-//!
-//! Почему это отдельный, придирчивый модуль: деньги в проекте — целые 128-битные
-//! (`Amount(i128)` по ADR-006, `broker::Cents`), а `sqlx` отдаёт `NUMERIC` как
-//! [`BigDecimal`]. Прямого маппинга нет, и любая небрежность здесь — это тихая потеря
-//! копеек. Красная линия №1: при выходе за диапазон или ненулевой дробной части —
-//! **ошибка, а не округление**.
-
 use std::str::FromStr;
 
 use bigdecimal::BigDecimal;
 
 use crate::StoreError;
 
-/// `i128` → `NUMERIC`. Точно: через десятичную запись, без плавающей арифметики.
 pub fn to_numeric(v: i128) -> BigDecimal {
-    // i128 всегда печатается как целое без экспоненты, поэтому разбор не может упасть.
     BigDecimal::from_str(&v.to_string()).expect("i128 всегда валидный BigDecimal")
 }
 
-/// `NUMERIC` → `i128`. Ошибка, если значение дробное или не влезает в `i128`.
 pub fn from_numeric(bd: &BigDecimal) -> Result<i128, StoreError> {
     let truncated = bd.with_scale(0);
     if &truncated != bd {
@@ -51,7 +40,6 @@ mod tests {
 
     #[test]
     fn fractional_is_rejected_not_rounded() {
-        // Тихое округление здесь означало бы потерю копеек — только ошибка.
         let bd = BigDecimal::from_str("100.5").unwrap();
         assert!(from_numeric(&bd).is_err());
         let bd = BigDecimal::from_str("-0.01").unwrap();
@@ -60,15 +48,13 @@ mod tests {
 
     #[test]
     fn trailing_zeros_are_still_integer() {
-        // NUMERIC(38,0) может вернуться со scale > 0 и нулями в дробной части —
-        // это по-прежнему целое, отвергать нельзя.
         let bd = BigDecimal::from_str("100.00").unwrap();
         assert_eq!(from_numeric(&bd).unwrap(), 100);
     }
 
     #[test]
     fn out_of_range_is_rejected() {
-        let too_big = BigDecimal::from_str("170141183460469231731687303715884105728").unwrap(); // i128::MAX + 1
+        let too_big = BigDecimal::from_str("170141183460469231731687303715884105728").unwrap();
         assert!(from_numeric(&too_big).is_err());
     }
 }

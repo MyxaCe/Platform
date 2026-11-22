@@ -1,32 +1,3 @@
-//! # stops — минимальное расстояние стоп-лосса и тейк-профита от цены
-//!
-//! Настройка **площадки** (сайта), задаётся из его админки:
-//!
-//! * `PUT /internal/sites/{tenant}/settings/stops` `{"min_stop_bps": N}` → `200 {"min_stop_bps": N}`
-//! * `GET /internal/sites/{tenant}/settings/stops` → `200 {"min_stop_bps": N}`
-//!
-//! `N` — целое `0..=10000`, базисные пункты от текущей цены (10 bps = 0.1 %).
-//! `0` — ограничения нет. Авторизация — та же, что у денежных ручек
-//! (`X-Internal-Token` = `INTERNAL_MONEY_TOKEN`): нет заголовка — `401`,
-//! чужой — `403`, секрет не задан — ручек нет (`404`).
-//!
-//! До первой записи площадки действует `MIN_STOP_BPS` окружения (или `0`).
-//!
-//! ## Почему не запись журнала счёта
-//!
-//! Минимум — свойство площадки, а не событие счёта, и хранится отдельной
-//! строкой настроек (`site_settings`). Это ещё и условие отката: новый вид
-//! записи в журнале счёта прежний образ не разберёт и отправит счёт в
-//! карантин, а незнакомую таблицу он просто не прочитает.
-//!
-//! ## Где проверяется
-//!
-//! На сервере, при открытии позиции (`POST /deals`) и размещении лимитного
-//! ордера (`POST /pending`) — это все пути, которыми SL/TP попадают в брокер.
-//! Отсчёт — от **рыночной** цены стороны сделки (ask для покупки, bid для
-//! продажи), у лимитного ордера — от цены ордера. Фронт берёт значение из
-//! `/account` (`min_stop_bps`) и подставляет уровни сам, но граница — здесь.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -43,11 +14,8 @@ use broker::PosSide;
 
 use super::AppState;
 
-/// Верхняя граница: 10 000 bps = 100 % цены.
 pub const MAX_MIN_STOP_BPS: i64 = 10_000;
 
-/// Минимум стопов по площадкам. Значение площадки, которой не назначали, —
-/// `default_bps` из окружения.
 pub struct StopSettings {
     default_bps: i64,
     by_tenant: Mutex<HashMap<String, i64>>,
@@ -61,7 +29,6 @@ impl StopSettings {
         }
     }
 
-    /// Действующий минимум. Без площадки (автономный терминал) — умолчание.
     pub async fn for_tenant(&self, tenant: Option<&str>) -> i64 {
         match tenant {
             Some(t) => self
@@ -79,7 +46,6 @@ impl StopSettings {
         self.by_tenant.lock().await.insert(tenant.to_string(), bps);
     }
 
-    /// Поднять назначенные площадками значения из хранилища (на старте).
     pub async fn load(&self, rows: Vec<(String, i64)>) {
         let mut m = self.by_tenant.lock().await;
         for (t, b) in rows {
@@ -88,9 +54,6 @@ impl StopSettings {
     }
 }
 
-/// `MIN_STOP_BPS` из окружения. Не задано — `0`; неразборчивое или вне
-/// `0..=10000` — тоже `0`, и громко: испорченная настройка не должна молча
-/// закрыть торговлю со стопами.
 pub(crate) fn default_from_env(raw: Option<&str>) -> i64 {
     match raw.map(str::trim).filter(|s| !s.is_empty()) {
         None => 0,
@@ -118,7 +81,6 @@ struct StopsResp {
     min_stop_bps: i64,
 }
 
-/// Лишние поля (оператор, причина) не мешают: сайт вправе прислать больше.
 #[derive(Deserialize)]
 struct StopsReq {
     min_stop_bps: serde_json::Value,
@@ -174,8 +136,6 @@ async fn put_stops(
             )
         }
     };
-    // Целое, а не «число, которое округлим»: 12.5 bps — не то, что можно
-    // молча превратить в 12 или 13.
     let bps = match req.min_stop_bps.as_i64() {
         Some(v) if (0..=MAX_MIN_STOP_BPS).contains(&v) => v,
         _ => {
@@ -186,8 +146,6 @@ async fn put_stops(
             )
         }
     };
-    // Сначала хранилище, потом память: «записано» без записи обнаружилось бы
-    // только после рестарта.
     if let Err(e) = st.store.save_site_min_stop(&tenant, bps).await {
         eprintln!("[stops] минимум стопов площадки {tenant} не записан: {e}");
         return fail(
@@ -204,12 +162,6 @@ async fn put_stops(
     (StatusCode::OK, Json(StopsResp { min_stop_bps: bps })).into_response()
 }
 
-// ============================ Проверка ======================================
-
-/// Минимальное расстояние в сырых единицах цены: `ceil(ref × bps / 10000)`.
-///
-/// Вверх, а не вниз: уровень ровно на этом расстоянии допустим, а округление
-/// вниз пустило бы уровень ближе заявленного минимума.
 pub fn min_distance(reference: i64, bps: i64) -> i64 {
     if bps <= 0 || reference <= 0 {
         return 0;
@@ -219,21 +171,15 @@ pub fn min_distance(reference: i64, bps: i64) -> i64 {
     i64::try_from(d).unwrap_or(i64::MAX)
 }
 
-/// Отказ: уровень ближе минимума. Несёт числа, по которым человек правит поле.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TooClose {
-    /// `stop_loss_too_close` | `take_profit_too_close`.
     pub code: &'static str,
     pub min_stop_bps: i64,
-    /// Минимальное расстояние в сырых единицах цены.
     pub min_distance: i64,
-    /// Ближайший допустимый уровень (сырые единицы).
     pub limit: i64,
-    /// Цена, от которой отсчитано.
     pub reference: i64,
 }
 
-/// Проверить SL/TP против минимума. `None` у уровня — уровня нет, проверять нечего.
 pub fn check(
     side: PosSide,
     reference: i64,
@@ -273,7 +219,6 @@ pub fn check(
     Ok(())
 }
 
-/// Общее состояние модуля для `AppState`.
 pub(crate) fn from_env() -> Arc<StopSettings> {
     let d = default_from_env(std::env::var("MIN_STOP_BPS").ok().as_deref());
     if d > 0 {
@@ -299,7 +244,6 @@ mod unit {
     #[test]
     fn buy_and_sell_mirror_each_other() {
         let px = 10_000;
-        // 100 bps от 10000 = 100.
         assert!(check(PosSide::Long, px, Some(9_900), Some(10_100), 100).is_ok());
         assert_eq!(
             check(PosSide::Long, px, Some(9_901), None, 100)
@@ -322,7 +266,6 @@ mod unit {
                 .code,
             "take_profit_too_close"
         );
-        // Без уровней и при нуле — проверять нечего.
         assert!(check(PosSide::Long, px, None, None, 100).is_ok());
         assert!(check(PosSide::Long, px, Some(9_999), Some(10_001), 0).is_ok());
     }

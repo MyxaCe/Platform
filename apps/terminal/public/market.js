@@ -11,12 +11,21 @@
   const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
   const HORIZON_DAYS = 21;
 
-  /** @param {any} v @returns {v is number} */
+  /**
+   * @param {any} v
+   * @returns {v is number}
+   */
   const isMs = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0;
-  /** @param {any} v @returns {v is number} */
+  /**
+   * @param {any} v
+   * @returns {v is number}
+   */
   const isRaw = (v) => Number.isInteger(v) && v > 0;
 
-  /** @param {any} it @returns {State} */
+  /**
+   * @param {any} it
+   * @returns {State}
+   */
   function state(it) {
     const m = it && it.market;
     if (!m || typeof m !== 'object') return { status: 'open', next_open: null, reason: null, tradable: true };
@@ -30,12 +39,18 @@
     };
   }
 
-  /** @param {any} it @returns {boolean} */
+  /**
+   * @param {any} it
+   * @returns {boolean}
+   */
   function closeOnly(it) {
     return !!it && it.mode === 'closeOnly';
   }
 
-  /** @param {any} it @returns {'closed'|'halted'|'untradable'|'closeOnly'|null} */
+  /**
+   * @param {any} it
+   * @returns {'closed'|'halted'|'untradable'|'closeOnly'|null}
+   */
   function blockOpen(it) {
     if (!it) return null;
     const s = state(it);
@@ -46,26 +61,38 @@
     return null;
   }
 
-  /** @param {any} it @returns {'closeOnly'|null} */
+  /**
+   * @param {any} it
+   * @returns {'closeOnly'|null}
+   */
   function blockPending(it) {
     return closeOnly(it) ? 'closeOnly' : null;
   }
 
-  /** @param {any} it @returns {'closed'|'halted'|null} */
+  /**
+   * @param {any} it
+   * @returns {'closed'|'halted'|null}
+   */
   function blockClose(it) {
     if (!it) return null;
     const s = state(it).status;
     return s === 'closed' || s === 'halted' ? s : null;
   }
 
-  /** @param {string} tz @returns {Intl.DateTimeFormat} */
+  /**
+   * @param {string} tz
+   * @returns {Intl.DateTimeFormat}
+   */
   function partsFormat(tz) {
     return new Intl.DateTimeFormat('en-US', {
       timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
     });
   }
 
-  /** @param {number} ts @param {Intl.DateTimeFormat} f */
+  /**
+   * @param {number} ts
+   * @param {Intl.DateTimeFormat} f
+   */
   function zoned(ts, f) {
     /** @type {Record<string, number>} */
     const p = {};
@@ -73,13 +100,23 @@
     return { y: p.year, m: p.month, d: p.day, h: p.hour % 24, mi: p.minute, s: p.second };
   }
 
-  /** @param {number} ts @param {Intl.DateTimeFormat} f */
+  /**
+   * @param {number} ts
+   * @param {Intl.DateTimeFormat} f
+   */
   function offset(ts, f) {
     const z = zoned(ts, f);
     return Date.UTC(z.y, z.m - 1, z.d, z.h, z.mi, z.s) - Math.floor(ts / 1000) * 1000;
   }
 
-  /** @param {number} y @param {number} m @param {number} d @param {number} h @param {number} mi @param {Intl.DateTimeFormat} f */
+  /**
+   * @param {number} y
+   * @param {number} m
+   * @param {number} d
+   * @param {number} h
+   * @param {number} mi
+   * @param {Intl.DateTimeFormat} f
+   */
   function localToUtc(y, m, d, h, mi, f) {
     const guess = Date.UTC(y, m - 1, d, h, mi);
     const o1 = offset(guess, f);
@@ -88,7 +125,10 @@
     return o2 === o1 ? at : guess - o2;
   }
 
-  /** @param {any} s @returns {{ day: number, h: number, mi: number } | null} */
+  /**
+   * @param {any} s
+   * @returns {{ day: number, h: number, mi: number } | null}
+   */
   function parseSlot(s) {
     const m = /^\s*([a-z]{3})\s+(\d{1,2}):(\d{2})\s*$/i.exec(typeof s === 'string' ? s : '');
     if (!m) return null;
@@ -98,7 +138,11 @@
     return { day, h, mi };
   }
 
-  /** @param {Session|null|undefined} session @param {number} now @returns {number|null} */
+  /**
+   * @param {Session|null|undefined} session
+   * @param {number} now
+   * @returns {number|null}
+   */
   function fromSession(session, now) {
     if (!session || typeof session !== 'object' || !Array.isArray(session.weekly) || !session.weekly.length) return null;
     /** @type {{ day: number, h: number, mi: number }[]} */
@@ -124,7 +168,11 @@
     return null;
   }
 
-  /** @param {any} it @param {number} now @returns {number|null} */
+  /**
+   * @param {any} it
+   * @param {number} now
+   * @returns {number|null}
+   */
   function nextOpen(it, now) {
     const s = state(it);
     if (s.status !== 'closed') return null;
@@ -132,7 +180,13 @@
     return fromSession(it && it.session, now);
   }
 
-  /** @param {number} ms @param {string} locale @param {number} now @param {string} [timeZone] @returns {string} */
+  /**
+   * @param {number} ms
+   * @param {string} locale
+   * @param {number} now
+   * @param {string} [timeZone]
+   * @returns {string}
+   */
   function when(ms, locale, now, timeZone) {
     const day = (/** @type {number} */ t) => new Date(t).toLocaleDateString('en-CA', { timeZone });
     const time = { hour: /** @type {'2-digit'} */ ('2-digit'), minute: /** @type {'2-digit'} */ ('2-digit'), hourCycle: /** @type {'h23'} */ ('h23'), timeZone };
@@ -140,7 +194,10 @@
     return new Date(ms).toLocaleString(locale, Object.assign({ weekday: /** @type {'short'} */ ('short'), day: /** @type {'numeric'} */ ('numeric'), month: /** @type {'short'} */ ('short') }, time));
   }
 
-  /** @param {any} x @returns {Quote|null} */
+  /**
+   * @param {any} x
+   * @returns {Quote|null}
+   */
   function quoteOf(x) {
     if (!x || typeof x !== 'object' || x.type !== 'quote' || !Number.isInteger(x.instrument)) return null;
     const bid = isRaw(x.bid) ? x.bid : null;
@@ -150,19 +207,29 @@
     return { instrument: x.instrument, bid, ask, price, time: isMs(x.time) ? x.time : null };
   }
 
-  /** @param {any} x @returns {{ instrument: number, market: State } | null} */
+  /**
+   * @param {any} x
+   * @returns {{ instrument: number, market: State } | null}
+   */
   function statusOf(x) {
     if (!x || typeof x !== 'object' || x.type !== 'market' || !Number.isInteger(x.instrument)) return null;
     if (!STATUSES.includes(x.status)) return null;
     return { instrument: x.instrument, market: state({ market: x }) };
   }
 
-  /** @param {any} v @returns {string} */
+  /**
+   * @param {any} v
+   * @returns {string}
+   */
   function normSymbol(v) {
     return typeof v === 'string' ? v.toUpperCase().replace(/[^A-Z0-9]/g, '') : '';
   }
 
-  /** @param {any[]|null|undefined} list @param {any} want @returns {number|null} */
+  /**
+   * @param {any[]|null|undefined} list
+   * @param {any} want
+   * @returns {number|null}
+   */
   function matchSymbol(list, want) {
     const n = normSymbol(want);
     if (!n || !Array.isArray(list)) return null;
@@ -176,7 +243,10 @@
     return null;
   }
 
-  /** @param {any} it @returns {[string, string]} */
+  /**
+   * @param {any} it
+   * @returns {[string, string]}
+   */
   function pair(it) {
     if (!it || typeof it.symbol !== 'string') return ['', ''];
     const s = it.symbol;

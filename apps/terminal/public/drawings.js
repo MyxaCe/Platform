@@ -1,24 +1,3 @@
-/* ============================================================================
- * drawings.js — инструменты рисования на графике (оверлей-canvas над Lightweight
- * Charts). Переиспользуемый модуль по ADR-015:
- *
- *   const draw = Drawings.mount(chartWrapEl, {
- *     chart,                    // экземпляр Lightweight Charts
- *     series: () => mainSeries, // текущая основная серия (пересоздаётся при смене типа графика)
- *   });
- *   draw.clear();               // сбросить объекты (вызывать при перезагрузке данных)
- *   draw.destroy();
- *
- * Модуль сам создаёт свой canvas и панель инструментов внутри `root` и сам возит свои
- * стили — странице не нужно ни размечать элементы, ни знать их id.
- *
- * Якоря объектов хранятся в координатах данных (logical-индекс бара + цена), поэтому
- * рисунки двигаются/масштабируются вместе с графиком. При перезагрузке данных (смена
- * инструмента/ТФ) хост зовёт `clear()`: logical-индексы после setData невалидны.
- *
- * Примечание по имени: зависимости названы `cfg`, а не `ctx`, потому что `ctx` внутри
- * занято под 2D-контекст канвы.
- * ========================================================================== */
 (function () {
   const CSS = `
 .drawlayer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
@@ -58,7 +37,6 @@
   const ctx = cvs.getContext('2d');
   const ACCENT = '#f0b90b';
 
-  // --- Определения инструментов: сколько точек нужно, подпись, иконка ---------
   const TOOLS = {
     trend:     { pts: 2, tip: 'Trend line' },
     ray:       { pts: 2, tip: 'Ray' },
@@ -72,11 +50,9 @@
     channel:   { pts: 3, tip: 'Parallel channel' },
     pitchfork: { pts: 3, tip: 'Pitchfork' },
   };
-  // Порядок кнопок в тулбаре (null = разделитель).
   const ORDER = ['cursor', null, 'trend', 'ray', 'extended', 'info', 'angle', null,
     'hline', 'hray', 'vline', 'cross', null, 'channel', 'pitchfork', null, 'undo', 'clear'];
 
-  // Компактные SVG-иконки (16×16, stroke=currentColor).
   const svg = (inner) => `<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
   const ICON = {
     cursor: svg('<path d="M3 2l9 5-4 1-1 5z"/>'),
@@ -95,12 +71,10 @@
     clear: svg('<path d="M3 5h10M6 5V3h4v2M5 5l1 9h4l1-9"/>'),
   };
 
-  // --- Состояние -------------------------------------------------------------
-  let active = null;      // текущий инструмент (null = курсор)
-  let pending = [];       // уже поставленные точки текущего объекта
-  const drawings = [];    // готовые объекты {type, pts:[{logical,price}]}
+  let active = null;
+  let pending = [];
+  const drawings = [];
 
-  // --- Тулбар ----------------------------------------------------------------
   const btns = {};
   for (const key of ORDER) {
     if (key === null) { const sep = document.createElement('div'); sep.className = 'drawsep'; bar.appendChild(sep); continue; }
@@ -126,7 +100,6 @@
     redraw();
   }
 
-  // --- Преобразования координат ---------------------------------------------
   const ts = () => chart.timeScale();
   function toPx(a) {
     const x = ts().logicalToCoordinate(a.logical);
@@ -141,7 +114,6 @@
     return (logical == null || price == null) ? null : { logical, price };
   }
 
-  // --- Геометрия рисования ---------------------------------------------------
   const W = () => host.clientWidth, H = () => host.clientHeight;
   const BIG = 6000;
   function stroke(fn, color, width, dash) {
@@ -162,7 +134,7 @@
     if (pts.some((p) => !p)) return;
     const t = d.type, a = pts[0], b = pts[1], c = pts[2];
     const oneShot = t === 'hline' || t === 'hray' || t === 'vline' || t === 'cross';
-    if (!oneShot && !b) return; // двух/трёхточечные не рисуем, пока нет второй точки
+    if (!oneShot && !b) return;
     switch (t) {
       case 'trend': seg(a, b); dot(a); dot(b); break;
       case 'ray': { const dd = dir(a, b); seg(a, extend(a, dd, BIG)); dot(a); dot(b); break; }
@@ -202,9 +174,9 @@
         if (!c) { seg(a, b); dot(a); dot(b); break; }
         const mid = { x: (b.x + c.x) / 2, y: (b.y + c.y) / 2 };
         const dm = dir(a, mid);
-        seg(a, mid); seg(mid, extend(mid, dm, BIG));       // медиана
-        seg(b, extend(b, dm, BIG));                        // верхняя вилка
-        seg(c, extend(c, dm, BIG));                        // нижняя вилка
+        seg(a, mid); seg(mid, extend(mid, dm, BIG));
+        seg(b, extend(b, dm, BIG));
+        seg(c, extend(c, dm, BIG));
         stroke(() => { ctx.moveTo(b.x, b.y); ctx.lineTo(c.x, c.y); }, ACCENT, 1, [4, 3]);
         dot(a); dot(b); dot(c);
         break;
@@ -213,7 +185,6 @@
     }
   }
 
-  // --- Отрисовка всего слоя --------------------------------------------------
   function resize() {
     const w = W(), h = H(), dpr = window.devicePixelRatio || 1;
     if (cvs.width !== Math.round(w * dpr) || cvs.height !== Math.round(h * dpr)) {
@@ -230,7 +201,6 @@
     else if (active && pending.length) render({ type: active, pts: pending });
   }
 
-  // --- Ввод мышью ------------------------------------------------------------
   cvs.addEventListener('mousedown', (e) => {
     if (!active) return;
     const a = fromMouse(e.offsetX, e.offsetY); if (!a) return;
@@ -242,12 +212,10 @@
     if (!active || !pending.length) return;
     redraw(fromMouse(e.offsetX, e.offsetY));
   });
-  // ПКМ / Esc — отмена текущего объекта или возврат к курсору.
   cvs.addEventListener('contextmenu', (e) => { if (active) { e.preventDefault(); setActive(null); } });
   const onKey = (e) => { if (e.key === 'Escape' && active) setActive(null); };
   window.addEventListener('keydown', onKey);
 
-  // --- Перерисовка при изменениях графика ------------------------------------
   ts().subscribeVisibleLogicalRangeChange(() => redraw());
   const ro = new ResizeObserver(() => redraw());
   ro.observe(host);
@@ -255,9 +223,7 @@
   redraw();
 
   return {
-    /** Сбросить все объекты. Хост зовёт при перезагрузке данных графика (смена инструмента/ТФ). */
     clear() { drawings.length = 0; pending = []; setActive(null); },
-    /** Снять слушатели и убрать свой DOM. */
     destroy() {
       ro.disconnect();
       window.removeEventListener('keydown', onKey);

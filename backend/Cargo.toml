@@ -1,6 +1,3 @@
-# Cargo workspace — бэкенд терминала.
-# domain — общий словарь; broker — бумажный брокер (позиции/маржа/P&L на данных Binance);
-# persistence — durable-хранилище счетов; gateway — сетевой шлюз (REST/WS + фид Binance).
 [workspace]
 resolver = "2"
 members = ["domain", "broker", "persistence", "gateway"]

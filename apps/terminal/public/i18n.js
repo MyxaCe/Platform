@@ -1482,13 +1482,19 @@
 
   const own = (/** @type {object} */ o, /** @type {string} */ k) => Object.prototype.hasOwnProperty.call(o, k);
 
-  /** @param {any} v @returns {Lang|null} */
+  /**
+   * @param {any} v
+   * @returns {Lang|null}
+   */
   function code(v) {
     const s = String(v || '').trim().toLowerCase();
     return /** @type {Lang[]} */ (LANGS).find((l) => l === s) || null;
   }
 
-  /** @param {any} v @returns {Lang|null} */
+  /**
+   * @param {any} v
+   * @returns {Lang|null}
+   */
   function norm(v) {
     return code(String(v || '').toLowerCase().slice(0, 2));
   }
@@ -1511,7 +1517,10 @@
     return requested(src) || 'ru';
   }
 
-  /** @param {any} raw @returns {SiteLanguages|null} */
+  /**
+   * @param {any} raw
+   * @returns {SiteLanguages|null}
+   */
   function siteLanguages(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const src = [raw, raw.site, raw.brand].find((o) => o && typeof o === 'object' && Array.isArray(o.languages));
@@ -1537,7 +1546,7 @@
 
   /** @type {string|null} */
   let saved = null;
-  try { saved = localStorage.getItem(KEY); } catch { /* */ }
+  try { saved = localStorage.getItem(KEY); } catch {  }
   let wanted = requested({
     query: typeof location !== 'undefined' ? location.search : '',
     hash: typeof location !== 'undefined' ? location.hash : '',
@@ -1551,7 +1560,10 @@
   /** @type {Array<(l: string) => void>} */
   const listeners = [];
 
-  /** @param {string} s @param {Record<string, string|number>} [vars] */
+  /**
+   * @param {string} s
+   * @param {Record<string, string|number>} [vars]
+   */
   function fill(s, vars) {
     if (vars) for (const k of Object.keys(vars)) s = s.split(`{${k}}`).join(String(vars[k]));
     return s;
@@ -1570,7 +1582,11 @@
   /** @param {string} key */
   function has(key) { return own(D, key); }
 
-  /** @param {string} key @param {string} en @param {Record<string, string|number>} [vars] */
+  /**
+   * @param {string} key
+   * @param {string} en
+   * @param {Record<string, string|number>} [vars]
+   */
   function widgetT(key, en, vars) {
     return has(key) ? t(key, vars) : fill(en, vars);
   }
@@ -1585,7 +1601,10 @@
     if (typeof document !== 'undefined' && document.documentElement) document.documentElement.lang = lang;
   }
 
-  /** @param {Lang} next @param {boolean} [force] */
+  /**
+   * @param {Lang} next
+   * @param {boolean} [force]
+   */
   function switchTo(next, force) {
     if (next === lang && !force) return;
     lang = next;
@@ -1605,7 +1624,7 @@
     const l = norm(next);
     if (!l || l === lang || !available().includes(l)) return;
     wanted = l;
-    try { localStorage.setItem(KEY, l); } catch { /* */ }
+    try { localStorage.setItem(KEY, l); } catch {  }
     switchTo(l);
   }
 
@@ -1617,7 +1636,8 @@
   }
 
   /**
-   * @param {number} status @param {string} [reason]
+   * @param {number} status
+   * @param {string} [reason]
    */
   function rejection(status, reason) {
     if (lang !== 'en') {
@@ -1636,7 +1656,10 @@
   /** @typedef {{ format: (v: number) => string }} NumberFormatter */
   /** @type {Map<string, NumberFormatter>} */
   const formats = new Map();
-  /** @param {Intl.NumberFormatOptions} opts @returns {NumberFormatter} */
+  /**
+   * @param {Intl.NumberFormatOptions} opts
+   * @returns {NumberFormatter}
+   */
   function plainFormat(opts) {
     const digits = opts.maximumFractionDigits == null ? 2 : opts.maximumFractionDigits;
     const percent = opts.style === 'percent';
@@ -1649,18 +1672,24 @@
       },
     };
   }
-  /** @param {Intl.NumberFormatOptions} opts @returns {NumberFormatter} */
+  /**
+   * @param {Intl.NumberFormatOptions} opts
+   * @returns {NumberFormatter}
+   */
   function makeFormat(opts) {
-    try { return new Intl.NumberFormat(TAGS[lang], opts); } catch { /* */ }
+    try { return new Intl.NumberFormat(TAGS[lang], opts); } catch {  }
     if (opts.currencyDisplay) {
       const rest = Object.assign({}, opts);
       delete rest.currencyDisplay;
-      try { return new Intl.NumberFormat(TAGS[lang], rest); } catch { /* */ }
+      try { return new Intl.NumberFormat(TAGS[lang], rest); } catch {  }
     }
-    try { return new Intl.NumberFormat('en-US', opts); } catch { /* */ }
+    try { return new Intl.NumberFormat('en-US', opts); } catch {  }
     return plainFormat(opts);
   }
-  /** @param {Intl.NumberFormatOptions} opts @returns {NumberFormatter} */
+  /**
+   * @param {Intl.NumberFormatOptions} opts
+   * @returns {NumberFormatter}
+   */
   function nf(opts) {
     const k = lang + JSON.stringify(opts);
     let f = formats.get(k);
@@ -1668,7 +1697,11 @@
     return f;
   }
 
-  /** @param {number} v @param {number} [min] @param {number} [max] */
+  /**
+   * @param {number} v
+   * @param {number} [min]
+   * @param {number} [max]
+   */
   function num(v, min, max) {
     const lo = min || 0;
     return nf({ minimumFractionDigits: lo, maximumFractionDigits: Math.max(lo, max == null ? lo : max) }).format(v);
@@ -1679,13 +1712,20 @@
     return nf({ style: 'currency', currency: 'USD', currencyDisplay: 'narrowSymbol', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(cents / 100);
   }
 
-  /** @param {number} v @param {number} [min] @param {number} [max] */
+  /**
+   * @param {number} v
+   * @param {number} [min]
+   * @param {number} [max]
+   */
   function pct(v, min, max) {
     const lo = min || 0;
     return nf({ style: 'percent', minimumFractionDigits: lo, maximumFractionDigits: Math.max(lo, max == null ? lo : max) }).format(v / 100);
   }
 
-  /** @param {number} v @param {number} [digits] */
+  /**
+   * @param {number} v
+   * @param {number} [digits]
+   */
   function change(v, digits) {
     const d = digits == null ? 2 : digits;
     return (v >= 0 ? '+' : '') + pct(v, d);

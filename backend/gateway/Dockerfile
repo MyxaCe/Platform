@@ -1,4 +1,3 @@
-# Сборка бинаря шлюза (release), затем тонкий рантайм-образ.
 FROM rust:slim AS build
 WORKDIR /app
 COPY . .

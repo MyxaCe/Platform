@@ -1,26 +1,3 @@
-/* ============================================================================
- * orderbook.js — биржевой стакан (ADR-015): свой DOM, свои стили, свои настройки.
- *
- *   const book = OrderBook.mount(el, {
- *     instrument: () => currentId,
- *     fetch: (id) => Promise<Depth>,          // { price_decimals, qty_decimals, bids, asks }
- *     onPick: (priceStr) => {...},            // клик по уровню
- *     symbols: (id) => ({ base, quote }),     // подписи колонок
- *     markPrice: (id) => number|null,         // цена под серединой (в единицах, не raw)
- *     interval: 700, levels: 20, storagePrefix: 'ob',
- *     source: 'Binance',                    // чей это стакан (опц.): подпись в шапке
- *     t: (key, en) => string,               // перевод (опц.): без него — английский
- *   });
- *
- * У брокера (B-book) своего стакана нет: здесь показывается глубина
- * рынка-источника цен. Поэтому шапка обязана назвать источник — `ctx.source`
- * печатается рядом с заголовком, а не прячется в подсказку.
- *
- * Возможности: группировка цен по шагу (шаг тика ×1/×10/×100), режимы показа
- * (обе стороны / только покупки / только продажи), глубина полос по объёму строки
- * или нарастающим итогом, маркер средней суммы, полоса соотношения B/S, анимация.
- * Настройки живут в localStorage под своим префиксом и правятся через меню «⋯».
- * ========================================================================== */
 (function () {
   const CSS = `
 .ob { display: flex; flex-direction: column; min-height: 0; height: 100%; background: var(--panel,#10141d); }
@@ -123,8 +100,10 @@
 
   const DEFAULTS = { avg: false, ratio: true, rounding: true, depth: 'sum', anim: true, mode: 'both', groupMul: 1 };
 
-  /** Компактный формат для колонки «Всего»: 2 090 → 2.09K. */
-  /** @param {number} v @param {(v: number, d: number) => string} num */
+  /**
+   * @param {number} v
+   * @param {(v: number, d: number) => string} num
+   */
   function compact(v, num) {
     const a = Math.abs(v);
     if (a >= 1e9) return num(v / 1e9, 2) + 'B';
@@ -135,11 +114,9 @@
 
   function mount(root, ctx) {
     const levels = ctx.levels || 20;
-    /** Перевод: хост даёт `t(ключ, английский)`; без него — английский (ADR-015). */
     const t = ctx.t || ((_k, en) => en);
     /** @type {(v: number, d: number) => string} */
     const num = ctx.num || ((v, d) => v.toFixed(d));
-    /** Подпись с ключом перевода: хост обновит её при смене языка сам. */
     const tx = (k, en) => `<span data-i18n="${k}">${t(k, en)}</span>`;
     const prefix = ctx.storagePrefix || 'ob';
     const key = `${prefix}.settings`;
@@ -184,7 +161,6 @@
     const elLast = $('.ob__last'), elMark = $('.ob__mark'), elSpread = $('.ob__spread');
     const elRatio = $('.ob__ratio'), elBar = $('.ob__bar i'), elBv = $('.bv'), elSv = $('.sv');
 
-    // ---- Настройки ----------------------------------------------------------
     $('.ob__dots').addEventListener('click', (e) => { e.stopPropagation(); elMenu.classList.toggle('hidden'); });
     document.addEventListener('click', (e) => { if (!elMenu.contains(e.target)) elMenu.classList.add('hidden'); });
     elMenu.addEventListener('change', (e) => {
@@ -209,14 +185,10 @@
       elGroup.style.display = cfg.rounding ? '' : 'none';
     }
 
-    // ---- Данные -------------------------------------------------------------
-    let last = null;        // последний ответ /depth
-    let prevMid = null;     // предыдущая середина
-    // Направление «липкое»: цвет держится до следующего изменения цены. Иначе между
-    // опросами цена часто совпадает, класс снимался и строка была белой почти всегда.
+    let last = null;
+    let prevMid = null;
     let dir = null;
 
-    /** Свести уровни к шагу `step` (в raw-единицах цены). */
     function group(list, step, isBid) {
       if (step <= 1) return list;
       const out = new Map();
@@ -234,24 +206,20 @@
       const id = ctx.instrument();
       const pd = d.price_decimals, qd = d.qty_decimals;
       const ps = 10 ** pd, qs = 10 ** qd;
-      const step = cfg.rounding ? cfg.groupMul : 1; // groupMul в тиках
+      const step = cfg.rounding ? cfg.groupMul : 1;
 
       const asksAll = group(d.asks, step, false);
       const bidsAll = group(d.bids, step, true);
-      const n = cfg.mode === 'both' ? levels : levels * 2; // одна сторона — вдвое больше строк
+      const n = cfg.mode === 'both' ? levels : levels * 2;
       const asks = cfg.mode === 'bids' ? [] : asksAll.slice(0, n);
       const bids = cfg.mode === 'asks' ? [] : bidsAll.slice(0, n);
 
-      // Ширина полос: от объёма строки либо нарастающим итогом.
       const cum = (arr) => { let s = 0; return arr.map(([p, q]) => { s += q; return [p, q, s]; }); };
       const asksC = cum(asks), bidsC = cum(bids);
       const maxRow = Math.max(1, ...asks.map((x) => x[1]), ...bids.map((x) => x[1]));
       const maxCum = Math.max(1, asksC.length ? asksC[asksC.length - 1][2] : 1, bidsC.length ? bidsC[bidsC.length - 1][2] : 1);
       const width = (q, c) => (cfg.depth === 'cum' ? (c / maxCum) : (q / maxRow)) * 100;
 
-      // Разрядность объёма — у инструмента, как и масштаб (Р-064). Было
-      // `toFixed(3)` при делении на `10 ** qd`: два разных уровня стакана
-      // показывались одним числом, и по нему ставят заявку.
       const row = ([p, q, c], cls) => {
         const price = (p / ps).toFixed(pd);
         return `<div class="brow ${cls}" data-p="${price}"><div class="bar" style="width:${width(q, c).toFixed(1)}%"></div>` +
@@ -260,7 +228,6 @@
       elAsks.innerHTML = asksC.slice().reverse().map((r) => row(r, 'ask')).join('');
       elBids.innerHTML = bidsC.map((r) => row(r, 'bid')).join('');
 
-      // Маркер средней суммы по видимым уровням.
       root.querySelectorAll('.ob__avg').forEach((e) => e.remove());
       if (cfg.avg) {
         const all = [...asks, ...bids];
@@ -275,7 +242,6 @@
         }
       }
 
-      // Середина: цена, направление, марк-цена, спред.
       const bb = bidsAll[0]?.[0], ba = asksAll[0]?.[0];
       if (bb && ba) {
         const mid = (bb + ba) / 2 / ps;
@@ -291,7 +257,6 @@
       const mark = ctx.markPrice && ctx.markPrice(id);
       elMark.textContent = mark != null ? `$${num(mark, pd)}` : '';
 
-      // Полоса соотношения: доли суммарного объёма покупок и продаж.
       const sumB = bidsAll.slice(0, levels).reduce((s, x) => s + x[1], 0);
       const sumA = asksAll.slice(0, levels).reduce((s, x) => s + x[1], 0);
       const tot = sumB + sumA;
@@ -300,13 +265,11 @@
       elBv.textContent = `${pb.toFixed(2)}%`;
       elSv.textContent = `${(100 - pb).toFixed(2)}%`;
 
-      // Подписи колонок с валютами инструмента.
       const sym = (ctx.symbols && ctx.symbols(id)) || {};
       const lp = t('ob.price', 'Price'), la = t('ob.amount', 'Amount');
       $('.c-price').textContent = sym.quote ? `${lp} (${sym.quote})` : lp;
       $('.c-amt').textContent = sym.base ? `${la} (${sym.base})` : la;
 
-      // Варианты группировки: шаг тика ×1/×10/×100.
       const want = [1, 10, 100].map((m) => `${m}|${(m / ps).toFixed(Math.max(0, pd))}`).join(',');
       if (elGroup.dataset.built !== want) {
         elGroup.dataset.built = want;
@@ -320,26 +283,12 @@
       if (r && r.dataset.p && ctx.onPick) ctx.onPick(r.dataset.p);
     });
 
-    /** Сколько уровней просить у сервера: грубый шаг группировки съедает их пачками,
-     *  а односторонний режим показывает вдвое больше строк. */
     function needLevels() {
       const rows = cfg.mode === 'both' ? levels : levels * 2;
       const mul = cfg.rounding ? cfg.groupMul : 1;
       return Math.min(1000, Math.max(20, rows * mul));
     }
 
-    /**
-     * Отказ обязан быть виден как отказ (TRM-16).
-     *
-     * Было `catch { return; }` — та же семья, что в `stats.js`: обрыв связи и
-     * ответ не той формы неразличимы и наружу не выходят, а стакан продолжает
-     * показывать прежние уровни как текущие. На торговом экране это хуже, чем
-     * на полосе статистики: по уровню ставят заявку.
-     *
-     * Уровни НЕ стираем — они были верны на момент последнего чтения, а пустой
-     * стакан означал бы «ликвидности нет», что неправда. Вместо этого гасим их
-     * и ставим метку с причиной.
-     */
     const diag = window.Diag.reporter({ subject: 'orderbook', onError: ctx.onError, log: ctx.log });
 
     function fail(reason, detail) {
@@ -389,7 +338,6 @@
       }
 
       const d = got.data;
-      // Ответ без уровней — канал донёс, но не то.
       if (!d || !d.asks) {
         fail('malformed', d);
         return;
@@ -400,7 +348,6 @@
       render();
     }
 
-    /** Настройка изменилась — перечитать с нужной глубиной, а не ждать тика. */
     function reload() { applyCfg(); refresh(); }
 
     applyCfg();
@@ -408,7 +355,6 @@
     const timer = ctx.interval ? setInterval(refresh, ctx.interval) : null;
     return {
       refresh,
-      /** Смена инструмента: стрелка направления от чужой цены смысла не имеет. */
       reset() { prevMid = null; dir = null; last = null; },
       destroy() { if (timer) clearInterval(timer); root.innerHTML = ''; },
     };

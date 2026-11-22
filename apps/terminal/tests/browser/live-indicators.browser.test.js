@@ -3,7 +3,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { openTerminal } = require('../helpers/browser');
 
-/** @param {any} page @param {number} [ms] */
+/**
+ * @param {any} page
+ * @param {number} [ms]
+ */
 const settle = (page, ms) => page.evaluate((d) => new Promise((r) => setTimeout(r, d)), ms || 600);
 
 /** @param {any} srv */
@@ -57,7 +60,10 @@ const SNAPSHOT = `(() => {
 /** @param {any} page */
 const snapshot = (page) => page.evaluate(SNAPSHOT);
 
-/** @param {any} page @param {number} tf */
+/**
+ * @param {any} page
+ * @param {number} tf
+ */
 async function pickTf(page, tf) {
   await page.evaluate((v) => {
     /** @type {HTMLElement} */ (document.querySelector(`#tfs [data-tf="${v}"]`)).click();
@@ -67,7 +73,7 @@ async function pickTf(page, tf) {
 
 /**
  * @param {any} term
- * @param {number} start секунды
+ * @param {number} start
  * @param {number} tf
  * @param {number} bars
  */
@@ -83,7 +89,10 @@ async function pushBars(term, start, tf, bars) {
   await settle(term.page, 600);
 }
 
-/** @param {any} snap @param {number} expectTime */
+/**
+ * @param {any} snap
+ * @param {number} expectTime
+ */
 function assertMaFollows(snap, expectTime) {
   assert.ok(snap.sorted, 'время ряда строго растёт');
   assert.equal(snap.lastTime, expectTime, 'живая свеча вошла в ряд');

@@ -1,11 +1,3 @@
-//! Повторная доставка на шину (TRM-40): проверяется на **отказывающем
-//! отправителе**, а не на отключённой шине.
-//!
-//! Разница существенная. Отключённая шина проверяет, что мы ничего не делаем;
-//! отказывающий отправитель проверяет, что мы делаем правильное: оставляем строку
-//! в очереди, записываем попытку и причину и приходим снова. Это два разных
-//! свойства, и первое легко принять за второе.
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -17,9 +9,6 @@ use gateway::persistence::{MemoryStore, OutboxRecord, Persistence};
 
 const U: UserId = UserId(5);
 
-/// Отправитель, который отказывает первые `fail_times` раз, а дальше принимает.
-/// Так проверяется не «отказ» и не «успех», а переход от одного к другому —
-/// то есть собственно восстановление.
 struct Flaky {
     fail_times: usize,
     calls: AtomicUsize,
@@ -105,7 +94,6 @@ async fn a_working_bus_empties_the_queue() {
     );
 }
 
-/// Шина лежит — событие **не теряется**: остаётся в очереди, с попыткой и причиной.
 #[tokio::test]
 async fn an_unavailable_bus_keeps_the_event() {
     let store = store_with(&["e-1"]).await;
@@ -127,17 +115,12 @@ async fn an_unavailable_bus_keeps_the_event() {
     );
 }
 
-/// Шина вернулась — событие доходит. Это и есть «обязаны дойти, когда вернётся».
 #[tokio::test]
 async fn the_event_arrives_when_the_bus_comes_back() {
     let store = store_with(&["e-1"]).await;
     let pub_ = Flaky::new(1);
 
-    // Проход с арендой 0: строка сразу снова доступна, и второй проход — это та же
-    // повторная доставка, только без ожидания настоящего отступа.
     relay_once(store.as_ref(), &pub_, 10).await.unwrap();
-    // Отступ после отказа настоящий (5 с), поэтому возвращаем строку к сроку руками:
-    // проверяем ПОРЯДОК повторной доставки, а не умение теста ждать пять секунд.
     store.mark_failed(1, 1, 0, "шина недоступна").await.unwrap();
 
     let sent = relay_once(store.as_ref(), &pub_, 10).await.unwrap();
@@ -146,8 +129,6 @@ async fn the_event_arrives_when_the_bus_comes_back() {
     assert_eq!(pub_.accepted.lock().unwrap()[0].1, "e-1");
 }
 
-/// Отказ на одной строке **останавливает пачку**. Иначе одна чужая неудача увела
-/// бы отступ остальных в часы — при том что причина у них общая и ещё не изучена.
 #[tokio::test]
 async fn one_failure_does_not_punish_the_rest_of_the_batch() {
     let store = store_with(&["e-1", "e-2", "e-3"]).await;
@@ -165,8 +146,6 @@ async fn one_failure_does_not_punish_the_rest_of_the_batch() {
     );
 }
 
-/// Недоступное хранилище — отказ прохода, а не «пустая очередь».
-/// Молчаливый `Ok(0)` здесь означал бы «слать нечего» при «не смог спросить».
 #[tokio::test]
 async fn an_unreadable_queue_is_a_failure_not_an_empty_queue() {
     struct NoQueue;

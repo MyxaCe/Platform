@@ -1,24 +1,14 @@
-# Автономный терминал: postgres (состояние) + gateway (REST+WS, внутренний) +
-# terminal (nginx: статика + прокси на gateway). Наружу торчит только terminal :8888.
-# (8888 — потому что диапазон 8080–8282 занят WinNAT на dev-машине.)
-#
-# Пивот 2026-07-25: терминал стал самодостаточным продуктом для встраивания в чужие
-# сайты. Логина/сессий/поддоменов/edge больше нет — один демо-счёт по умолчанию.
 services:
   postgres:
     image: postgres:16-alpine
     container_name: exchange-postgres
     environment:
-      # Значения по умолчанию — только для разработки. На сервере задаются в .env
-      # (см. .env.example): выкатывать прод с паролем "platform" нельзя.
       POSTGRES_USER: ${POSTGRES_USER:-platform}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-platform}
       POSTGRES_DB: ${POSTGRES_DB:-platform}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      # gateway стартует только когда БД реально принимает подключения: иначе он
-      # упадёт на restore_state (работать на неизвестном состоянии счетов нельзя).
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-platform} -d ${POSTGRES_DB:-platform}"]
       interval: 3s
       timeout: 3s
@@ -31,27 +21,10 @@ services:
       dockerfile: gateway/Dockerfile
     container_name: exchange-gateway
     environment:
-      # Задан → PgStore (ADR-016). Убрать переменную → всё в памяти, как раньше.
       DATABASE_URL: postgres://${POSTGRES_USER:-platform}:${POSTGRES_PASSWORD:-platform}@postgres:5432/${POSTGRES_DB:-platform}
-      # SSO платформы (ADR-023, Т2). CABINET_URL → JWKS {CABINET_URL}/api/sso/jwks.
-      # Из контейнера кабинет на хосте доступен как host.docker.internal.
       CABINET_URL: ${CABINET_URL:-http://host.docker.internal:3002}
-      # Дефолт репозитория — standalone (решение штаба 2026-09-03): терминал обязан
-      # подниматься сам по себе, кабинет — отдельный репозиторий со своим темпом, и
-      # открывший :8888 должен увидеть работающий терминал, а не последствия отсутствия
-      # соседа. SSO_DISABLED=0 включает интеграцию: торговые ручки начинают требовать
-      # bearer-сессию, выданную через /v1/session по handoff-JWT (и тогда нужна БД —
-      # без неё resolve_identity вернёт 503).
       SSO_DISABLED: ${SSO_DISABLED:-1}
-      # Стартовый баланс демо-счёта (центы). Dev выровнен под apex-ru = $10k, чтобы «Обзор»
-      # кабинета сходился. Целевое — per-tenant demoStartBalanceCents из CMS (ADR-023).
       DEMO_START_BALANCE_CENTS: ${DEMO_START_BALANCE_CENTS:-1000000}
-      # Allow-list инструментов per-site (регуляторика, Р-024). Источник — CMS,
-      # сервер-сервер под X-API-Key: GET {CMS_BASE_URL}/cms/sites/{slug}, поле
-      # instruments — плоский список СИМВОЛОВ, которые терминал сам сопоставляет
-      # своим внутренним id. Ключ приходит из окружения, в репозитории его нет.
-      # Обе пусты → источник CMS не используется; дальше TENANT_INSTRUMENTS
-      # (тоже символами); если и его нет — fail-closed (КОНТРАКТЫ §4б).
       CMS_BASE_URL: ${CMS_BASE_URL:-}
       CMS_API_KEY: ${CMS_API_KEY:-}
       TENANT_INSTRUMENTS: ${TENANT_INSTRUMENTS:-}
@@ -60,43 +33,11 @@ services:
       CMS_WEBHOOK_SECRET: ${CMS_WEBHOOK_SECRET:-}
       PLATFORM_INSTRUMENTS_CACHE: /data/platform-instruments.json
       CLOSE_ONLY_REJECT_PENDING_ENABLED: ${CLOSE_ONLY_REJECT_PENDING_ENABLED:-0}
-      # Шина платформы (TRM-40). Пусто → релей не запускается, но исходящая
-      # очередь наполняется: события копятся в bus_outbox и уедут после
-      # настройки. Кредл нужен свой, publish-only (КОНТРАКТЫ §4а).
-      # Принудительное закрытие по марже (TRM-49), уровень в процентах.
-      #
-      # 50 — ПОЛИТИКА БРОКЕРА, А НЕ ТРЕБОВАНИЕ РЕГУЛЯТОРА. Число выбрали мы, и
-      # менять его можно — осознанно. Довод за 50: отрицательный баланс
-      # оплачиваем мы, и чем ниже порог, тем чаще доплачиваем.
-      #
-      # Где это проверять: Securities Act (Сейшелы, 2007) и циркуляры FSA
-      # Seychelles (fsaseychelles.sc, раздел Securities). Мы искали там
-      # требование к уровню стоп-аута и НЕ НАШЛИ — это «не нашли», а не «не
-      # требует». Ссылки стоят затем, чтобы юрист проверял, а не искал заново.
-      #
-      # Значение стоит ЗДЕСЬ, а не умолчанием в коде: порог — свойство
-      # юрисдикции, его место в профиле (CMS-24). В коде умолчания нет
-      # намеренно — не задан, значит закрытия нет, и об этом кричит лог старта.
       MARGIN_STOP_OUT_LEVEL_PERCENT: ${MARGIN_STOP_OUT_LEVEL_PERCENT:-50}
-      # Уровень предупреждения (TRM-50), обязан быть выше порога закрытия.
-      # Закрытие без предупреждения — срабатывание без шанса отреагировать,
-      # поэтому эти две настройки включаются вместе и одной выкаткой.
       MARGIN_CALL_LEVEL_PERCENT: ${MARGIN_CALL_LEVEL_PERCENT:-100}
-      # Полоса возврата для повторного предупреждения: НАШ ВЫБОР, а не
-      # требование. У ширины полосы внешней правды нет — это гашение дребезга.
       MARGIN_CALL_REARM_BAND_PERCENT: ${MARGIN_CALL_REARM_BAND_PERCENT:-10}
-      # Защита от отрицательного остатка (TRM-42) — ФЛАГ, а не вшитое
-      # поведение: Сейшелы её не требуют, мы её даём по своему выбору, и выбор
-      # обязан быть переключаемым. Умолчание в коде — выключено.
       NEGATIVE_BALANCE_PROTECTION: ${NEGATIVE_BALANCE_PROTECTION:-1}
-      # Минимальное расстояние SL/TP от цены, bps (10 = 0.1 %), для площадок,
-      # которым сайт ещё не назначил своё (PUT /internal/sites/{tenant}/settings/stops).
-      # 0 — ограничения нет.
       MIN_STOP_BPS: ${MIN_STOP_BPS:-0}
-      # Изменение SL/TP открытых позиций и ордеров (17.11). ВЫКАТ В ДВА ШАГА:
-      # сначала образ с 0 (новые записи журнала читаются, но не пишутся —
-      # откат на прежний образ свободен), потом 1. После первой записи откат —
-      # только на образ не старше того, где это появилось.
       SLTP_EDIT_ENABLED: ${SLTP_EDIT_ENABLED:-0}
       BUS_URL: ${BUS_URL:-}
       BUS_EXCHANGE: ${BUS_EXCHANGE:-platform.events}
@@ -115,19 +56,7 @@ services:
       dockerfile: Dockerfile
     container_name: exchange-terminal
     environment:
-      # Кто может встраивать терминал в iframe (CSP frame-ancestors, ADR-023).
-      # Дефолт "*" = открыто (dev). Прод: список доменов сайтов платформы через .env.
       FRAME_ANCESTORS: ${FRAME_ANCESTORS:-*}
-      # Рантайм-конфиг фронта (ADR-023). URL для БРАУЗЕРА пользователя (не для контейнера):
-      # публичный brand-эндпоинт CMS и origin кабинета для postMessage/SSO.
-      # Дефолт — пусто, под standalone (см. SSO_DISABLED у gateway). Это не косметика:
-      #  • заданный CABINET_ORIGIN включает у фронта embedded-режим, и торговые ручки
-      #    он перестаёт дёргать вовсе (api.js: tradingBlocked) — даже если gateway
-      #    стоит в standalone и ответил бы. Пустое значение держит обе стороны в
-      #    одном режиме;
-      #  • заданный BRAND_URL без живой CMS даёт ошибку в консоли на каждой загрузке,
-      #    а «консоль без ошибок» — критерий приёмки фронта (принцип №20).
-      # Для интеграции задаём оба вместе с SSO_DISABLED=0.
       BRAND_URL: ${BRAND_URL:-}
       CABINET_ORIGIN: ${CABINET_ORIGIN:-}
     ports:

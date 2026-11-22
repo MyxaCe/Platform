@@ -1,11 +1,3 @@
-//! PostgreSQL-реализация [`Persistence`] (ADR-016).
-//!
-//! Запросы runtime-проверяемые (`query`/`query_as`), **без макросов `query!`**: макросы
-//! требуют живую БД на этапе компиляции, что сломало бы сборку образа в Docker.
-//!
-//! Деньги — `NUMERIC(38,0)`: вмещает весь диапазон `i128` и остаётся полноценным числом
-//! для SQL (в отличие от текста), поэтому по деньгам можно считать инварианты запросом.
-
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use sqlx::postgres::{PgPoolOptions, PgRow};
@@ -48,9 +40,6 @@ fn side_to_db(s: PosSide) -> i16 {
         PosSide::Short => SIDE_SHORT,
     }
 }
-/// Модель позиций ↔ БД. Число, а не строка: строка на границе денег уже стоила нам
-/// шести исправленных мест (TRM-07), и неизвестное значение обязано быть отказом, а
-/// не молчаливым умолчанием.
 fn model_to_db(m: broker::PositionModel) -> i16 {
     match m {
         broker::PositionModel::Hedging => 0,
@@ -62,9 +51,6 @@ fn model_from_db(v: i16) -> broker::PositionModel {
         1 => broker::PositionModel::Netting,
         0 => broker::PositionModel::Hedging,
         other => {
-            // Неизвестное значение не подставляем молча: пишем и берём хеджирование
-            // как исторически существовавшую модель. Инварианты счёта проверит
-            // gateway; сюда попасть можно только правкой БД руками.
             eprintln!("[persistence] неизвестная модель позиций в БД: {other}, читаем как hedging");
             broker::PositionModel::Hedging
         }
@@ -84,7 +70,6 @@ pub struct PgStore {
 }
 
 impl PgStore {
-    /// Подключиться к БД. `url` — строка вида `postgres://user:pass@host/db`.
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
         let pool = PgPoolOptions::new()
             .max_connections(10)
@@ -96,11 +81,6 @@ impl PgStore {
     }
 }
 
-/// Идемпотентный DDL. Полноценные версионируемые миграции появятся при первом
-/// изменении схемы на живых данных (ADR-016).
-///
-/// После пивота на автономный терминал (2026-07-25) учётные записи/сессии/passkey
-/// ушли — счёт хранится сам по себе, `user_id` больше не ссылается на `users`.
 const SCHEMA: &str = r#"
 -- Внешняя личность SSO (tenant, sub) → внутренний user_id (ADR-023, Т2).
 -- Последовательность стартует с 1000, чтобы не пересечься с легаси-счетами.
@@ -371,8 +351,6 @@ CREATE TRIGGER instruments_no_change
   FOR EACH ROW EXECUTE FUNCTION instruments_are_immutable();
 "#;
 
-/// Отпечаток ↔ БД: 32 hex-символа. Число в тексте, а не `NUMERIC`, потому что по нему
-/// не считают — его сравнивают, и сравнивать надо ровно те байты, что записали.
 fn hash_to_db(h: u128) -> String {
     format!("{h:032x}")
 }
@@ -381,11 +359,6 @@ fn hash_from_db(s: &str) -> Result<u128, StoreError> {
         .map_err(|_| StoreError(format!("журнал: отпечаток «{s}» не читается")))
 }
 
-/// Поднять запись журнала из строки БД.
-///
-/// Отпечаток берётся как есть и **не пересчитывается**: иначе правка строки в базе
-/// молча получила бы сходящийся отпечаток и цепочка перестала бы что-либо значить.
-/// Сверяет цепочку вызывающий, при подъёме журнала.
 fn event_from_row(r: &PgRow) -> Result<AccountEvent, StoreError> {
     let seq = r.get::<i64, _>("seq") as u64;
     let bad = |what: &str| StoreError(format!("журнал: запись №{seq} не читается ({what})"));
@@ -393,8 +366,6 @@ fn event_from_row(r: &PgRow) -> Result<AccountEvent, StoreError> {
         "system" => Origin::System,
         "client" => Origin::Client,
         "operator" => {
-            // Пустое основание или потерянный инцидент — отказ чтения, а не «ну и
-            // ладно»: ручная проводка без причины не отличима от злоупотребления.
             let who = r.get::<Option<String>, _>("who").unwrap_or_default();
             let reason = r.get::<Option<String>, _>("reason").unwrap_or_default();
             let incident = r.get::<Option<String>, _>("incident").unwrap_or_default();
@@ -404,9 +375,6 @@ fn event_from_row(r: &PgRow) -> Result<AccountEvent, StoreError> {
         }
         other => return Err(bad(&format!("неизвестный источник «{other}»"))),
     };
-    // Каноническая строка отдаётся КАК ЕСТЬ: по ней считался отпечаток, и
-    // пересобирать её из разобранного вида нельзя — расширение записи новыми
-    // полями тогда меняло бы подпись у всех прежних (TRM-44).
     let canon = r.get::<String, _>("kind");
     let prev = hash_from_db(&r.get::<String, _>("prev_hash"))?;
     let hash = hash_from_db(&r.get::<String, _>("hash"))?;
@@ -417,7 +385,6 @@ fn event_from_row(r: &PgRow) -> Result<AccountEvent, StoreError> {
 #[async_trait]
 impl Persistence for PgStore {
     async fn init(&self) -> Result<(), StoreError> {
-        // Несколько выражений одним execute: sqlx выполнит их как batch.
         sqlx::raw_sql(SCHEMA)
             .execute(&self.pool)
             .await
@@ -426,7 +393,6 @@ impl Persistence for PgStore {
     }
 
     async fn load_all(&self) -> Result<LoadedState, StoreError> {
-        // Счёт — самостоятельная сущность: перебираем то, что реально лежит в accounts.
         let acc_rows = sqlx::query(
             "SELECT user_id, balance, next_id, model, leverage, markup_bps, commission_bps, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units
                FROM accounts ORDER BY user_id",
@@ -448,9 +414,6 @@ impl Persistence for PgStore {
                 markup_bps: acc.get::<i64, _>("markup_bps"),
                 commission_bps: acc.get::<i64, _>("commission_bps"),
             };
-            // Неизвестное значение в профиле — ОТКАЗ чтения, а не умолчание.
-            // Род счёта решает, настоящие ли это деньги; прочитать непонятное
-            // как «демо» значило бы угадывать, чьими деньгами торгуют.
             let bad_profile = |what: &str, v: &str| {
                 StoreError(format!("счёт {}: {what} «{v}» не читается", uid.0))
             };
@@ -468,9 +431,6 @@ impl Persistence for PgStore {
                     domain::account::ClientCategory::parse(&cat_s)
                         .ok_or_else(|| bad_profile("категория", &cat_s))?,
                 ),
-                // Код И записанная рядом точность. Расхождение — отказ:
-                // истолковать прошлые суммы такого счёта нечем, а подставить
-                // любое из двух значило бы угадать размер чужих денег.
                 currency: domain::account::Currency::from_storage(
                     &cur_s,
                     acc.get::<i16, _>("currency_minor_units") as u8,
@@ -553,8 +513,6 @@ impl Persistence for PgStore {
                     pnl: from_numeric(&r.get::<BigDecimal, _>("pnl"))?,
                     pd: r.get::<i16, _>("pd") as u8,
                     qd: r.get::<i16, _>("qd") as u8,
-                    // NULL здесь означает «неизвестно», а не «нет»: так лежат
-                    // сделки, закрытые до появления этих столбцов (TRM-38).
                     level: r.get::<Option<i64>, _>("level"),
                     across_gap: r.get::<Option<bool>, _>("across_gap"),
                     fees: broker::DealFees {
@@ -582,9 +540,6 @@ impl Persistence for PgStore {
             ));
         }
 
-        // Журналы (TRM-13). Читаются по тем же счетам и в порядке записи: сверку
-        // делает вызывающий, здесь только подъём без единой догадки — неразобранная
-        // запись это отказ чтения, а не пропуск строки.
         let mut journals = Vec::new();
         for acc in &acc_rows {
             let uid = UserId(acc.get::<i64, _>("user_id") as u64);
@@ -618,10 +573,6 @@ impl Persistence for PgStore {
         let id_db = user.0 as i64;
         let mut tx = self.pool.begin().await.map_err(db)?;
 
-        // Профиль пишется при заведении и далее не меняется: в `DO UPDATE` его
-        // нет намеренно. Род счёта или валюта, поменявшиеся у существующего
-        // счёта, означали бы, что прошлые суммы посчитаны в одном, а читаются в
-        // другом. Смена валюты — это новый счёт, а не правка поля.
         sqlx::query(
             "INSERT INTO accounts (user_id, balance, next_id, model, owner_user_id, kind, origin, category_at_open, currency, currency_minor_units, leverage, markup_bps, commission_bps)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
@@ -644,8 +595,6 @@ impl Persistence for PgStore {
         .await
         .map_err(db)?;
 
-        // Позиции и ордера переписываются целиком: их единицы-десятки, и это избавляет
-        // от диффа. История так себя вести не может — она только дописывается.
         sqlx::query("DELETE FROM positions WHERE user_id = $1")
             .bind(id_db)
             .execute(&mut *tx)
@@ -689,8 +638,6 @@ impl Persistence for PgStore {
             .map_err(db)?;
         }
 
-        // Дописываем только хвост истории: стоимость закрытия сделки не должна зависеть
-        // от её длины. Сколько уже лежит — спрашиваем в той же транзакции.
         let have: i64 = sqlx::query("SELECT count(*) AS n FROM closed_deals WHERE user_id = $1")
             .bind(id_db)
             .fetch_one(&mut *tx)
@@ -711,12 +658,6 @@ impl Persistence for PgStore {
             .execute(&mut *tx).await.map_err(db)?;
         }
 
-        // Журнал — в той же транзакции, что и слепок (TRM-13). Разъехаться им нельзя:
-        // иначе падение между двумя записями произвело бы ровно то расхождение, ради
-        // обнаружения которого журнал и заводился.
-        //
-        // Никакого ON CONFLICT: повтор номера обязан падать. Уникальный ключ здесь —
-        // это «поверх записанного не пишут», и глушить его значило бы терять запись.
         for e in events {
             let (who, reason, incident) = match e.origin().operator() {
                 Some(o) => (Some(o.who()), Some(o.reason()), Some(o.incident())),
@@ -733,16 +674,6 @@ impl Persistence for PgStore {
             .bind(who)
             .bind(reason)
             .bind(incident)
-            // Пишем СОХРАНЁННЫЙ канон записи, а не пересобранный из вида:
-            // именно по нему посчитан отпечаток в соседнем столбце (TRM-44).
-            //
-            // ⚠️ Подмена на `e.kind().encode()` сегодня НИЧЕГО НЕ МЕНЯЕТ и не
-            // красит ни одного теста — проверено мутацией. Сюда попадают только
-            // свежезапечатанные записи, у которых канон и есть текущий вид.
-            // Это не пропуск в проверках, а граница: вызов защищает тот день,
-            // когда в запись попадёт лента, поднятая из базы. Тогда
-            // пересборка молча перепишет историю чужим видом, и отпечаток
-            // перестанет ей соответствовать.
             .bind(e.canon())
             .bind(hash_to_db(e.prev()))
             .bind(hash_to_db(e.hash()))
@@ -751,15 +682,6 @@ impl Persistence for PgStore {
             .map_err(db)?;
         }
 
-        // Исходящая очередь — в той же транзакции (TRM-40). Не отдельным заходом
-        // «после сохранения»: тогда между деньгами и событием появилась бы щель, и
-        // падение в ней дало бы либо сделку без события, либо событие без сделки.
-        //
-        // `ON CONFLICT DO NOTHING` по `event_id`: идентификатор выведен из факта
-        // (счёт + номер записи журнала), поэтому повтор означает повторную запись
-        // того же факта, а не новое событие. Здесь это противоположно журналу, где
-        // повтор номера обязан падать: там номер — позиция в ленте, и запись «поверх»
-        // означала бы потерю. Разница намеренная.
         for rec in outgoing {
             sqlx::query(
                 "INSERT INTO bus_outbox (event_id, routing_key, payload)
@@ -782,10 +704,6 @@ impl Persistence for PgStore {
         limit: i64,
         lease_ms: i64,
     ) -> Result<Vec<OutboxClaim>, StoreError> {
-        // `FOR UPDATE SKIP LOCKED` + сдвиг `next_attempt_at` = аренда: второй
-        // экземпляр не возьмёт те же строки, пока первый с ними работает. Аренда
-        // НЕ трогает `attempts`: счётчик обязан считать отказы шины, а не заходы
-        // релея — иначе по нему нельзя отличить «шина лежит» от «релей бодр».
         let rows = sqlx::query(
             "UPDATE bus_outbox SET next_attempt_at = now() + make_interval(secs => $2 / 1000.0)
               WHERE id IN (
@@ -801,9 +719,6 @@ impl Persistence for PgStore {
         .fetch_all(&self.pool)
         .await
         .map_err(db)?;
-        // Порядок отправки — порядок записи. `UPDATE ... RETURNING` его не обещает,
-        // а для баланса он значим: событие «новый остаток» перезаписывает прежний,
-        // и переставленные местами два события оставили бы в проекции старое число.
         let mut out: Vec<OutboxClaim> = rows
             .iter()
             .map(|r: &PgRow| OutboxClaim {
@@ -983,9 +898,6 @@ impl Persistence for PgStore {
         sub: &str,
         kind: AccountKind,
     ) -> Result<UserId, StoreError> {
-        // Найти-или-создать одним запросом: конфликт по (tenant, sub, kind) =>
-        // RETURNING существующего user_id (DO UPDATE фиктивный, чтобы RETURNING
-        // сработал). Два одновременных первых входа получают один номер.
         let row = sqlx::query(
             "INSERT INTO identities (tenant, sub, account_kind) VALUES ($1, $2, $3)
              ON CONFLICT (tenant, sub, account_kind) DO UPDATE SET tenant = EXCLUDED.tenant

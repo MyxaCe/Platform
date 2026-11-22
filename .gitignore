@@ -1,21 +1,16 @@
-# Rust
 /target
 **/target
 Cargo.lock.bak
 /backend/data/
 
-# OS
 .DS_Store
 Thumbs.db
 
-# Секреты и локальные настройки
 .env
 .env.*
 !.env.example
 
-# Node (вендоринг в образах, локально не нужен)
 node_modules/
 
-# Временные файлы
 *.log
 apps/edge/certs/

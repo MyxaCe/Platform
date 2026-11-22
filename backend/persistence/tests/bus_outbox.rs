@@ -1,15 +1,3 @@
-//! Исходящая очередь шины (TRM-40): она обязана работать и проверяться в **обоих**
-//! режимах — как и журнал рядом с ней.
-//!
-//! Без БД режим проверяется здесь и на каждом прогоне. С БД — живым прогоном против
-//! настоящего PostgreSQL: тест помечен `#[ignore]`, потому что живой базы в обычном
-//! прогоне нет, и он **виден в выводе как пропущенный**, а не притворяется зелёным.
-//! Запуск: `TEST_DATABASE_URL=postgres://... cargo test -p persistence -- --ignored`.
-//!
-//! Главное свойство проверяется только с БД и названо вслух: **конверт переживает
-//! перезапуск процесса**. В памяти он не переживает ничего, и именно поэтому массив
-//! в памяти очередью не был.
-
 use broker::journal::{EventKind, Journal, Origin};
 use broker::AccountSnapshot;
 use domain::account::UserId;
@@ -45,8 +33,6 @@ fn rec(id: &str) -> OutboxRecord {
     }
 }
 
-// ============================ Режим без БД ==================================
-
 #[tokio::test]
 async fn saved_envelope_is_offered_to_the_relay() {
     let store = MemoryStore::new();
@@ -63,7 +49,6 @@ async fn saved_envelope_is_offered_to_the_relay() {
     assert_eq!(claimed[0].attempts, 0, "ещё не пробовали");
 }
 
-/// Отправленное не уезжает второй раз, и очередь перестаёт его считать.
 #[tokio::test]
 async fn published_row_is_not_offered_again() {
     let store = MemoryStore::new();
@@ -82,11 +67,6 @@ async fn published_row_is_not_offered_again() {
     );
 }
 
-/// **Отказ виден в состоянии строки, а не только в логе.**
-///
-/// У соседей ровно этот зазор оставил `attempts = 0` при циклических падениях:
-/// процесс шумел, строка молчала, и повторы «работали», не отработав ни разу
-/// (КОНТРАКТЫ §4а).
 #[tokio::test]
 async fn failure_is_written_into_the_row() {
     let store = MemoryStore::new();
@@ -116,7 +96,6 @@ async fn failure_is_written_into_the_row() {
     );
 }
 
-/// Аренда: взятую строку второй проход не берёт, пока первый с ней работает.
 #[tokio::test]
 async fn claimed_row_is_leased() {
     let store = MemoryStore::new();
@@ -137,8 +116,6 @@ async fn claimed_row_is_leased() {
     );
 }
 
-/// Повтор того же `event_id` — повторная запись того же факта, а не второе
-/// событие. Одна строка, один `message_id`, один раз у потребителя.
 #[tokio::test]
 async fn the_same_fact_written_twice_is_one_row() {
     let store = MemoryStore::new();
@@ -148,7 +125,6 @@ async fn the_same_fact_written_twice_is_one_row() {
         .save_account(U, &snapshot(10_000_000), &sealed, &[rec("e-1")])
         .await
         .unwrap();
-    // Второй заход: журнал уже другой (номера не повторяются), конверт тот же.
     let mut j2 = Journal::new(10_000_000);
     for e in sealed {
         j2.commit(e).unwrap();
@@ -166,14 +142,12 @@ async fn the_same_fact_written_twice_is_one_row() {
     assert_eq!(store.outbox_dump().len(), 1, "тот же факт — одна строка");
 }
 
-/// **Нет денег — нет события.** Запись, отвергнутая хранилищем, не оставляет
-/// конверта: иначе наружу уехала бы сделка, которой не было, а отозвать её нельзя.
 #[tokio::test]
 async fn rejected_write_leaves_no_envelope() {
     let store = MemoryStore::new();
     let j = Journal::new(10_000_000);
     let mut bad = opening(&j);
-    bad.extend(opening(&j)); // две записи с номером 1 — повтор, отказ журнала
+    bad.extend(opening(&j));
 
     assert!(
         store
@@ -188,8 +162,6 @@ async fn rejected_write_leaves_no_envelope() {
         "событие не существует отдельно от денег"
     );
 }
-
-// ========================= Живой прогон против БД ===========================
 
 #[tokio::test]
 #[ignore = "нужен живой PostgreSQL: TEST_DATABASE_URL"]
@@ -230,7 +202,6 @@ async fn envelope_survives_a_restart() {
         .await
         .expect("запись");
 
-    // Перезапуск процесса: новое подключение, ничего в памяти не осталось.
     drop(store);
     let reborn = persistence::PgStore::connect(&url)
         .await
@@ -241,7 +212,6 @@ async fn envelope_survives_a_restart() {
         "конверт обязан пережить перезапуск — ради этого очередь и переехала из памяти"
     );
 
-    // Отказ и повтор — на настоящих типах БД (`make_interval`, усечение текста).
     let row = claimed.iter().find(|c| c.event_id == "live-1").unwrap();
     reborn
         .mark_failed(row.id, 3, 125_000, "проверка записи отказа")
