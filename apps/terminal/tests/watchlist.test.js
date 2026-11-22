@@ -327,3 +327,14 @@ test('категории: одна категория — вкладок нет;
   assert.equal(env.wl.category(), 'all');
   assert.deepEqual(visibleIds(env), [1, 2, 31, 40], 'строки пропавших инструментов убраны');
 });
+
+test('категории: внутри категории порядок источника (CMS), а не номер инструмента', async (t) => {
+  const env = await mounted(t, { fetch: async () => [
+    { id: 32, symbol: 'XAUUSD', category: 'metals', price_decimals: 2, change: null, bid: 1, ask: 2, high: null },
+    { id: 7, symbol: 'ADA-USDT', category: 'crypto', price_decimals: 4, change: 1, bid: 1, ask: 2, high: 3 },
+    { id: 33, symbol: 'GBPUSD', category: 'forex', price_decimals: 5, change: null, bid: 1, ask: 2, high: null },
+    { id: 1, symbol: 'BTC-USDT', category: 'crypto', price_decimals: 2, change: 1, bid: 1, ask: 2, high: 3 },
+    { id: 31, symbol: 'EURUSD', category: 'forex', price_decimals: 5, change: null, bid: 1, ask: 2, high: null },
+  ] });
+  assert.deepEqual(visibleIds(env), [7, 1, 33, 31, 32]);
+});

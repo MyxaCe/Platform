@@ -165,6 +165,7 @@
     const cols = Object.assign({ last: 0, change: 1, sell: 1, buy: 1, spread: 1, high: 1 }, cfg.columnsDefault || {}, readJson(colsKey, {}));
     const rowEls = {};       // id → элемент строки (переиспользуем, чтобы не терять скролл)
     const meta = {};         // id → последний известный инструмент
+    const order = {};
     let sortKey = null, sortDir = -1;
     let query = '';
     let cat = String(readJson(catKey, 'all') || 'all');
@@ -212,7 +213,7 @@
           const d = (m(meta[a]) - m(meta[b])) * sortDir;
           if (d) return d;
         }
-        return a - b;
+        return (order[a] ?? a) - (order[b] ?? b);
       }).forEach((id) => rowsEl.appendChild(rowEls[id]));
     }
 
@@ -307,7 +308,9 @@
         rowEls[id].remove();
         delete rowEls[id];
         delete meta[id];
+        delete order[id];
       });
+      list.forEach((it, i) => { order[it.id] = i; });
       for (const it of list) {
         meta[it.id] = it;
         if (firstId === null) firstId = it.id;

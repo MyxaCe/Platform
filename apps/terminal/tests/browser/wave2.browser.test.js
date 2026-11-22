@@ -70,7 +70,7 @@ test('волна 2: терминал открывается, список из C
   const term = await open(t);
   assert.deepEqual(term.errors, [], 'страница обязана молчать в консоль');
   const rows = await term.page.evaluate(() => [...document.querySelectorAll('.irow')].map((r) => /** @type {HTMLElement} */ (r).dataset.id));
-  assert.deepEqual(rows, ['1', '3', '4', '5', '6'], 'порядок показа — порядок CMS');
+  assert.deepEqual(rows, ['1', '6', '3', '4', '5'], '«Все»: блоками по категориям, внутри — порядок CMS');
   assert.equal(await badge(term.page, 1), null);
   const eur = await badge(term.page, 3);
   assert.equal(eur.text, 'Закрыт');
