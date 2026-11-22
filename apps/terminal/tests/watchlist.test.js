@@ -272,3 +272,58 @@ test('хост назвал инструмент, которого нет в с�
   const env = await mounted(t, { initial: () => 99 });
   assert.deepEqual(env.calls.select, [1]);
 });
+
+/** Смешанный список, как у сайта с форексом: категории идут вперемешку по id. */
+function mixed() {
+  return [
+    { id: 1, symbol: 'BTC-USDT', category: 'crypto', price_decimals: 2, change: 1, bid: 1, ask: 2, high: 3 },
+    { id: 31, symbol: 'EURUSD', category: 'forex', price_decimals: 5, change: null, bid: 1, ask: 2, high: null },
+    { id: 2, symbol: 'ETH-USDT', category: 'crypto', price_decimals: 2, change: 1, bid: 1, ask: 2, high: 3 },
+    { id: 32, symbol: 'XAUUSD', category: 'metals', price_decimals: 2, change: null, bid: 1, ask: 2, high: null },
+    { id: 40, symbol: 'AAPL', category: 'stocks', price_decimals: 2, change: null, bid: 1, ask: 2, high: null },
+  ];
+}
+/** @param {any} env */
+const visibleIds = (env) => [...env.root.querySelectorAll('.irow')].filter((el) => el.style.display !== 'none').map((el) => +el.dataset.id);
+/** @param {any} env */
+const tabs = (env) => [...env.root.querySelectorAll('.wl-cat')].map((b) => b.dataset.cat + (b.classList.contains('on') ? '*' : ''));
+
+test('категории: вкладки только для имеющихся категорий, «Все» сгруппировано по категориям', async (t) => {
+  const env = await mounted(t, { fetch: async () => mixed() });
+  assert.deepEqual(tabs(env), ['all*', 'crypto', 'forex', 'metals', 'stocks']);
+  assert.deepEqual(visibleIds(env), [1, 2, 31, 32, 40], 'крипто, затем форекс, металлы, акции — не вперемешку');
+});
+
+test('категории: вкладка фильтрует, поиск ищет по всем, выбор запоминается', async (t) => {
+  const env = await mounted(t, { fetch: async () => mixed() });
+  click(env.window, env.root.querySelector('.wl-cat[data-cat="forex"]'));
+  assert.deepEqual(visibleIds(env), [31]);
+  assert.deepEqual(tabs(env), ['all', 'crypto', 'forex*', 'metals', 'stocks']);
+  assert.equal(env.wl.category(), 'forex');
+  assert.equal(env.window.localStorage.getItem('watch.cat'), '"forex"');
+  const q = /** @type {HTMLInputElement} */ (env.root.querySelector('.wl-search'));
+  q.value = 'xau';
+  q.dispatchEvent(new env.window.Event('input'));
+  assert.deepEqual(visibleIds(env), [32], 'поиск не ограничен вкладкой');
+  q.value = '';
+  q.dispatchEvent(new env.window.Event('input'));
+  assert.deepEqual(visibleIds(env), [31]);
+  const wl2 = env.window.Watchlist.mount(env.root, { fetch: async () => mixed(), interval: 0 });
+  await tick(env);
+  assert.equal(wl2.category(), 'forex', 'после перезагрузки открыта та же вкладка');
+  wl2.destroy();
+});
+
+test('категории: одна категория — вкладок нет; пропавшая категория возвращает на «Все»', async (t) => {
+  const env = await mounted(t);
+  assert.equal(/** @type {HTMLElement} */ (env.root.querySelector('.watch__cats')).hidden, true, 'только крипто — вкладки не нужны');
+  assert.deepEqual(visibleIds(env), [1, 2, 3]);
+  env.setData(mixed());
+  await env.wl.refresh();
+  env.wl.setCategory('metals');
+  assert.deepEqual(visibleIds(env), [32]);
+  env.setData(mixed().filter((it) => it.category !== 'metals'));
+  await env.wl.refresh();
+  assert.equal(env.wl.category(), 'all');
+  assert.deepEqual(visibleIds(env), [1, 2, 31, 40], 'строки пропавших инструментов убраны');
+});

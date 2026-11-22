@@ -77,11 +77,31 @@
 .wl-mk { flex: 0 0 auto; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9.5px; font-weight: 500; line-height: 1;
   padding: 2px 4px; border-radius: 3px; color: var(--muted,#6b7688); border: 1px solid var(--border,#1f2735); }
 .wl-mk--closed, .wl-mk--halted { color: var(--down,#ef5350); border-color: currentColor; }
+.watch__cats { display: flex; gap: 4px; padding: 0 8px 6px; overflow-x: auto; scrollbar-width: none; flex: 0 0 auto; }
+.watch__cats::-webkit-scrollbar { display: none; }
+.watch__cats[hidden] { display: none; }
+.wl-cat { flex: 0 0 auto; background: transparent; border: 1px solid var(--border,#1f2735); color: var(--muted,#6b7688); border-radius: 5px;
+  padding: 4px 9px; font: inherit; font-size: 11px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.wl-cat:hover { color: var(--text,#d7dce5); }
+.wl-cat.on { color: var(--text,#d7dce5); background: var(--panel2,#151a25); border-color: var(--brand,#f0b90b); }
 `;
   if (!document.getElementById('watchlist-css')) {
     const s = document.createElement('style'); s.id = 'watchlist-css'; s.textContent = CSS;
     document.head.appendChild(s);
   }
+
+  const CATS = [
+    { key: 'crypto', label: 'Crypto' },
+    { key: 'forex', label: 'Forex' },
+    { key: 'metals', label: 'Metals' },
+    { key: 'indices', label: 'Indices' },
+    { key: 'stocks', label: 'Stocks' },
+    { key: 'energy', label: 'Energy' },
+  ];
+  /** @param {any} it @returns {string} */
+  const catOf = (it) => (it && typeof it.category === 'string' && it.category ? it.category : 'crypto');
+  /** @param {string} c @returns {number} */
+  const catRank = (c) => { const i = CATS.findIndex((x) => x.key === c); return i < 0 ? CATS.length : i; };
 
   const STAR = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 2l1.8 3.9 4.2.4-3.2 2.9.9 4.1L8 11.3 4.3 13.2l.9-4.1L2 6.3l4.2-.4z" stroke-linejoin="round"/></svg>';
 
@@ -136,6 +156,7 @@
     const prefix = cfg.storagePrefix || 'watch';
     const favsKey = `${prefix}.favs`;
     const colsKey = cfg.colsKey || `${prefix}.cols`;
+    const catKey = `${prefix}.cat`;
     const t = cfg.t || ((k, en) => en);
     const num = cfg.num || ((/** @type {number} */ v, /** @type {number} */ n) => v.toLocaleString('en-US', { minimumFractionDigits: n, maximumFractionDigits: n }));
     const change = cfg.change || ((/** @type {number} */ v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`);
@@ -146,11 +167,14 @@
     const meta = {};         // id → последний известный инструмент
     let sortKey = null, sortDir = -1;
     let query = '';
+    let cat = String(readJson(catKey, 'all') || 'all');
+    let catsShown = '';
     let timer = null;
 
     // ---- DOM (строим сами) -------------------------------------------------
     root.innerHTML =
       `<div class="watch__search"><input class="wl-search" placeholder="${t('wl.search', 'Search…')}" data-i18n-ph="wl.search" /></div>` +
+      `<div class="watch__cats" hidden></div>` +
       (cfg.title === '' ? '' : `<div class="watch__title">${cfg.title || '⭐ POPULAR'}</div>`) +
       `<div class="watch__head"><span></span><span data-i18n="wl.instr">${t('wl.instr', 'INSTR.')}</span>` +
       COLS.map((c) => { const k = c.i18n || `wl.${c.key}`; return `<span class="sortable c-${c.key}" data-sort="${c.key}"><span data-i18n="${k}">${t(k, c.label)}</span><i></i></span>`; }).join('') +
@@ -159,6 +183,7 @@
     const searchEl = root.querySelector('.wl-search');
     const headEl = root.querySelector('.watch__head');
     const rowsEl = root.querySelector('.watch__rows');
+    const catsEl = root.querySelector('.watch__cats');
 
     // ---- Колонки -----------------------------------------------------------
     function applyCols() {
@@ -178,6 +203,10 @@
         // Number(): признак избранного — булев, а вычитание булевых хоть и
         // работает в JS, читается как опечатка и не проходит проверку типов.
         if (fa !== fb) return Number(fb) - Number(fa);
+        if (!sortKey && meta[a] && meta[b]) {
+          const c = catRank(catOf(meta[a])) - catRank(catOf(meta[b]));
+          if (c) return c;
+        }
         if (sortKey && meta[a] && meta[b]) {
           const m = SORT_METRIC[sortKey];
           const d = (m(meta[a]) - m(meta[b])) * sortDir;
@@ -197,10 +226,37 @@
 
     /** Фильтр поиска применяется к уже существующим строкам — без перестроения DOM. */
     function applyFilter() {
+      const byCat = !query && cat !== 'all' && catsShown !== '';
       Object.entries(rowEls).forEach(([id, el]) => {
         const sym = `${meta[id]?.symbol || ''} ${meta[id]?.name || ''}`.toLowerCase();
-        el.style.display = sym.includes(query) ? '' : 'none';
+        const visible = sym.includes(query) && (!byCat || catOf(meta[id]) === cat);
+        el.style.display = visible ? '' : 'none';
       });
+    }
+
+    /** Вкладки категорий: только те, что есть в списке; одна категория — вкладок нет. */
+    function renderCats() {
+      const present = [...new Set(Object.values(meta).map(catOf))].sort((a, b) => catRank(a) - catRank(b));
+      const sig = present.length > 1 ? present.join(',') : '';
+      if (sig && cat !== 'all' && !present.includes(cat)) cat = 'all';
+      if (sig === catsShown) {
+        catsEl.querySelectorAll('.wl-cat').forEach((b) => b.classList.toggle('on', /** @type {HTMLElement} */ (b).dataset.cat === cat));
+        return;
+      }
+      catsShown = sig;
+      catsEl.hidden = !sig;
+      if (!sig) { catsEl.innerHTML = ''; return; }
+      const label = (/** @type {string} */ k) => { const c = CATS.find((x) => x.key === k); return t(`wl.cat.${k}`, c ? c.label : k); };
+      catsEl.innerHTML = ['all', ...present].map((k) =>
+        `<button type="button" class="wl-cat${k === cat ? ' on' : ''}" data-cat="${k}" data-i18n="wl.cat.${k}">${k === 'all' ? t('wl.cat.all', 'All') : label(k)}</button>`).join('');
+    }
+
+    /** @param {string} next */
+    function setCat(next) {
+      cat = next;
+      try { localStorage.setItem(catKey, JSON.stringify(cat)); } catch { /* */ }
+      renderCats();
+      applyFilter();
     }
 
     function fmtPrice(it, raw) {
@@ -245,6 +301,13 @@
       if (!list) return;               // сеть недоступна — оставляем прежние строки
       const current = cfg.instrument ? cfg.instrument() : null;
       let firstId = null;
+      const seen = new Set(list.map((it) => String(it.id)));
+      Object.keys(rowEls).forEach((id) => {
+        if (seen.has(id)) return;
+        rowEls[id].remove();
+        delete rowEls[id];
+        delete meta[id];
+      });
       for (const it of list) {
         meta[it.id] = it;
         if (firstId === null) firstId = it.id;
@@ -259,6 +322,7 @@
         renderRow(el, it);
         el.classList.toggle('active', it.id === current);
       }
+      renderCats();
       reorder();
       applyFilter();
       if (cfg.onData) cfg.onData(list);
@@ -305,10 +369,15 @@
       reorder();
     };
     const onSearch = (e) => { query = e.target.value.toLowerCase(); applyFilter(); };
+    const onCatClick = (e) => {
+      const b = e.target.closest('.wl-cat');
+      if (b) setCat(b.dataset.cat);
+    };
 
     rowsEl.addEventListener('click', onRowsClick);
     headEl.addEventListener('click', onHeadClick);
     searchEl.addEventListener('input', onSearch);
+    catsEl.addEventListener('click', onCatClick);
 
     applyCols();
     refresh();
@@ -318,6 +387,8 @@
       refresh,
       setActive,
       update,
+      category: () => cat,
+      setCategory: setCat,
       /** Текущая видимость колонок (копия — внутреннее состояние не отдаём наружу). */
       columns: () => ({ ...cols }),
       setColumns(next) {
@@ -330,6 +401,7 @@
         rowsEl.removeEventListener('click', onRowsClick);
         headEl.removeEventListener('click', onHeadClick);
         searchEl.removeEventListener('input', onSearch);
+        catsEl.removeEventListener('click', onCatClick);
         root.innerHTML = '';
       },
     };
