@@ -137,3 +137,13 @@ test('символ платформы находит инструмент по c
   assert.equal(Market.matchSymbol(null, 'BTCUSD'), null);
   assert.equal(Market.matchSymbol([{ id: 9, symbol: 'BTCUSD' }, { id: 1, symbol: 'BTC-USDT' }], 'BTCUSD'), 9, 'точное совпадение главнее псевдонима');
 });
+
+test('название пары: шлюз отдаёт base/quote числовыми кодами — имя берётся из символа', () => {
+  assert.deepEqual(plain(Market.pair({ symbol: 'BTC-USDT', base: 1, quote: 100, category: 'crypto' })), ['BTC', 'USDT']);
+  assert.deepEqual(plain(Market.pair({ symbol: 'EURUSD', base: 31, quote: 100, category: 'forex' })), ['EUR', 'USD']);
+  assert.deepEqual(plain(Market.pair({ symbol: 'XAUUSD', base: 32, quote: 100, category: 'metals' })), ['XAU', 'USD']);
+  assert.deepEqual(plain(Market.pair({ symbol: 'AAPL', base: 40, quote: 100, category: 'stocks' })), ['AAPL', 'USD']);
+  assert.deepEqual(plain(Market.pair({ symbol: 'USOIL', base: 41, quote: 100, category: 'energy' })), ['USOIL', '']);
+  assert.deepEqual(plain(Market.pair({ symbol: 'EURUSD', base: 'EUR', quote: 'USD' })), ['EUR', 'USD']);
+  assert.deepEqual(plain(Market.pair(null)), ['', '']);
+});

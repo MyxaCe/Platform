@@ -35,7 +35,7 @@ function fixture() {
  * «что-то долго». Поймано мутацией «destroy не снимает таймер».
  */
 async function mounted(t, overrides = {}) {
-  const env = loadWidget(['watchlist.js']);
+  const env = loadWidget(['market.js', 'watchlist.js']);
   t.after(() => env.cleanup());
   let data = fixture();
   const selected = { id: null };
@@ -205,7 +205,7 @@ test('destroy очищает контейнер и снимает слушате
 });
 
 test('destroy останавливает автообновление', async (t) => {
-  const env = loadWidget(['watchlist.js']);
+  const env = loadWidget(['market.js', 'watchlist.js']);
   t.after(() => env.cleanup());
   let fetches = 0;
   const wl = env.window.Watchlist.mount(env.root, {

@@ -220,33 +220,33 @@ function wave2Instruments(over) {
   };
   return [
     Object.assign({}, v2, {
-      id: 1, symbol: 'BTC-USDT', canonical: 'BTCUSD', name: 'Bitcoin', category: 'crypto', base: 'BTC', quote: 'USDT',
+      id: 1, symbol: 'BTC-USDT', canonical: 'BTCUSD', name: 'Bitcoin', category: 'crypto', base: 1, quote: 100,
       price_decimals: 2, qty_decimals: 5, tick_size: 1, qty_step: 1, min_qty: 1,
       last: 6500000, bid: 6500000, ask: 6500100, high: 6600000, low: 6400000, change: 1.5, volume: 123400000, quote_volume: 80210000000,
     }),
     Object.assign({}, v2, {
-      id: 3, symbol: 'EURUSD', canonical: 'EURUSD', name: 'Euro / US Dollar', category: 'forex', base: 'EUR', quote: 'USD',
+      id: 3, symbol: 'EURUSD', canonical: 'EURUSD', name: 'Euro / US Dollar', category: 'forex', base: 3, quote: 100,
       price_decimals: 5, qty_decimals: 0, tick_size: 1, qty_step: 1000, min_qty: 1000, contract_size: '100000', lot_decimals: 2,
       has_depth: false, has_trades: false, has_1s: false, session: FOREX_SESSION,
       market: { status: 'closed', next_open: nextOpen, reason: 'weekend', tradable: false },
       last: 108414, bid: 108412, ask: 108415, high: 108620, low: 108150, change: -0.12, volume: null, quote_volume: null,
     }, o.eurusd || {}),
     Object.assign({}, v2, {
-      id: 4, symbol: 'XAUUSD', canonical: 'XAUUSD', name: 'Gold / US Dollar', category: 'metals', base: 'XAU', quote: 'USD',
+      id: 4, symbol: 'XAUUSD', canonical: 'XAUUSD', name: 'Gold / US Dollar', category: 'metals', base: 4, quote: 100,
       price_decimals: 2, qty_decimals: 2, tick_size: 1, qty_step: 100, min_qty: 100, contract_size: '100', lot_decimals: 2,
       has_depth: false, has_trades: false, has_1s: false,
       session: { timezone: 'America/New_York', weekly: [{ open: 'sun 18:00', close: 'fri 17:00' }], holidays: [] },
       last: 265012, bid: 265000, ask: 265024, high: 266100, low: 263900, change: 0.48, volume: null, quote_volume: null,
     }, o.xauusd || {}),
     Object.assign({}, v2, {
-      id: 5, symbol: 'AAPL', canonical: 'AAPL', name: 'Apple Inc.', category: 'stocks', base: 'AAPL', quote: 'USD',
+      id: 5, symbol: 'AAPL', canonical: 'AAPL', name: 'Apple Inc.', category: 'stocks', base: 5, quote: 100,
       price_decimals: 2, qty_decimals: 0, tick_size: 1, qty_step: 1, min_qty: 1, contract_size: '1', lot_decimals: 0,
       has_depth: false, has_trades: true, has_1s: false,
       session: { timezone: 'America/New_York', weekly: ['mon', 'tue', 'wed', 'thu', 'fri'].map((d) => ({ open: `${d} 09:30`, close: `${d} 16:00` })), holidays: ['2026-11-26'] },
       last: 22814, bid: 22813, ask: 22815, high: 22990, low: 22650, change: 0.87, volume: 5123400, quote_volume: 116800000000,
     }, o.aapl || {}),
     Object.assign({}, v2, {
-      id: 6, symbol: 'LTC-USDT', canonical: 'LTCUSD', name: 'Litecoin', category: 'crypto', base: 'LTC', quote: 'USDT',
+      id: 6, symbol: 'LTC-USDT', canonical: 'LTCUSD', name: 'Litecoin', category: 'crypto', base: 6, quote: 100,
       price_decimals: 2, qty_decimals: 3, mode: 'closeOnly',
       last: 8215, bid: 8214, ask: 8216, high: 8400, low: 8010, change: -1.2, volume: 9123000, quote_volume: 74900000,
     }, o.ltc || {}),

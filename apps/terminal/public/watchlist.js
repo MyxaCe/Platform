@@ -113,6 +113,7 @@
   }
 
   function coinHtml(base) {
+    base = String(base || '?');
     return `<span class="coinwrap"><span class="coinbadge" style="background:hsl(${hue(base)} 52% 40%)">${base[0]}</span>` +
       `<img class="coin" src="/vendor/coins/${base.toLowerCase()}.svg" onerror="this.remove()" alt=""></span>`;
   }
@@ -209,8 +210,7 @@
 
     /** @param {any} it @returns {[string, string]} */
     function pairOf(it) {
-      if (it.symbol.includes('-')) { const [b, q] = it.symbol.split('-'); return [b, q || 'USDT']; }
-      return [it.base || it.symbol, it.quote || ''];
+      return window.Market ? window.Market.pair(it) : [String(it.symbol), ''];
     }
 
     /** @param {any} it */

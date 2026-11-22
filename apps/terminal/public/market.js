@@ -176,5 +176,16 @@
     return null;
   }
 
-  window.Market = { state, closeOnly, blockOpen, blockPending, blockClose, fromSession, nextOpen, when, quoteOf, statusOf, normSymbol, matchSymbol, STATUSES };
+  /** @param {any} it @returns {[string, string]} */
+  function pair(it) {
+    if (!it || typeof it.symbol !== 'string') return ['', ''];
+    const s = it.symbol;
+    if (s.includes('-')) { const [b, q] = s.split('-'); return [b, q || '']; }
+    if (typeof it.base === 'string' && it.base) return [it.base, typeof it.quote === 'string' ? it.quote : ''];
+    if (it.category === 'stocks' || it.category === 'indices') return [s, 'USD'];
+    if (/^[A-Z]{6}$/.test(s)) return [s.slice(0, 3), s.slice(3)];
+    return [s, ''];
+  }
+
+  window.Market = { pair, state, closeOnly, blockOpen, blockPending, blockClose, fromSession, nextOpen, when, quoteOf, statusOf, normSymbol, matchSymbol, STATUSES };
 })();

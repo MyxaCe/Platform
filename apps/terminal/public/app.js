@@ -25,11 +25,7 @@ const qdec = (id) => (META[id]?.qty_decimals ?? 3);
 const pscale = (id) => 10 ** pdec(id);
 const qscale = (id) => 10 ** qdec(id);
 /** @param {any} it @returns {[string, string]} */
-const pairOf = (it) => {
-  if (!it) return ['', ''];
-  if (it.symbol.includes('-')) { const [b, q] = it.symbol.split('-'); return [b, q || '']; }
-  return [it.base || it.symbol, it.quote || ''];
-};
+const pairOf = (it) => Market.pair(it);
 /** @param {number} id */
 const quoteDriven = (id) => { const it = META[id]; return !!it && typeof it.category === 'string' && it.category !== 'crypto'; };
 /** @param {any} c */
