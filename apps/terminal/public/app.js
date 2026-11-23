@@ -240,10 +240,57 @@ function redrawPriceLines() {
 new ResizeObserver(() => chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight })).observe(chartEl);
 chart.subscribeCrosshairMove((p) => { const id = selected; if (id == null) return; const d = p.seriesData?.get(mainSeries); if (p.time && d) { const c = d.close != null ? d : { open: d.value, high: d.value, low: d.value, close: d.value }; const f = priceSeries.forming(); updateLegend(id, p.time, c, !!f && p.time === f.time); } else refreshLegend(); });
 
+/** Сколько свечей грузим сразу и сколько — за одну подгрузку истории влево. */
+const FIRST_PAGE = 300, OLDER_PAGE = 500;
+/** Подгружать раньше, чем человек упрётся в край: за столько баров до самой старой. */
+const OLDER_AHEAD = 30;
+/**
+ * Состояние подгрузки истории для текущих инструмента и таймфрейма. `gen`
+ * меняется при каждой полной загрузке: ответ, пришедший для прежнего
+ * инструмента или ТФ, отбрасывается (переключение отменяет подгрузку).
+ */
+const hist = { gen: 0, loading: false, done: true, retryAt: 0 };
+
+async function loadOlder() {
+  const id = selected;
+  if (id == null || hist.loading || hist.done || !rawCandles.length || Date.now() < hist.retryAt) return;
+  const gen = hist.gen, timeframe = tf;
+  const oldest = rawCandles[0].time;
+  hist.loading = true;
+  try {
+    const page = await api.candles(id, timeframe, OLDER_PAGE, oldest - 1);
+    if (gen !== hist.gen || id !== selected || timeframe !== tf) return;
+    if (page === null) { hist.retryAt = Date.now() + 5000; return; }
+    const s = pscale(id), v = qscale(id);
+    const seen = new Set();
+    const older = page
+      .filter((c) => c && Number.isFinite(c.time) && c.time < oldest && !seen.has(c.time) && seen.add(c.time))
+      .sort((a, b) => a.time - b.time)
+      .map((c) => ({ time: c.time, open: c.open / s, high: c.high / s, low: c.low / s, close: c.close / s, volume: c.volume == null ? null : c.volume / v }));
+    if (page.length < OLDER_PAGE) hist.done = true;
+    if (!older.length) { hist.done = true; return; }
+    const range = chart.timeScale().getVisibleLogicalRange();
+    rawCandles = older.concat(rawCandles);
+    mainSeries.setData(mainData());
+    volume.setData(rawCandles.map(volPoint));
+    applyIndicators(); redrawPriceLines(); draw.shift(older.length);
+    if (range) chart.timeScale().setVisibleLogicalRange({ from: range.from + older.length, to: range.to + older.length });
+    refreshLegend();
+  } finally {
+    if (gen === hist.gen) hist.loading = false;
+  }
+}
+chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+  if (range && range.from < OLDER_AHEAD) loadOlder();
+});
+
 async function loadCandles(id, timeframe) {
   const load = document.getElementById('loading'); load.classList.remove('hidden');
+  hist.gen += 1; hist.loading = false; hist.done = true; hist.retryAt = 0;
+  const gen = hist.gen;
   try {
-    const fetched = await api.candles(id, timeframe, 300);
+    const fetched = await api.candles(id, timeframe, FIRST_PAGE);
+    if (gen !== hist.gen) return;
     markMarketData('candles', fetched !== null);
     if (fetched === null) {
       load.classList.add('hidden');
@@ -257,10 +304,11 @@ async function loadCandles(id, timeframe) {
     volume.setData(rawCandles.map(volPoint));
     applyIndicators(); redrawPriceLines(); panel.refreshSignals();
     priceSeries.seed(rawCandles.length ? raw[raw.length - 1] : null);
+    hist.done = raw.length < FIRST_PAGE;
     if (rawCandles.length) { const n = rawCandles.length; chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 3 }); }
     refreshLegend();
     draw.clear();
-  } finally { load.classList.add('hidden'); }
+  } finally { if (gen === hist.gen) load.classList.add('hidden'); }
 }
 /** @param {any} [bar] */
 function drawForming(bar) {
@@ -384,7 +432,26 @@ function renderInstrumentHeader(it) {
   mk.textContent = [mkText, only ? T('mk.closeOnly') : null].filter(Boolean).join(' · ');
   mk.title = only && !mkText ? T('gate.closeOnly') : mk.textContent;
   mk.classList.toggle('ih-market--only', only && !mkText);
-  document.body.classList.toggle('src-v2', quoteDriven(it.id));
+  const cm = $('chartMarket');
+  cm.hidden = !mkText;
+  cm.textContent = mkText || '';
+  syncFeedPanels(it);
+}
+
+/**
+ * Стакан и лента сделок есть не у каждого инструмента (котировочный источник:
+ * форекс, металлы, акции). Тогда панели убираются целиком, а не объясняют
+ * клиенту, откуда у нас цены.
+ * @param {any} it
+ */
+function syncFeedPanels(it) {
+  const noBook = !!it && it.has_depth === false;
+  const noTape = !!it && it.has_trades === false;
+  const changed = document.body.classList.contains('no-book') !== noBook || document.body.classList.contains('no-tape') !== noTape;
+  document.body.classList.toggle('no-book', noBook);
+  document.body.classList.toggle('no-tape', noTape);
+  if (noBook && noTape && document.body.dataset.mtab === 'book') setMTab('chart');
+  if (changed) requestAnimationFrame(() => chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight }));
 }
 
 /**
@@ -476,7 +543,6 @@ const book = OrderBook.mount(document.getElementById('book'), {
   markPrice: (id) => (META[id]?.last != null ? META[id].last / pscale(id) : null),
   interval: 700,
   storagePrefix: 'ob',
-  source: 'Binance',
   t: wT,
   num: fmtN,
 });
@@ -511,7 +577,6 @@ const trades = Trades.mount(document.getElementById('trades'), {
     return all === null ? null : all.filter((d) => d.instrument === id);
   },
   fmtUsd: usd,
-  source: 'Binance',
   feed: (id) => META[id]?.has_trades !== false,
   size: dealSize,
   t: wT,

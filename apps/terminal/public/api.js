@@ -125,7 +125,13 @@
        * @param {number} tf
        * @param {number} limit
        */
-      candles: (id, tf, limit) => read(`/candles/${id}?tf=${tf}&limit=${limit}`),
+      /**
+       * @param {number} id
+       * @param {number} tf
+       * @param {number} limit
+       * @param {number} [end] unix-секунды: свечи не позже этого времени (подгрузка истории)
+       */
+      candles: (id, tf, limit, end) => read(`/candles/${id}?tf=${tf}&limit=${limit}${end != null ? `&end=${end}` : ''}`),
       /**
        * @param {number} id
        * @param {number} [limit]

@@ -224,6 +224,17 @@
 
   return {
     clear() { drawings.length = 0; pending = []; setActive(null); },
+    /**
+     * В начало графика добавили `n` старых баров: точки рисунков привязаны к
+     * номеру бара, поэтому сдвигаем их, чтобы линии остались на своих свечах.
+     * @param {number} n
+     */
+    shift(n) {
+      if (!n) return;
+      for (const d of drawings) for (const pt of d.pts) pt.logical += n;
+      for (const pt of pending) pt.logical += n;
+      redraw();
+    },
     destroy() {
       ro.disconnect();
       window.removeEventListener('keydown', onKey);

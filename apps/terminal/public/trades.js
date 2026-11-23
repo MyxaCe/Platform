@@ -5,7 +5,6 @@
 .trades__tabs button { background: transparent; border: none; border-bottom: 2px solid transparent; padding: 0;
   color: var(--muted,#6b7688); font-weight: 700; font-size: 12.5px; cursor: pointer; font-family: inherit; white-space: nowrap; }
 .trades__tabs button.active { color: var(--text,#d7dce5); border-bottom-color: var(--brand,#f0b90b); }
-.trades__src { margin-left: auto; align-self: center; font-size: 10.5px; font-weight: 600; color: var(--muted,#6b7688); }
 .trades__head, .trow { display: grid; grid-template-columns: 1fr 1fr .8fr; gap: 4px; padding: 3px 10px;
   font-size: 11px; font-variant-numeric: tabular-nums; }
 .trades__head { color: var(--muted,#6b7688); font-size: 11px; border-bottom: 1px solid var(--border,#1f2735); }
@@ -36,9 +35,8 @@
     const t = ctx.t || ((/** @type {string} */ _k, /** @type {string} */ en) => en);
     const tx = (/** @type {string} */ k, /** @type {string} */ en) => `<span data-i18n="${k}">${t(k, en)}</span>`;
     root.classList.add('trades');
-    const src = ctx.source ? `<span class="trades__src">${ctx.source}</span>` : '';
     root.innerHTML =
-      `<div class="trades__tabs"><button data-t="market" class="active">${tx('tr.market', 'MARKET TRADES')}</button><button data-t="mine">${tx('tr.mine', 'MY TRADES')}</button>${src}</div>` +
+      `<div class="trades__tabs"><button data-t="market" class="active">${tx('tr.market', 'MARKET TRADES')}</button><button data-t="mine">${tx('tr.mine', 'MY TRADES')}</button></div>` +
       `<div class="trades__pane" data-t="market"><div class="trades__head">${tx('tr.price', 'PRICE')}${tx('tr.qty', 'QTY')}${tx('tr.time', 'TIME')}</div><div class="trades__rows" data-rows="market"></div></div>` +
       `<div class="trades__pane hidden" data-t="mine"><div class="trades__head">${tx('tr.sideQty', 'SIDE / QTY')}${tx('tr.entryExit', 'ENTRY → EXIT')}<span>P&L</span></div><div class="trades__rows" data-rows="mine"></div></div>`;
 
@@ -67,7 +65,7 @@
       const id = ctx.instrument();
       const { pd, qd } = (ctx.decimals && ctx.decimals(id)) || { pd: 2, qd: 5 };
       if (id != null && ctx.feed && ctx.feed(id) === false) {
-        rows('market').innerHTML = `<div class="trades__empty">${t('tr.noFeed', 'No trade feed for this instrument — prices arrive as quotes.')}</div>`;
+        rows('market').innerHTML = `<div class="trades__empty">${t('tr.noFeed', 'No trade feed for this instrument.')}</div>`;
         return;
       }
       rows('market').innerHTML = tape.map((t) =>

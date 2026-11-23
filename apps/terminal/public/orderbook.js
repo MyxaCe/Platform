@@ -4,7 +4,6 @@
 .ob__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px;
   font-size: 13px; font-weight: 700; border-bottom: 1px solid var(--border,#1f2735); }
 .ob__title { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.ob__src { font-size: 10.5px; font-weight: 600; color: var(--muted,#6b7688); cursor: help; }
 .ob__dots { background: none; border: none; color: var(--muted,#6b7688); cursor: pointer; font-size: 15px;
   line-height: 1; padding: 2px 6px; border-radius: 4px; font-family: inherit; }
 .ob__dots:hover { background: var(--panel2,#151a25); color: var(--text,#d7dce5); }
@@ -125,8 +124,7 @@
 
     root.classList.add('ob');
     root.innerHTML = `
-      <div class="ob__head"><div class="ob__title">${ctx.source ? tx('ob.title', 'Market depth') : tx('ob.title.book', 'Order Book')}` +
-        `${ctx.source ? `<span class="ob__src" data-i18n="ob.source" data-i18n-title="ob.source.tip" title="${t('ob.source.tip', '')}">${t('ob.source', 'source: ' + ctx.source)}</span>` : ''}</div>` +
+      <div class="ob__head"><div class="ob__title">${tx('ob.title', 'Market depth')}</div>` +
         `<button class="ob__dots" title="${t('ob.settings', 'Settings')}" data-i18n-title="ob.settings">⋯</button></div>
       <div class="ob__wrap">
         <div class="ob__menu hidden">

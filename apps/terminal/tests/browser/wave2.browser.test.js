@@ -95,7 +95,8 @@ test('волна 2: терминал открывается, список из C
 
   const btc = await ui(term.page);
   assert.equal(btc.pair, 'BTC/USDT');
-  assert.notEqual(await term.page.evaluate(() => getComputedStyle(document.querySelector('.ih-source')).display), 'none', 'у крипто источник назван, как раньше');
+  assert.equal(await term.page.evaluate(() => /binance/i.test(document.body.innerText)), false, 'имя поставщика цен клиенту не показываем');
+  assert.deepEqual(await term.page.evaluate(() => ['no-book', 'no-tape'].filter((c) => document.body.classList.contains(c))), [], 'у крипто стакан и лента на месте');
   assert.equal(btc.market, null);
   assert.equal(btc.gate, null);
   assert.equal(btc.buyOff, false);
@@ -128,7 +129,10 @@ test('EURUSD при закрытом рынке: пометка со време�
 
   const s = await ui(term.page);
   assert.equal(s.pair, 'EUR/USD');
-  assert.equal(await term.page.evaluate(() => getComputedStyle(document.querySelector('.ih-source')).display), 'none', 'не крипто — подпись «Цены: Binance» не врёт');
+  assert.deepEqual(await term.page.evaluate(() => ['no-book', 'no-tape'].filter((c) => document.body.classList.contains(c))), ['no-book', 'no-tape']);
+  assert.equal(await term.page.evaluate(() => getComputedStyle(/** @type {Element} */ (document.querySelector('.col-left'))).display), 'none', 'стакана и ленты нет — панели убраны, место у графика');
+  assert.equal(await term.page.evaluate(() => /** @type {HTMLElement} */ (document.getElementById('chartMarket')).hidden), false, 'метка «Рынок закрыт» над графиком');
+  assert.match(await term.page.evaluate(() => /** @type {HTMLElement} */ (document.getElementById('chartMarket')).textContent || ''), /^Рынок закрыт · откроется \S/);
   assert.match(s.market, /^Рынок закрыт · откроется \S/, `пометка: «${s.market}»`);
   assert.match(s.gate, /Рыночные ордера недоступны до открытия/);
   assert.ok(s.buyOff && s.sellOff, 'рыночная сделка неактивна');
@@ -137,9 +141,9 @@ test('EURUSD при закрытом рынке: пометка со време�
   assert.equal(s.activeTf, '60', 'секундный ТФ сменился на минутный');
   assert.ok(!tfs.includes('1'), `секундные свечи не запрашивались: ${tfs}`);
   assert.ok(s.bookOff);
-  assert.match(s.bookText, /Стакана по этому инструменту нет/);
+  assert.equal(s.bookText, null, 'панели стакана нет совсем, без объяснений про поставщика');
   assert.equal(hits(term.seen, '/depth/3').length, 0);
-  assert.match(s.tape, /Ленты сделок по этому инструменту нет/);
+  assert.match(s.tape, /Лента сделок по этому инструменту недоступна/);
   assert.equal(s.sizeHint, 'Мин. 0,01 лот · шаг 0,01 лот');
   assert.match(s.sizeEq, /\$1\s?084,14|1\s?084,14/, `стоимость 0.01 лота: «${s.sizeEq}»`);
 
@@ -182,7 +186,7 @@ test('XAUUSD: живая свеча и цена по quote, смена стат�
   assert.match(live.last, /2\s655,12/, `последняя цена по mid: «${live.last}»`);
   const legend = await term.page.evaluate(() => document.getElementById('lgOhlc').textContent);
   assert.match(legend, /C\s+2\s655,12/, `свеча закрылась по mid: «${legend}»`);
-  assert.match(live.tape, /Ленты сделок/, 'quote в ленту сделок не попадает');
+  assert.match(live.tape, /Лента сделок/, 'quote в ленту сделок не попадает');
 
   term.push([{ type: 'market', instrument: 4, status: 'closed', next_open: Date.now() + 5 * 3600 * 1000, reason: 'daily break' }]);
   await settle(term.page, 200);

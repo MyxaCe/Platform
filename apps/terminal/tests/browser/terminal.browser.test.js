@@ -505,7 +505,7 @@ test('переключатель RU/EN переводит интерфейс б�
   const after = await term.page.evaluate(() => ({ lang: document.documentElement.lang, book: document.querySelector('.ob__head').textContent, token: !!window.Sso.token() }));
   assert.equal(after.lang, 'en');
   assert.match(after.book, /Market depth/);
-  assert.match(after.book, /Binance/, 'источник глубины назван и по-английски');
+  assert.doesNotMatch(after.book, /Binance/, 'имя поставщика цен клиенту не показываем');
   assert.equal(after.token, true, 'смена языка сессию не трогает');
 });
 

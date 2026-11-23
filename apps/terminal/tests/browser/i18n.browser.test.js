@@ -106,7 +106,7 @@ for (const lang of ['de', 'fr', 'es']) {
   test(`десктоп, ${lang}: шапка, тулбар, тикет, нижняя панель, стакан и сделки не обрезаны`, async (t) => {
     const term = await open(t, lang, DESKTOP);
     const { page } = term;
-    const parts = ['.metric', '.metric__l', '.kind-badge', '.chip', '.ih-l', '.ih-source', '.lang button', '.btn-top', '.tbbtn', '.bottom__tabs > span', '.ob__title > *', '.trades__tabs > *', '.trades__head > span', '.closebtn', ...FORM];
+    const parts = ['.metric', '.metric__l', '.kind-badge', '.chip', '.ih-l', '.lang button', '.btn-top', '.tbbtn', '.bottom__tabs > span', '.ob__title > *', '.trades__tabs > *', '.trades__head > span', '.closebtn', ...FORM];
     assert.deepEqual(await overflow(page, parts, true), []);
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'страница не шире окна');
     assert.deepEqual(term.errors, []);

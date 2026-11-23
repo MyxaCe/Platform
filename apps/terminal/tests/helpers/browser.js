@@ -228,7 +228,7 @@ function startServer(opts) {
 
     const handler = api[pathname];
     if (handler) {
-      const out = handler(url, req, body);
+      const out = await handler(url, req, body);
       if (out && out.__status) {
         res.writeHead(out.__status, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(out.body ?? null));
