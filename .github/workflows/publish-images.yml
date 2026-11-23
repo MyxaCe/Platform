@@ -417,7 +417,7 @@ jobs:
           set -euo pipefail
           extra=()
           [ "$INPUTS" = unsure ] || extra=(-t "$IMAGE_REF:inputs-$INPUTS")
-          docker buildx imagetools create -t "$IMAGE_REF:$IMAGE_TAG" "${extra[@]}" "$IMAGE_REF@$DIGEST"
+          docker buildx imagetools create --prefer-index=false -t "$IMAGE_REF:$IMAGE_TAG" "${extra[@]}" "$IMAGE_REF@$DIGEST"
           got=$(docker buildx imagetools inspect "$IMAGE_REF:$IMAGE_TAG" --format '{{.Manifest.Digest}}')
           if [ "$got" != "$DIGEST" ]; then
             echo "::error::после публикации $IMAGE_TAG указывает на $got, а ожидался $DIGEST"
