@@ -126,43 +126,120 @@ jobs:
             echo "осмотрено процессов: **$osmotreno** из объявленных **$obyavleno**; зелёных прогонов: **$zeljonyh**"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  publish:
-    name: Собрать и опубликовать · ${{ matrix.image }}
-    needs: proverka
+  # Сборка идёт ПАРАЛЛЕЛЬНО с CI, но тег `:<полный sha>` ставит только
+  # `publish`, а он ждёт `proverka` (CI зелён). До зелени образ лежит в
+  # реестре без тега — только по digest, compose его не знает (OPS-36:
+  # тег-хеш существует только у коммита с зелёным CI).
+  #
+  # Если входы образа (Dockerfile + файлы, которые он копирует, + аргументы)
+  # совпадают с уже опубликованным образом, сборки нет: берём тот образ и
+  # вешаем на него новый тег-хеш. Совпадение ищется по тегу `inputs-<отпечаток>`,
+  # который ставится тоже только после зелени. Отпечаток считает
+  # .github/image-inputs.py; при любом сомнении он говорит `unsure` → сборка.
+  build:
+    name: Собрать · ${{ matrix.image }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
           - image: broker-terminal-gateway
-            context: ./backend
-            dockerfile: gateway/Dockerfile
+            context: backend
+            file: backend/gateway/Dockerfile
+            target: ''
+            arg-names: ''
+            public-args: ''
           - image: broker-terminal-web
-            context: ./apps/terminal
-            dockerfile: Dockerfile
+            context: apps/terminal
+            file: apps/terminal/Dockerfile
+            target: ''
+            arg-names: ''
+            public-args: ''
     steps:
       - uses: actions/checkout@v4
 
-      - name: Имя образа и тег
-        id: ref
+      - name: Имя образа, тег, кеш
         env:
           IMAGE: ${{ matrix.image }}
         run: |
           set -euo pipefail
           owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          ref="ghcr.io/${owner}/${IMAGE}"
           tag="${{ github.sha }}"
-
           if ! printf '%s' "$tag" | grep -Eq '^[0-9a-f]{40}$'; then
             echo "::error::тег «$tag» не является полным хешем коммита; плавающие теги запрещены"
             exit 1
           fi
+          branch=$(printf '%s' "${{ github.ref_name }}" | tr -c 'a-zA-Z0-9_.-' '-' | cut -c1-80)
+          if [ "${{ github.ref_name }}" = "${{ github.event.repository.default_branch }}" ]; then
+            cache_to=buildcache
+          else
+            cache_to="buildcache-$branch"
+          fi
+          {
+            echo "IMAGE_REF=ghcr.io/${owner}/${IMAGE}"
+            echo "IMAGE_TAG=$tag"
+            echo "CACHE_REF=ghcr.io/${owner}/${IMAGE}-cache"
+            echo "CACHE_BRANCH=buildcache-$branch"
+            echo "CACHE_TO=$cache_to"
+          } >> "$GITHUB_ENV"
 
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "IMAGE_REF=$ref" >> "$GITHUB_ENV"
-          echo "IMAGE_TAG=$tag" >> "$GITHUB_ENV"
+      - name: Аргументы сборки и охват публичных адресов
+        id: public
+        env:
+          ARG_NAMES: ${{ matrix.arg-names }}
+          PUBLIC_ARGS: ${{ matrix.public-args }}
+          FRAME_ANCESTORS: ${{ vars.FRAME_ANCESTORS }}
+          NEXT_PUBLIC_CABINET_URL: ${{ vars.NEXT_PUBLIC_CABINET_URL }}
+          NEXT_PUBLIC_WS_URL: ${{ vars.NEXT_PUBLIC_WS_URL }}
+          NEXT_PUBLIC_TERMINAL_URL: ${{ vars.NEXT_PUBLIC_TERMINAL_URL }}
+          NEXT_PUBLIC_SENTRY_DSN: ${{ vars.NEXT_PUBLIC_SENTRY_DSN }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo 'args<<__BUILD_ARGS__'
+            for name in $ARG_NAMES; do
+              eval "value=\${$name:-}"
+              [ -n "$value" ] || continue
+              echo "$name=$value"
+            done
+            echo '__BUILD_ARGS__'
+          } >> "$GITHUB_OUTPUT"
+
+          missing=0; total=0
+          for name in $PUBLIC_ARGS; do
+            total=$((total + 1))
+            eval "value=\${$name:-}"
+            if [ -z "$value" ]; then
+              missing=$((missing + 1))
+              echo "::warning::$name не задан — в образ уйдёт умолчание Dockerfile"
+            fi
+          done
+          if [ "$total" -eq 0 ]; then
+            state=none
+          elif [ "$missing" -eq 0 ]; then
+            state=set
+          else
+            state=unset
+            echo "::warning::осмотрено $total адресов, не задано $missing — ОБРАЗ НЕ ПРИГОДЕН ДЛЯ ПРОДА"
+          fi
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+
+      - name: Отпечаток входов образа
+        id: inputs
+        env:
+          IMAGE_BUILD_ARGS: ${{ steps.public.outputs.args }}
+          IMAGE_INPUTS_SALT: ${{ vars.IMAGE_INPUTS_SALT }}
+        run: |
+          set -euo pipefail
+          h=$(python3 .github/image-inputs.py --context "${{ matrix.context }}" --file "${{ matrix.file }}" --target "${{ matrix.target }}")
+          case "$h" in
+            unsure|[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+            *) echo "::error::отпечаток «$h» не разобран"; exit 1;;
+          esac
+          echo "отпечаток входов: $h"
+          echo "hash=$h" >> "$GITHUB_OUTPUT"
 
       - name: Вход в ghcr.io
         uses: docker/login-action@v3
@@ -170,6 +247,127 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Опубликованный образ с теми же входами
+        id: reuse
+        env:
+          H: ${{ steps.inputs.outputs.hash }}
+        run: |
+          set -uo pipefail
+          if [ "$H" = unsure ]; then
+            echo "входы не оценены — собираем"
+            echo "found=0" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if d=$(docker buildx imagetools inspect "$IMAGE_REF:inputs-$H" --format '{{.Manifest.Digest}}' 2>/dev/null) && [ -n "$d" ]; then
+            lab=$(docker buildx imagetools inspect "$IMAGE_REF@$d" --format '{{index .Image.Config.Labels "com.broker.inputs"}}' 2>/dev/null || true)
+            rev=$(docker buildx imagetools inspect "$IMAGE_REF@$d" --format '{{index .Image.Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)
+            if [ "$lab" = "$H" ]; then
+              echo "входы совпали с образом коммита $rev ($d) — сборки нет"
+              { echo "found=1"; echo "digest=$d"; echo "from=$rev"; } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::warning::тег inputs-$H есть, но метка образа «$lab» не совпала — собираем заново"
+          fi
+          echo "found=0" >> "$GITHUB_OUTPUT"
+
+      - name: Сборка (без тега, только по digest)
+        id: build
+        if: steps.reuse.outputs.found != '1'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          provenance: false
+          sbom: false
+          build-args: ${{ steps.public.outputs.args }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.sha }}
+            com.broker.public-addresses=${{ steps.public.outputs.state }}
+            com.broker.built-by=${{ github.workflow }}/${{ github.run_id }}
+            com.broker.inputs=${{ steps.inputs.outputs.hash }}
+          outputs: type=image,name=${{ env.IMAGE_REF }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: |
+            type=registry,ref=${{ env.CACHE_REF }}:buildcache
+            type=registry,ref=${{ env.CACHE_REF }}:${{ env.CACHE_BRANCH }}
+          cache-to: type=registry,ref=${{ env.CACHE_REF }}:${{ env.CACHE_TO }},mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
+
+      - name: Итог сборки
+        env:
+          H: ${{ steps.inputs.outputs.hash }}
+          FOUND: ${{ steps.reuse.outputs.found }}
+          REUSED_DIGEST: ${{ steps.reuse.outputs.digest }}
+          REUSED_FROM: ${{ steps.reuse.outputs.from }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "$FOUND" = 1 ]; then d="$REUSED_DIGEST"; reused=1; from="$REUSED_FROM"; else d="$BUILT_DIGEST"; reused=0; from="${{ github.sha }}"; fi
+          if ! printf '%s' "$d" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::digest «$d» не получен — публиковать нечего"
+            exit 1
+          fi
+          mkdir -p image
+          printf '{"image":"%s","digest":"%s","inputs":"%s","reused":%s,"from":"%s"}\n' \
+            "${{ matrix.image }}" "$d" "$H" "$reused" "$from" > "image/${{ matrix.image }}.json"
+          cat "image/${{ matrix.image }}.json"
+          {
+            echo "### ${{ matrix.image }}"
+            if [ "$reused" = 1 ]; then echo "переиспользован образ коммита \`$from\` (входы те же)"; else echo "собран заново"; fi
+            echo ""
+            echo "digest \`$d\` · отпечаток входов \`$H\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.image }}
+          path: image/${{ matrix.image }}.json
+          retention-days: 3
+
+  publish:
+    name: Опубликовать · ${{ matrix.image }}
+    needs: [proverka, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [broker-terminal-gateway, broker-terminal-web]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-${{ matrix.image }}
+
+      - name: Что публикуем
+        run: |
+          set -euo pipefail
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          f="${{ matrix.image }}.json"
+          read_json() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$f" "$1"; }
+          digest=$(read_json digest); inputs=$(read_json inputs); reused=$(read_json reused); from=$(read_json from)
+          printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "::error::digest «$digest» не разобран"; exit 1; }
+          tag="${{ github.sha }}"
+          printf '%s' "$tag" | grep -Eq '^[0-9a-f]{40}$' || { echo "::error::тег «$tag» не полный хеш"; exit 1; }
+          {
+            echo "IMAGE_REF=ghcr.io/${owner}/${{ matrix.image }}"
+            echo "IMAGE_TAG=$tag"
+            echo "DIGEST=$digest"
+            echo "INPUTS=$inputs"
+            echo "REUSED=$( [ "$reused" = True ] || [ "$reused" = 1 ] && echo 1 || echo 0 )"
+            echo "FROM_SHA=$from"
+          } >> "$GITHUB_ENV"
+
+      - name: Вход в ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
 
       - name: Запрет latest
         run: |
@@ -179,8 +377,7 @@ jobs:
             echo "::error::в реестре есть $IMAGE_REF:latest — плавающий тег запрещён платформой, удалите версию пакета"
             exit 1
           fi
-          echo "latest отсутствует. Ответ реестра (печатаем целиком, чтобы отказ прав не выглядел отсутствием тега):"
-          echo "$out"
+          echo "latest отсутствует. Ответ реестра: $out"
 
       - name: Неизменяемость тега
         run: |
@@ -191,47 +388,41 @@ jobs:
             echo "$out" | head -20
             exit 1
           fi
-          echo "тега ещё нет, публикуем. Ответ реестра:"
-          echo "$out"
+          echo "тега ещё нет, публикуем. Ответ реестра: $out"
 
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Сборка
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.context }}/${{ matrix.dockerfile }}
-          load: true
-          push: false
-          provenance: false
-          tags: ${{ steps.ref.outputs.ref }}:${{ steps.ref.outputs.tag }}
-          labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.version=${{ github.sha }}
-            com.broker.public-addresses=none
-            com.broker.built-by=${{ github.workflow }}/${{ github.run_id }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
-
-      - name: Метка ревизии стоит и совпадает с коммитом
+      - name: Метки образа сходятся
         run: |
           set -euo pipefail
-          got=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_REF:$IMAGE_TAG")
-          if [ "$got" != "$IMAGE_TAG" ]; then
-            echo "::error::метка ревизии «$got» не равна коммиту «$IMAGE_TAG» — из чего собран образ, ответить нечем"
+          rev=$(docker buildx imagetools inspect "$IMAGE_REF@$DIGEST" --format '{{index .Image.Config.Labels "org.opencontainers.image.revision"}}')
+          lab=$(docker buildx imagetools inspect "$IMAGE_REF@$DIGEST" --format '{{index .Image.Config.Labels "com.broker.inputs"}}')
+          if [ "$lab" != "$INPUTS" ]; then
+            echo "::error::метка входов «$lab» не равна отпечатку «$INPUTS»"
             exit 1
           fi
-          echo "revision=$got"
-          docker inspect --format '{{json .Config.Labels}}' "$IMAGE_REF:$IMAGE_TAG"
+          if [ "$REUSED" = 1 ]; then
+            if [ "$INPUTS" = unsure ] || [ "$rev" != "$FROM_SHA" ]; then
+              echo "::error::переиспользование без отпечатка или ревизия «$rev» ≠ «$FROM_SHA»"
+              exit 1
+            fi
+            echo "образ коммита $rev, входы совпадают с ${{ github.sha }} ($INPUTS)"
+          elif [ "$rev" != "$IMAGE_TAG" ]; then
+            echo "::error::метка ревизии «$rev» не равна коммиту «$IMAGE_TAG» — из чего собран образ, ответить нечем"
+            exit 1
+          else
+            echo "revision=$rev"
+          fi
 
-      - name: Публикация
-        run: docker push "$IMAGE_REF:$IMAGE_TAG"
-
-      - name: Итог
+      - name: Публикация (тег-хеш на проверенный digest)
         run: |
           set -euo pipefail
-          digest=$(docker buildx imagetools inspect "$IMAGE_REF:$IMAGE_TAG" --format '{{.Manifest.Digest}}')
+          extra=()
+          [ "$INPUTS" = unsure ] || extra=(-t "$IMAGE_REF:inputs-$INPUTS")
+          docker buildx imagetools create -t "$IMAGE_REF:$IMAGE_TAG" "${extra[@]}" "$IMAGE_REF@$DIGEST"
+          got=$(docker buildx imagetools inspect "$IMAGE_REF:$IMAGE_TAG" --format '{{.Manifest.Digest}}')
+          if [ "$got" != "$DIGEST" ]; then
+            echo "::error::после публикации $IMAGE_TAG указывает на $got, а ожидался $DIGEST"
+            exit 1
+          fi
           {
             echo "### ${{ matrix.image }}"
             echo ""
@@ -239,9 +430,10 @@ jobs:
             echo "| --- | --- |"
             echo "| образ | \`$IMAGE_REF\` |"
             echo "| тег (неизменяемый) | \`$IMAGE_TAG\` |"
-            echo "| digest | \`$digest\` |"
+            echo "| digest | \`$DIGEST\` |"
+            if [ "$REUSED" = 1 ]; then echo "| собран из | \`$FROM_SHA\` (входы те же) |"; fi
             echo ""
-            echo "Скачать: \`docker pull $IMAGE_REF@$digest\`"
+            echo "Скачать: \`docker pull $IMAGE_REF@$DIGEST\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   pull:
@@ -254,11 +446,16 @@ jobs:
       matrix:
         image: [broker-terminal-gateway, broker-terminal-web]
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-${{ matrix.image }}
+
       - name: Имя образа
         run: |
           owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "IMAGE_REF=ghcr.io/${owner}/${{ matrix.image }}" >> "$GITHUB_ENV"
           echo "IMAGE_TAG=${{ github.sha }}" >> "$GITHUB_ENV"
+          echo "FROM_SHA=$(python3 -c "import json; print(json.load(open('${{ matrix.image }}.json'))['from'])")" >> "$GITHUB_ENV"
 
       - name: Видимость пакета — анонимная попытка
         run: |
@@ -285,8 +482,12 @@ jobs:
           set -euo pipefail
           docker pull "$IMAGE_REF:$IMAGE_TAG"
           got=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_REF:$IMAGE_TAG")
-          if [ "$got" != "$IMAGE_TAG" ]; then
-            echo "::error::скачанный образ собран из «$got», а запрашивали «$IMAGE_TAG»"
+          if [ "$got" != "$FROM_SHA" ]; then
+            echo "::error::скачанный образ собран из «$got», а ожидался «$FROM_SHA»"
             exit 1
           fi
-          echo "скачан $IMAGE_REF:$IMAGE_TAG, ревизия сходится"
+          if [ "$got" = "$IMAGE_TAG" ]; then
+            echo "скачан $IMAGE_REF:$IMAGE_TAG, ревизия сходится"
+          else
+            echo "скачан $IMAGE_REF:$IMAGE_TAG — образ коммита $got с теми же входами"
+          fi
