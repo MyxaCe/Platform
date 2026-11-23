@@ -1353,6 +1353,8 @@ document.querySelectorAll('#indMenu [data-ov]').forEach((x) => x.classList.toggl
 document.getElementById('themeToggle')?.addEventListener('click', () => window.Theming.toggleTheme());
 window.Theming.init();
 window.Sso.init().onChange(() => { pollAccount(); renderSsoUi(); });
+// Экскурсия по терминалу: тексты присылает кабинет; без него — ничего не меняется.
+window.Tour.init(window.TERMINAL_CONFIG || {});
 renderSsoUi();
 setInterval(renderSsoUi, 1000);
 showStorageMode();
