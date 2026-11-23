@@ -248,6 +248,7 @@
       'wl.instr': 'Pair',
       'wl.change': 'Change',
       'wl.cat.all': 'All',
+      'wl.cats': 'Instrument categories',
       'wl.cat.crypto': 'Crypto',
       'wl.cat.forex': 'Forex',
       'wl.cat.metals': 'Metals',
@@ -522,12 +523,13 @@
       'wl.instr': 'Пара',
       'wl.change': 'Изм.',
       'wl.cat.all': 'Все',
+      'wl.cats': 'Категории инструментов',
       'wl.cat.crypto': 'Крипто',
       'wl.cat.forex': 'Форекс',
       'wl.cat.metals': 'Металлы',
       'wl.cat.indices': 'Индексы',
       'wl.cat.stocks': 'Акции',
-      'wl.cat.energy': 'Энергоносители',
+      'wl.cat.energy': 'Энергия',
       'wl.sell': 'Продажа',
       'wl.buy': 'Покупка',
       'wl.spread': 'Спред',
@@ -796,6 +798,7 @@
       'wl.instr': 'Paar',
       'wl.change': 'Änd.',
       'wl.cat.all': 'Alle',
+      'wl.cats': 'Instrumentkategorien',
       'wl.cat.crypto': 'Krypto',
       'wl.cat.forex': 'Forex',
       'wl.cat.metals': 'Metalle',
@@ -1070,6 +1073,7 @@
       'wl.instr': 'Paire',
       'wl.change': 'Var.',
       'wl.cat.all': 'Tous',
+      'wl.cats': 'Catégories d’instruments',
       'wl.cat.crypto': 'Crypto',
       'wl.cat.forex': 'Forex',
       'wl.cat.metals': 'Métaux',
@@ -1344,6 +1348,7 @@
       'wl.instr': 'Par',
       'wl.change': 'Var.',
       'wl.cat.all': 'Todos',
+      'wl.cats': 'Categorías de instrumentos',
       'wl.cat.crypto': 'Cripto',
       'wl.cat.forex': 'Forex',
       'wl.cat.metals': 'Metales',
@@ -1598,6 +1603,7 @@
     r.querySelectorAll('[data-i18n-title]').forEach((el) => { /** @type {HTMLElement} */ (el).title = t(/** @type {HTMLElement} */ (el).dataset.i18nTitle); });
     r.querySelectorAll('[data-i18n-tip]').forEach((el) => { /** @type {HTMLElement} */ (el).dataset.tip = t(/** @type {HTMLElement} */ (el).dataset.i18nTip); });
     r.querySelectorAll('[data-i18n-ph]').forEach((el) => { /** @type {HTMLInputElement} */ (el).placeholder = t(/** @type {HTMLElement} */ (el).dataset.i18nPh); });
+    r.querySelectorAll('[data-i18n-aria]').forEach((el) => { el.setAttribute('aria-label', t(/** @type {HTMLElement} */ (el).dataset.i18nAria)); });
     if (typeof document !== 'undefined' && document.documentElement) document.documentElement.lang = lang;
   }
 

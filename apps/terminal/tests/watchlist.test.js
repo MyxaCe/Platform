@@ -289,3 +289,41 @@ test('категории: внутри категории порядок ист�
   ] });
   assert.deepEqual(visibleIds(env), [7, 1, 33, 31, 32]);
 });
+
+test('категории: у вкладки счётчик инструментов, вкладки переносятся, а не прячутся за край', async (t) => {
+  const env = await mounted(t);
+  env.setData(mixed());
+  await env.wl.refresh();
+  const counts = [...env.root.querySelectorAll('.wl-cat')].map((b) => `${/** @type {HTMLElement} */ (b).dataset.cat}:${b.querySelector('.wl-cat__n')?.textContent}`);
+  assert.deepEqual(counts, ['all:5', 'crypto:2', 'forex:1', 'metals:1', 'stocks:1']);
+  const css = env.window.document.getElementById('watchlist-css')?.textContent || '';
+  const rule = (css.match(/\.watch__cats \{[^}]*\}/) || [''])[0];
+  assert.match(rule, /flex-wrap: wrap/, 'вкладки переносятся на вторую строку');
+  assert.doesNotMatch(rule, /overflow-x/, 'нет горизонтальной прокрутки, где последняя вкладка обрезана');
+  assert.doesNotMatch(css, /:has\(/, 'без :has() — Chrome 104');
+  env.setData([...mixed(), { id: 41, symbol: 'TSLA', category: 'stocks', price_decimals: 2, change: null, bid: 1, ask: 2, high: null }]);
+  await env.wl.refresh();
+  assert.equal(env.root.querySelector('.wl-cat[data-cat="stocks"] .wl-cat__n')?.textContent, '2', 'счётчик обновляется с новым списком');
+});
+
+test('категории: вкладки доступны с клавиатуры (role=tab, стрелки, Home/End)', async (t) => {
+  const env = await mounted(t, { fetch: async () => mixed() });
+  const list = /** @type {HTMLElement} */ (env.root.querySelector('.watch__cats'));
+  assert.equal(list.getAttribute('role'), 'tablist');
+  assert.ok(list.getAttribute('aria-label'));
+  const key = (k) => list.dispatchEvent(new /** @type {any} */ (env.window).KeyboardEvent('keydown', { key: k, bubbles: true }));
+  key('ArrowRight');
+  assert.equal(env.wl.category(), 'crypto');
+  const on = /** @type {HTMLElement} */ (env.root.querySelector('.wl-cat.on'));
+  assert.equal(on.getAttribute('aria-selected'), 'true');
+  assert.equal(on.getAttribute('tabindex'), '0');
+  key('End');
+  assert.equal(env.wl.category(), 'stocks');
+  key('ArrowRight');
+  assert.equal(env.wl.category(), 'all', 'по кругу');
+  key('ArrowLeft');
+  assert.equal(env.wl.category(), 'stocks');
+  key('Home');
+  assert.equal(env.wl.category(), 'all');
+  assert.deepEqual(visibleIds(env), [1, 2, 31, 32, 40]);
+});

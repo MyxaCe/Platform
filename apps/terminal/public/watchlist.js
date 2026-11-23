@@ -49,12 +49,15 @@
 .wl-mk { flex: 0 0 auto; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9.5px; font-weight: 500; line-height: 1;
   padding: 2px 4px; border-radius: 3px; color: var(--muted,#6b7688); border: 1px solid var(--border,#1f2735); }
 .wl-mk--closed, .wl-mk--halted { color: var(--down,#ef5350); border-color: currentColor; }
-.watch__cats { display: flex; gap: 4px; padding: 0 8px 6px; overflow-x: auto; scrollbar-width: none; flex: 0 0 auto; }
-.watch__cats::-webkit-scrollbar { display: none; }
+/* Вкладки категорий переносятся на вторую строку, а не уезжают за край узкой
+   панели: при ~230 инструментах скрытая вкладка = недоступная категория. */
+.watch__cats { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 8px 6px; flex: 0 0 auto; }
 .watch__cats[hidden] { display: none; }
-.wl-cat { flex: 0 0 auto; background: transparent; border: 1px solid var(--border,#1f2735); color: var(--muted,#6b7688); border-radius: 5px;
-  padding: 4px 9px; font: inherit; font-size: 11px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.wl-cat { flex: 0 0 auto; display: inline-flex; align-items: baseline; gap: 4px; background: transparent; border: 1px solid var(--border,#1f2735);
+  color: var(--muted,#6b7688); border-radius: 5px; padding: 3px 7px; font: inherit; font-size: 11px; font-weight: 600; line-height: 1.3; cursor: pointer; white-space: nowrap; }
+.wl-cat__n { font-size: 10px; font-weight: 500; opacity: .75; font-variant-numeric: tabular-nums; }
 .wl-cat:hover { color: var(--text,#d7dce5); }
+.wl-cat:focus-visible { outline: 2px solid var(--brand,#f0b90b); outline-offset: 1px; }
 .wl-cat.on { color: var(--text,#d7dce5); background: var(--panel2,#151a25); border-color: var(--brand,#f0b90b); }
 `;
   if (!document.getElementById('watchlist-css')) {
@@ -145,7 +148,7 @@
 
     root.innerHTML =
       `<div class="watch__search"><input class="wl-search" placeholder="${t('wl.search', 'Search…')}" data-i18n-ph="wl.search" /></div>` +
-      `<div class="watch__cats" hidden></div>` +
+      `<div class="watch__cats" role="tablist" aria-label="${t('wl.cats', 'Categories')}" data-i18n-aria="wl.cats" hidden></div>` +
       (cfg.title === '' ? '' : `<div class="watch__title">${cfg.title || '⭐ POPULAR'}</div>`) +
       `<div class="watch__head"><span></span><span data-i18n="wl.instr">${t('wl.instr', 'INSTR.')}</span>` +
       COLS.map((c) => { const k = c.i18n || `wl.${c.key}`; return `<span class="sortable c-${c.key}" data-sort="${c.key}"><span data-i18n="${k}">${t(k, c.label)}</span><i></i></span>`; }).join('') +
@@ -198,19 +201,32 @@
     }
 
     function renderCats() {
-      const present = [...new Set(Object.values(meta).map(catOf))].sort((a, b) => catRank(a) - catRank(b));
-      const sig = present.length > 1 ? present.join(',') : '';
+      /** @type {Record<string, number>} */
+      const counts = {};
+      Object.values(meta).forEach((it) => { const c = catOf(it); counts[c] = (counts[c] || 0) + 1; });
+      const present = Object.keys(counts).sort((a, b) => catRank(a) - catRank(b));
+      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      const sig = present.length > 1 ? present.map((k) => `${k}:${counts[k]}`).join(',') : '';
       if (sig && cat !== 'all' && !present.includes(cat)) cat = 'all';
       if (sig === catsShown) {
-        catsEl.querySelectorAll('.wl-cat').forEach((b) => b.classList.toggle('on', /** @type {HTMLElement} */ (b).dataset.cat === cat));
+        catsEl.querySelectorAll('.wl-cat').forEach((b) => {
+          const on = /** @type {HTMLElement} */ (b).dataset.cat === cat;
+          b.classList.toggle('on', on);
+          b.setAttribute('aria-selected', String(on));
+          b.setAttribute('tabindex', on ? '0' : '-1');
+        });
         return;
       }
       catsShown = sig;
       catsEl.hidden = !sig;
       if (!sig) { catsEl.innerHTML = ''; return; }
       const label = (/** @type {string} */ k) => { const c = CATS.find((x) => x.key === k); return t(`wl.cat.${k}`, c ? c.label : k); };
-      catsEl.innerHTML = ['all', ...present].map((k) =>
-        `<button type="button" class="wl-cat${k === cat ? ' on' : ''}" data-cat="${k}" data-i18n="wl.cat.${k}">${k === 'all' ? t('wl.cat.all', 'All') : label(k)}</button>`).join('');
+      catsEl.innerHTML = ['all', ...present].map((k) => {
+        const on = k === cat;
+        const n = k === 'all' ? total : counts[k];
+        return `<button type="button" role="tab" class="wl-cat${on ? ' on' : ''}" data-cat="${k}" aria-selected="${on}" tabindex="${on ? 0 : -1}">` +
+          `<span data-i18n="wl.cat.${k}">${k === 'all' ? t('wl.cat.all', 'All') : label(k)}</span><span class="wl-cat__n">${n}</span></button>`;
+      }).join('');
     }
 
     /** @param {string} next */
@@ -336,11 +352,24 @@
       const b = e.target.closest('.wl-cat');
       if (b) setCat(b.dataset.cat);
     };
+    /** Стрелки, Home и End переключают вкладку категории с клавиатуры. */
+    const onCatKey = (e) => {
+      const tabs = /** @type {HTMLElement[]} */ ([...catsEl.querySelectorAll('.wl-cat')]);
+      const i = tabs.findIndex((b) => b.dataset.cat === cat);
+      if (i < 0) return;
+      const next = { ArrowRight: i + 1, ArrowDown: i + 1, ArrowLeft: i - 1, ArrowUp: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+      if (next === undefined) return;
+      e.preventDefault();
+      const target = tabs[(next + tabs.length) % tabs.length];
+      setCat(String(target.dataset.cat));
+      /** @type {HTMLElement | null} */ (catsEl.querySelector(`.wl-cat[data-cat="${target.dataset.cat}"]`))?.focus();
+    };
 
     rowsEl.addEventListener('click', onRowsClick);
     headEl.addEventListener('click', onHeadClick);
     searchEl.addEventListener('input', onSearch);
     catsEl.addEventListener('click', onCatClick);
+    catsEl.addEventListener('keydown', onCatKey);
 
     applyCols();
     refresh();
@@ -364,6 +393,7 @@
         headEl.removeEventListener('click', onHeadClick);
         searchEl.removeEventListener('input', onSearch);
         catsEl.removeEventListener('click', onCatClick);
+        catsEl.removeEventListener('keydown', onCatKey);
         root.innerHTML = '';
       },
     };
