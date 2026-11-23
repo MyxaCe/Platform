@@ -30,6 +30,7 @@ interface Window {
   Drawings?: any;
   Series?: any;
   LiveBars?: any;
+  Tour?: any;
   LightweightCharts?: any;
   __got?: any[];
   __send?: (m: any) => void;
@@ -55,4 +56,5 @@ declare const Trades: any;
 declare const Drawings: any;
 declare const Series: any;
 declare const LiveBars: any;
+declare const Tour: any;
 declare const LightweightCharts: any;
