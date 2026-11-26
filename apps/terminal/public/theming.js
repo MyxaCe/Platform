@@ -60,6 +60,11 @@
     return typeof v === 'string' && v.trim() !== '' ? v : null;
   }
 
+  // Как показывать бренд в шапке (CMS): логотип и название / только логотип (wordmark) / только название.
+  function readLogoMode(v) {
+    return v === 'logo' || v === 'name' ? v : 'logo-name';
+  }
+
   function normalizeBrand(raw) {
     if (!raw || typeof raw !== 'object') return null;
 
@@ -77,6 +82,7 @@
       logoLight: readImage(v2 ? src.logoLight : src.logo),
       logoDark: v2 ? readImage(src.logoDark) : null,
       favicon: readImage(src.favicon),
+      logoMode: readLogoMode(src.logoMode),
     };
 
     if (!brand.name && !brand.primaryColor && !brand.logoLight && !brand.favicon) {
@@ -101,22 +107,41 @@
   let applied = null;
 
   function renderMark(brand) {
-    const mark = document.querySelector('.logo__mark');
+    const mark = /** @type {HTMLElement|null} */ (document.querySelector('.logo__mark'));
+    const nameEl = /** @type {HTMLElement|null} */ (document.getElementById('brandName'));
     if (!mark) return;
 
-    const logo = pickLogo(brand);
+    const logo = brand.logoMode === 'name' ? null : pickLogo(brand);
+    const wordmark = brand.logoMode === 'logo' && !!logo;
+    mark.classList.toggle('logo__mark--wordmark', wordmark);
+    // Название текстом прячем только когда логотип уже содержит его (wordmark).
+    if (nameEl) nameEl.hidden = wordmark;
+
     if (logo) {
+      mark.hidden = false;
       const cur = mark.querySelector('img');
       if (cur && cur.getAttribute('src') === logo.url) return;
       mark.innerHTML = '';
       const img = document.createElement('img');
       img.src = logo.url;
-      img.alt = logo.alt || brand.name || '';
+      img.alt = wordmark ? (brand.name || logo.alt || '') : (logo.alt || brand.name || '');
       mark.appendChild(img);
       return;
     }
 
-    if (brand.name) mark.textContent = brand.name.trim().charAt(0).toUpperCase();
+    // Без логотипа: буква-заглушка только в режиме «логотип и название»; иначе только текст.
+    if (brand.logoMode === 'logo-name' && brand.name) {
+      mark.hidden = false;
+      mark.textContent = brand.name.trim().charAt(0).toUpperCase();
+    } else {
+      mark.hidden = true;
+      mark.textContent = '';
+    }
+  }
+
+  function documentTitle(name) {
+    const I = /** @type {any} */ (window).I18n;
+    return I && typeof I.t === 'function' ? I.t('doc.title', { brand: name }) : name + ' — Terminal';
   }
 
   function applyBrand(raw) {
@@ -135,8 +160,12 @@
 
     if (brand.name) {
       const brandEl = document.getElementById('brandName');
-      if (brandEl) brandEl.textContent = brand.name;
-      document.title = brand.name + ' · Terminal';
+      if (brandEl) {
+        brandEl.textContent = brand.name;
+        // Название бренда больше не перезаписывается переводом «Терминал».
+        brandEl.removeAttribute('data-i18n');
+      }
+      document.title = documentTitle(brand.name);
     }
 
     applied = brand;

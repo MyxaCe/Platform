@@ -57,7 +57,7 @@ test('v2: имя берётся из site.name, логотип из logoLight', 
   assert.equal(window.Theming.applyBrand(v2()), true);
 
   assert.equal(document.getElementById('brandName').textContent, 'Apex');
-  assert.equal(document.title, 'Apex · Terminal');
+  assert.equal(document.title, 'Apex — Terminal');
   assert.equal(markSrc(document), 'https://media/apex-dark.svg');
 });
 
@@ -301,4 +301,39 @@ test('мутация «убрали проверку typeof raw» непокра
 
 test('мутация «ответ v2 не запрашивается по новому адресу» здесь непрогоняема', () => {
   assert.ok(true);
+});
+
+test('режим «только логотип» (wordmark): название текстом скрыто, alt — название бренда', (t) => {
+  const { window, document, cleanup } = setup();
+  t.after(cleanup);
+
+  window.Theming.applyBrand(legacy({ name: 'Ostrix', logo: img('https://media/wordmark.svg', ''), logoMode: 'logo' }));
+
+  const mark = document.querySelector('.logo__mark');
+  assert.equal(mark.classList.contains('logo__mark--wordmark'), true);
+  assert.equal(document.getElementById('brandName').hidden, true);
+  assert.equal(mark.querySelector('img').getAttribute('alt'), 'Ostrix');
+});
+
+test('режим «только название»: логотип не показывается даже если загружен', (t) => {
+  const { window, document, cleanup } = setup();
+  t.after(cleanup);
+
+  window.Theming.applyBrand(legacy({ name: 'Ostrix', logo: img('https://media/logo.svg', 'O'), logoMode: 'name' }));
+
+  assert.equal(/** @type {HTMLElement} */ (document.querySelector('.logo__mark')).hidden, true);
+  assert.equal(document.querySelector('.logo__mark img'), null);
+  assert.equal(document.getElementById('brandName').hidden, false);
+  assert.equal(document.getElementById('brandName').textContent, 'Ostrix');
+});
+
+test('старая CMS без logoMode: логотип и название, как раньше; заголовок вкладки — «бренд — терминал»', (t) => {
+  const { window, document, cleanup } = setup();
+  t.after(cleanup);
+
+  window.Theming.applyBrand(legacy({ name: 'Ostrix', logo: img('https://media/logo.svg', 'O') }));
+
+  assert.equal(document.querySelector('.logo__mark img').getAttribute('src'), 'https://media/logo.svg');
+  assert.equal(document.getElementById('brandName').hidden, false);
+  assert.equal(document.title, 'Ostrix — Terminal');
 });
