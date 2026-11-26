@@ -131,7 +131,7 @@
 .tour__card { position: fixed; width: ${CARD_W}px; max-width: calc(100vw - 24px); background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; box-shadow: 0 10px 30px rgba(0,0,0,.4); outline: none; }
 .tour__card--sheet { left: 0; right: 0; bottom: 0; width: auto; max-width: none; border-radius: 14px 14px 0 0; padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
 .tour__count { font-size: 11px; color: var(--muted); }
-.tour__title { margin: 4px 0 0; font-size: 15px; font-weight: 600; }
+.tour__title { margin: 4px 0 0; font-size: 15px; font-weight: 600; color: var(--text); }
 .tour__body { margin: 6px 0 0; font-size: 13px; line-height: 1.5; color: var(--muted); white-space: pre-line; }
 .tour__btns { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
 .tour__btns button { min-height: 36px; border-radius: 8px; padding: 0 12px; font-size: 13px; cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text); }
