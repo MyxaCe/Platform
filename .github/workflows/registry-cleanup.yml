@@ -1,0 +1,70 @@
+name: Чистка реестра
+
+# ТД-018. Раз в неделю чистит пакеты ghcr.io этого репозитория: кеши веток, образы без тегов,
+# одиночные теги inputs-*. Теги-хеши коммитов (то, что выкатывается и откатывается) не трогаются
+# никогда, всё моложе 30 дней — тоже. Скрипт: .github/registry-cleanup.py.
+#
+# Удаление включается только так:
+#   * по расписанию — если в переменных репозитория REGISTRY_CLEANUP_ENABLED=1;
+#   * вручную — Run workflow с dry_run = false.
+# Во всех остальных случаях (push в ветку registry-cleanup, ручной запуск по умолчанию,
+# расписание без переменной, любая ветка кроме основной) — только сухой прогон с отчётом.
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Сухой прогон (ничего не удалять)'
+        type: boolean
+        default: true
+  push:
+    branches: [registry-cleanup]
+    paths:
+      - .github/workflows/registry-cleanup.yml
+      - .github/registry-cleanup.py
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: registry-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Чистка ghcr.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: .github
+      - name: Режим
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_DRY: ${{ inputs.dry_run }}
+          ENABLED: ${{ vars.REGISTRY_CLEANUP_ENABLED }}
+          REF_NAME: ${{ github.ref_name }}
+          # у события schedule нет github.event.repository — основная ветка задана явно
+          DEFAULT_BRANCH: master
+        run: |
+          dry=1
+          if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            if [ "$EVENT" = schedule ] && [ "$ENABLED" = 1 ]; then dry=0; fi
+            if [ "$EVENT" = workflow_dispatch ] && [ "$INPUT_DRY" = false ]; then dry=0; fi
+          fi
+          echo "dry=$dry" >> "$GITHUB_OUTPUT"
+          echo "событие=$EVENT ветка=$REF_NAME сухой_прогон=$dry"
+      - name: Чистка
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_OWNER: ${{ github.repository_owner }}
+          PACKAGE_OWNER_TYPE: ${{ github.event.repository.owner.type || 'User' }}
+          DRY_RUN: ${{ steps.mode.outputs.dry }}
+          PACKAGES: >-
+            broker-terminal-gateway broker-terminal-gateway-cache broker-terminal-web broker-terminal-web-cache
+        run: python3 .github/registry-cleanup.py
